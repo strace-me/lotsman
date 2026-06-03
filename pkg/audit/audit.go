@@ -6,6 +6,7 @@ package audit
 
 import (
 	"encoding/json"
+	"log/slog"
 	"os"
 	"sync"
 	"time"
@@ -35,17 +36,22 @@ func (Nop) Record(Transition) {}
 
 // FileRecorder appends transitions as JSON lines to a file.
 type FileRecorder struct {
-	mu sync.Mutex
-	f  *os.File
+	mu  sync.Mutex
+	f   *os.File
+	log *slog.Logger
 }
 
-// NewFileRecorder opens (creating/appending) the audit log at path.
-func NewFileRecorder(path string) (*FileRecorder, error) {
+// NewFileRecorder opens (creating/appending) the audit log at path. log may be
+// nil, in which case marshal/write failures are reported via slog.Default.
+func NewFileRecorder(path string, log *slog.Logger) (*FileRecorder, error) {
 	f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
 	if err != nil {
 		return nil, err
 	}
-	return &FileRecorder{f: f}, nil
+	if log == nil {
+		log = slog.Default()
+	}
+	return &FileRecorder{f: f, log: log}, nil
 }
 
 func (r *FileRecorder) Record(t Transition) {
@@ -54,11 +60,14 @@ func (r *FileRecorder) Record(t Transition) {
 	}
 	line, err := json.Marshal(t)
 	if err != nil {
+		r.log.Warn("audit: drop transition, marshal failed", "service", t.Service, "err", err)
 		return
 	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	r.f.Write(append(line, '\n'))
+	if _, err := r.f.Write(append(line, '\n')); err != nil {
+		r.log.Warn("audit: write failed", "service", t.Service, "err", err)
+	}
 }
 
 // Close closes the underlying file.

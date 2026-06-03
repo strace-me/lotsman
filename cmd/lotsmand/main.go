@@ -210,7 +210,7 @@ func main() {
 
 	var rec audit.Recorder = audit.Nop{}
 	if *auditLog != "" {
-		fr, err := audit.NewFileRecorder(*auditLog)
+		fr, err := audit.NewFileRecorder(*auditLog, log)
 		if err != nil {
 			log.Error("audit log open failed", "path", *auditLog, "err", err)
 			os.Exit(1)

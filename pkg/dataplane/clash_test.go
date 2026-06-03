@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 )
 
 func TestClashSetSelectorAndEnsurePool(t *testing.T) {
@@ -42,6 +43,23 @@ func TestClashSetSelectorAndEnsurePool(t *testing.T) {
 	}
 	if gotPath != "/proxies/vpn-pool" || gotName != "vpn_url_test" {
 		t.Errorf("selector PUT path=%q name=%q", gotPath, gotName)
+	}
+}
+
+func TestClashNodeDelayMalformedJSON(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		io.WriteString(w, `{"delay": not-json`) // truncated/invalid body
+	}))
+	defer srv.Close()
+
+	c := NewClashClient(srv.URL, "")
+	d, err := c.NodeDelay(context.Background(), "node-1", "http://x", time.Second)
+	if err == nil {
+		t.Fatalf("NodeDelay should error on malformed JSON, got delay=%d", d)
+	}
+	if d != 0 {
+		t.Errorf("delay = %d on error, want 0", d)
 	}
 }
 
