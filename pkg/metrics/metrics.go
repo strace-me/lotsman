@@ -14,12 +14,14 @@ import (
 	"sync"
 
 	"github.com/strace-me/lotsman/pkg/brain"
+	"github.com/strace-me/lotsman/pkg/observe"
 )
 
 // Collector gathers metrics and serves them.
 type Collector struct {
-	brainSnap func() []brain.ServiceState
-	kbSnap    func() map[string]float64
+	brainSnap   func() []brain.ServiceState
+	kbSnap      func() map[string]float64
+	observeSnap func() observe.Snapshot // optional; nil = observe eye disabled
 
 	mu        sync.Mutex
 	probeOK   map[string]int
@@ -33,6 +35,11 @@ func New(brainSnap func() []brain.ServiceState, kbSnap func() map[string]float64
 		probeOK: map[string]int{}, probeFail: map[string]int{},
 	}
 }
+
+// SetObserveSnapshot wires the passive-observation eye's latest snapshot
+// (LOT-15). The function should return the most recent Snapshot; metrics reads
+// it at scrape time. No-op effect until set.
+func (c *Collector) SetObserveSnapshot(fn func() observe.Snapshot) { c.observeSnap = fn }
 
 // ObserveProbe records a probe outcome. Implements probing.ProbeObserver.
 func (c *Collector) ObserveProbe(service string, ok bool, _ int) {
@@ -99,6 +106,39 @@ func (c *Collector) ServeHTTP(w http.ResponseWriter, _ *http.Request) {
 		svc, strat, _ := strings.Cut(k, "|")
 		fmt.Fprintf(&b, "lotsman_strategy_ewma{service=%q,strategy=%q} %s\n",
 			svc, strat, strconv.FormatFloat(snap[k], 'f', 4, 64))
+	}
+
+	if c.observeSnap != nil {
+		osnap := c.observeSnap()
+		svcs := make([]string, 0, len(osnap.Services))
+		for s := range osnap.Services {
+			svcs = append(svcs, s)
+		}
+		sort.Strings(svcs)
+
+		b.WriteString("# HELP lotsman_service_leak_ratio Fraction of a service's live flows that went direct while it should have been tunnelled.\n")
+		b.WriteString("# TYPE lotsman_service_leak_ratio gauge\n")
+		for _, s := range svcs {
+			fmt.Fprintf(&b, "lotsman_service_leak_ratio{service=%q} %s\n", s, strconv.FormatFloat(osnap.Services[s].LeakRatio, 'f', 4, 64))
+		}
+
+		b.WriteString("# HELP lotsman_service_dead_flow_ratio Fraction of a service's matched UDP/QUIC flows that are stalled (~0 download).\n")
+		b.WriteString("# TYPE lotsman_service_dead_flow_ratio gauge\n")
+		for _, s := range svcs {
+			fmt.Fprintf(&b, "lotsman_service_dead_flow_ratio{service=%q} %s\n", s, strconv.FormatFloat(osnap.Services[s].DeadFlowRatio, 'f', 4, 64))
+		}
+
+		b.WriteString("# HELP lotsman_service_flows Live connections matched to a service in the last observe pass.\n")
+		b.WriteString("# TYPE lotsman_service_flows gauge\n")
+		for _, s := range svcs {
+			fmt.Fprintf(&b, "lotsman_service_flows{service=%q} %d\n", s, osnap.Services[s].Flows)
+		}
+
+		b.WriteString("# HELP lotsman_service_bytes Total upload+download bytes across a service's live flows.\n")
+		b.WriteString("# TYPE lotsman_service_bytes gauge\n")
+		for _, s := range svcs {
+			fmt.Fprintf(&b, "lotsman_service_bytes{service=%q} %d\n", s, osnap.Services[s].Bytes)
+		}
 	}
 
 	w.Header().Set("Content-Type", "text/plain; version=0.0.4")
