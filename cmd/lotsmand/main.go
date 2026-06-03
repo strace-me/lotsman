@@ -42,6 +42,7 @@ import (
 	"github.com/strace-me/lotsman/pkg/executor"
 	"github.com/strace-me/lotsman/pkg/faillog"
 	"github.com/strace-me/lotsman/pkg/flowseal"
+	"github.com/strace-me/lotsman/pkg/iplearn"
 	"github.com/strace-me/lotsman/pkg/kb"
 	"github.com/strace-me/lotsman/pkg/metrics"
 	"github.com/strace-me/lotsman/pkg/misroute"
@@ -51,6 +52,7 @@ import (
 	"github.com/strace-me/lotsman/pkg/probing"
 	"github.com/strace-me/lotsman/pkg/reconcile"
 	"github.com/strace-me/lotsman/pkg/registry"
+	"github.com/strace-me/lotsman/pkg/remediate"
 	"github.com/strace-me/lotsman/pkg/rulesets"
 	"github.com/strace-me/lotsman/pkg/singbox"
 	"github.com/strace-me/lotsman/pkg/state"
@@ -403,15 +405,46 @@ func main() {
 			defer eyeMu.Unlock()
 			return verdicts
 		})
+		// Remediation planner (LOT-18a): on each misroute verdict propose a
+		// remediation rung. PROPOSE-ONLY — it logs and publishes a metric; it does
+		// NOT call the generator with the plan, trigger reconcile, or touch the live
+		// config (auto-apply + canary/rollback is LOT-18b). The Learner is the
+		// IP-fallback CIDR source; empty for now, so a leak proposes reject-quic
+		// until CIDRs are learned. The same learner instance is observed/snapshotted
+		// over time once iplearn wiring lands.
+		learner := iplearn.NewLearner()
+		var plans []remediate.Plan
+		mc.SetRemediationSnapshot(func() []remediate.Plan {
+			eyeMu.Lock()
+			defer eyeMu.Unlock()
+			return plans
+		})
 		pr.Add(periodic.Task{Name: "observe", Interval: *checkInterval, Fn: func(c context.Context) error {
 			snap, err := eye.Observe(c)
 			if err != nil {
 				return err
 			}
 			vs := misroute.Detect(snap, misrouteCfg)
+			// Propose a remediation per misrouted service (PROPOSE-ONLY). CIDRs come
+			// from the learner snapshot; nothing here applies anything.
+			misrouted := make([]string, 0, len(vs))
+			for _, v := range vs {
+				if v.Misrouted {
+					misrouted = append(misrouted, v.Service)
+				}
+			}
+			in := remediate.InputsFromLearner(learner, misrouted)
+			ps := make([]remediate.Plan, 0, len(misrouted))
+			for _, v := range vs {
+				if !v.Misrouted {
+					continue
+				}
+				ps = append(ps, remediate.Decide(v, in))
+			}
 			eyeMu.Lock()
 			eyeSnap = snap
 			verdicts = vs
+			plans = ps
 			eyeMu.Unlock()
 			for _, name := range sortedServiceNames(snap.Services) {
 				sm := snap.Services[name]
@@ -424,6 +457,10 @@ func main() {
 					log.Warn("misroute detected", "service", v.Service, "kind", v.Kind,
 						"leak_ratio", v.LeakRatio, "dead_ratio", v.DeadFlowRatio, "reason", v.Reason)
 				}
+			}
+			for _, p := range ps {
+				log.Warn("remediation proposed", "service", p.Service, "rung", p.Rung,
+					"action", p.Action, "cidrs", len(p.CIDRs), "reason", p.Reason)
 			}
 			return nil
 		}})
