@@ -59,6 +59,19 @@ func node(t *testing.T) subscription.Node {
 	return ns[0]
 }
 
+// realityNode builds a VLESS+REALITY node with the given server and short_id.
+// short_id is the field the provider rotates on the same node (LOT-1).
+func realityNode(t *testing.T, server, sid string) subscription.Node {
+	t.Helper()
+	url := "vless://11111111-2222-3333-4444-555555555555@" + server +
+		":443?security=reality&flow=xtls-rprx-vision&pbk=PUBKEY&sid=" + sid + "&sni=www.example.com&fp=chrome#n"
+	ns, err := subscription.Parse([]byte(url), subscription.FormatSingleURL, "test")
+	if err != nil || len(ns) != 1 {
+		t.Fatalf("parse reality node: %v", err)
+	}
+	return ns[0]
+}
+
 func testReconciler(t *testing.T, run *fakeRunner, ld fakeLoader, dryRun bool) (*Reconciler, string) {
 	t.Helper()
 	dir := t.TempDir()
@@ -177,6 +190,49 @@ func TestReconcileRollsBackWhenRestartFails(t *testing.T) {
 	got, _ := os.ReadFile(cfgPath)
 	if string(got) != `{"old":true}` {
 		t.Errorf("config must be rolled back to previous on restart failure, got %q", got)
+	}
+}
+
+// LOT-1: the provider rotates REALITY short_id on the same nodes every few
+// minutes. A config that differs ONLY in short_id must be treated as in-sync —
+// no re-apply, no sing-box restart (which would drop all live connections).
+func TestReconcileIgnoresShortIDRotation(t *testing.T) {
+	run := &fakeRunner{}
+	r, _ := testReconciler(t, run, fakeLoader{nodes: []subscription.Node{realityNode(t, "1.2.3.4", "aaaa")}}, false)
+	// First apply establishes the live config on disk (with short_id=aaaa).
+	if err := r.Reconcile(context.Background()); err != nil {
+		t.Fatalf("first reconcile: %v", err)
+	}
+	if !run.ran("restart") {
+		t.Fatalf("first apply should restart, calls=%v", run.calls)
+	}
+	// Provider rotates short_id on the SAME node (same server/uuid/order).
+	r.Loader = fakeLoader{nodes: []subscription.Node{realityNode(t, "1.2.3.4", "bbbb")}}
+	run.calls = nil
+	if err := r.Reconcile(context.Background()); err != nil {
+		t.Fatalf("second reconcile: %v", err)
+	}
+	if len(run.calls) != 0 {
+		t.Errorf("short_id-only churn must be a no-op (no check/restart), calls=%v", run.calls)
+	}
+}
+
+// A real change (different server) must still trigger an apply + restart, so the
+// short_id normalization does not mask genuine node changes.
+func TestReconcileAppliesOnRealChange(t *testing.T) {
+	run := &fakeRunner{}
+	r, _ := testReconciler(t, run, fakeLoader{nodes: []subscription.Node{realityNode(t, "1.2.3.4", "aaaa")}}, false)
+	if err := r.Reconcile(context.Background()); err != nil {
+		t.Fatalf("first reconcile: %v", err)
+	}
+	// New server (same short_id) — a genuine change that must be applied.
+	r.Loader = fakeLoader{nodes: []subscription.Node{realityNode(t, "9.9.9.9", "aaaa")}}
+	run.calls = nil
+	if err := r.Reconcile(context.Background()); err != nil {
+		t.Fatalf("second reconcile: %v", err)
+	}
+	if !run.ran("check") || !run.ran("restart") {
+		t.Errorf("real node change must apply (check+restart), calls=%v", run.calls)
 	}
 }
 
