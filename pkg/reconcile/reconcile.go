@@ -15,6 +15,7 @@ package reconcile
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"log/slog"
 	"os"
@@ -85,7 +86,7 @@ func (r *Reconciler) Reconcile(ctx context.Context) error {
 	}
 
 	live, _ := os.ReadFile(r.ConfigPath)
-	if bytes.Equal(desired, live) {
+	if sameConfig(desired, live) {
 		r.last = desired
 		r.lastNodes = len(nodes)
 		return nil // already in sync
@@ -170,4 +171,60 @@ func (r *Reconciler) restart(ctx context.Context) error {
 		return fmt.Errorf("no restart command configured")
 	}
 	return r.Runner.Run(ctx, r.RestartCmd[0], r.RestartCmd[1:]...)
+}
+
+// volatileKeys are config fields the VPN provider rotates for the same nodes
+// (same servers/uuids/order) without any real change. Comparing them byte-for-
+// byte makes reconcile re-apply + restart sing-box on cosmetic churn (LOT-1).
+// REALITY short_id is rotated by the `acme` provider every few minutes.
+var volatileKeys = map[string]bool{
+	"short_id": true,
+}
+
+// sameConfig reports whether two generated sing-box configs are semantically
+// equal, ignoring volatile fields (see volatileKeys). It normalizes both sides
+// by blanking those fields in the parsed JSON and comparing the canonical forms.
+// If either side cannot be parsed, it falls back to a raw byte comparison so a
+// real change is never silently skipped.
+func sameConfig(desired, live []byte) bool {
+	dn, derr := normalizeConfig(desired)
+	ln, lerr := normalizeConfig(live)
+	if derr != nil || lerr != nil {
+		return bytes.Equal(desired, live)
+	}
+	return bytes.Equal(dn, ln)
+}
+
+// normalizeConfig parses the config and returns a canonical JSON form with every
+// volatile field blanked out, so configs differing only in those fields compare
+// equal. Map-key ordering is canonical because encoding/json sorts object keys.
+func normalizeConfig(b []byte) ([]byte, error) {
+	if len(b) == 0 {
+		return nil, fmt.Errorf("empty config")
+	}
+	var v any
+	if err := json.Unmarshal(b, &v); err != nil {
+		return nil, err
+	}
+	blankVolatile(v)
+	return json.Marshal(v)
+}
+
+// blankVolatile walks the decoded JSON tree and clears any value whose key is in
+// volatileKeys, neutralizing provider-rotated fields before comparison.
+func blankVolatile(v any) {
+	switch t := v.(type) {
+	case map[string]any:
+		for k := range t {
+			if volatileKeys[k] {
+				t[k] = ""
+			} else {
+				blankVolatile(t[k])
+			}
+		}
+	case []any:
+		for _, e := range t {
+			blankVolatile(e)
+		}
+	}
 }
