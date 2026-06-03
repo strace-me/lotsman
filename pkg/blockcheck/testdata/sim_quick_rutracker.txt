@@ -1,0 +1,159 @@
+* checking system
+tpws supports --fix-seg on this system
+Linux/openwrt detected
+kernel: Linux version 6.12.74 (builder@buildhost) (aarch64-openwrt-linux-musl-gcc (OpenWrt GCC 14.3.0 r32802-f505120278) 14.3.0, GNU ld (GNU Binutils) 2.44) #0 SMP Wed Mar 25 20:09:53 2026
+distro: OpenWrt 25.12.2
+openwrt release: OpenWrt 25.12.2 r32802-f505120278
+openwrt board: rockchip/armv8
+openwrt arch: aarch64_generic
+firewall type is nftables
+CURL=curl
+curl 8.19.0 (aarch64-openwrt-linux-gnu) libcurl/8.19.0 mbedTLS/3.6.6 nghttp2/1.66.0
+Release-Date: 2026-03-11
+Protocols: file ftp ftps http https mqtt mqtts
+Features: alt-svc HSTS HTTP2 HTTPS-proxy IPv6 Largefile SSL threadsafe UnixSockets
+* checking already running DPI bypass processes
+!!! WARNING. some dpi bypass processes already running !!!
+!!! WARNING. blockcheck requires all DPI bypass methods disabled !!!
+!!! WARNING. pls stop all dpi bypass instances that may interfere with blockcheck !!!
+* checking privileges
+* checking prerequisites
+* checking DNS
+system DNS is working
+comparing system resolver to public DNS : 8.8.8.8
+pornhub.com : OK
+ej.ru : OK
+rutracker.org : OK
+www.torproject.org : OK
+bbc.com : OK
+checking resolved IP uniqueness for : pornhub.com ej.ru rutracker.org www.torproject.org bbc.com
+censor's DNS can return equal result for multiple blocked domains.
+all resolved IPs are unique
+-- DNS looks good
+-- NOTE this check is Russia targeted. In your country other domains may be blocked.
+* checking virtualization
+cannot detect
+
+NOTE ! this test should be run with zapret or any other bypass software disabled, without VPN
+
+
+installed curl version does not support http3 QUIC. tests disabled.
+
+
+* port block tests ipv4 rutracker.org:80
+suitable netcat not found. busybox nc is not supported. pls install nmap ncat or openbsd netcat.
+
+- IP block tests (requires manual interpretation)
+> testing iana.org on it's original ip
+!!!!! AVAILABLE !!!!!
+> testing rutracker.org on 192.0.43.8 (iana.org)
+curl: (28) Operation timed out after 2002 milliseconds with 0 bytes received
+> testing iana.org on 104.21.32.39 (rutracker.org)
+HTTP/1.1 530 <none>
+> testing iana.org on 172.67.182.196 (rutracker.org)
+HTTP/1.1 530 <none>
+
+- curl_test_http ipv4 rutracker.org : tpws --hostcase
+FAILED
+- curl_test_http ipv4 rutracker.org : tpws --hostspell=hoSt
+FAILED
+- curl_test_http ipv4 rutracker.org : tpws --hostdot
+FAILED
+- curl_test_http ipv4 rutracker.org : tpws --hosttab
+FAILED
+- curl_test_http ipv4 rutracker.org : tpws --hostnospace
+FAILED
+- curl_test_http ipv4 rutracker.org : tpws --domcase
+FAILED
+- curl_test_http ipv4 rutracker.org : tpws --hostpad=1024
+FAILED
+- curl_test_http ipv4 rutracker.org : tpws --hostpad=2048
+SUCCESS
+
+!!!!! curl_test_http: working strategy found for ipv4 rutracker.org : tpws --hostpad=2048 !!!!!
+
+
+preparing nfqws redirection
+- curl_test_http ipv4 rutracker.org : nfqws --hostcase
+SUCCESS
+
+!!!!! curl_test_http: working strategy found for ipv4 rutracker.org : nfqws --hostcase !!!!!
+
+clearing nfqws redirection
+
+* port block tests ipv4 rutracker.org:443
+suitable netcat not found. busybox nc is not supported. pls install nmap ncat or openbsd netcat.
+
+- IP block tests (requires manual interpretation)
+> testing iana.org on it's original ip
+!!!!! AVAILABLE !!!!!
+> testing rutracker.org on 192.0.43.8 (iana.org)
+curl: (28) Connection timed out after 2002 milliseconds
+> testing iana.org on 104.21.32.39 (rutracker.org)
+curl: (35) ssl_handshake returned: (-0x7780) SSL - A fatal alert message was received from our peer
+> testing iana.org on 172.67.182.196 (rutracker.org)
+curl: (35) ssl_handshake returned: (-0x7780) SSL - A fatal alert message was received from our peer
+
+- curl_test_https_tls12 ipv4 rutracker.org : tpws --split-pos=2
+FAILED
+- curl_test_https_tls12 ipv4 rutracker.org : tpws --split-pos=1
+FAILED
+- curl_test_https_tls12 ipv4 rutracker.org : tpws --split-pos=sniext+1
+FAILED
+- curl_test_https_tls12 ipv4 rutracker.org : tpws --split-pos=sniext+4
+FAILED
+- curl_test_https_tls12 ipv4 rutracker.org : tpws --split-pos=host+1
+FAILED
+- curl_test_https_tls12 ipv4 rutracker.org : tpws --split-pos=midsld
+FAILED
+- curl_test_https_tls12 ipv4 rutracker.org : tpws --split-pos=1,midsld --fix-seg
+FAILED
+- curl_test_https_tls12 ipv4 rutracker.org : tpws --split-pos=1,sniext+1,host+1,midsld,endhost-1 --fix-seg
+FAILED
+- curl_test_https_tls12 ipv4 rutracker.org : tpws --split-pos=2 --oob
+FAILED
+- curl_test_https_tls12 ipv4 rutracker.org : tpws --split-pos=1 --oob
+FAILED
+- curl_test_https_tls12 ipv4 rutracker.org : tpws --split-pos=sniext+1 --oob
+FAILED
+- curl_test_https_tls12 ipv4 rutracker.org : tpws --split-pos=sniext+4 --oob
+FAILED
+- curl_test_https_tls12 ipv4 rutracker.org : tpws --split-pos=host+1 --oob
+FAILED
+- curl_test_https_tls12 ipv4 rutracker.org : tpws --split-pos=midsld --oob
+FAILED
+- curl_test_https_tls12 ipv4 rutracker.org : tpws --split-pos=1,midsld --fix-seg --oob
+FAILED
+- curl_test_https_tls12 ipv4 rutracker.org : tpws --split-pos=1,sniext+1,host+1,midsld,endhost-1 --fix-seg --oob
+FAILED
+- curl_test_https_tls12 ipv4 rutracker.org : tpws --split-pos=2 --disorder
+FAILED
+- curl_test_https_tls12 ipv4 rutracker.org : tpws --split-pos=1 --disorder
+FAILED
+- curl_test_https_tls12 ipv4 rutracker.org : tpws --split-pos=sniext+1 --disorder
+SUCCESS
+
+!!!!! curl_test_https_tls12: working strategy found for ipv4 rutracker.org : tpws --split-pos=sniext+1 --disorder !!!!!
+
+
+preparing nfqws redirection
+- curl_test_https_tls12 ipv4 rutracker.org : nfqws --dpi-desync=multisplit --dpi-desync-split-pos=2
+FAILED
+- curl_test_https_tls12 ipv4 rutracker.org : nfqws --dpi-desync=multisplit --dpi-desync-split-pos=1
+SUCCESS
+
+!!!!! curl_test_https_tls12: working strategy found for ipv4 rutracker.org : nfqws --dpi-desync=multisplit --dpi-desync-split-pos=1 !!!!!
+
+clearing nfqws redirection
+
+* SUMMARY
+curl_test_http ipv4 rutracker.org : tpws --hostpad=2048
+curl_test_http ipv4 rutracker.org : nfqws --hostcase
+curl_test_https_tls12 ipv4 rutracker.org : tpws --split-pos=sniext+1 --disorder
+curl_test_https_tls12 ipv4 rutracker.org : nfqws --dpi-desync=multisplit --dpi-desync-split-pos=1
+
+Please note this SUMMARY does not guarantee a magic pill for you to copy/paste and be happy.
+Understanding how strategies work is very desirable.
+This knowledge allows to understand better which strategies to prefer and which to avoid if possible, how to combine strategies.
+Blockcheck does it's best to prioritize good strategies but it's not bullet-proof.
+It was designed not as magic pill maker but as a DPI bypass test tool.

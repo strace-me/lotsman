@@ -1,0 +1,57 @@
+# Example lotsman config. Real deployment lives in /etc/smart-routing/ and is
+# not committed. Subscription URLs here are placeholders — they will fail to
+# fetch (logged as warnings), which is fine for a config-path smoke test.
+
+services:
+  - name: youtube
+    category: streaming
+    probe_target: https://www.youtube.com/generate_204
+    rule_sets: [geosite-youtube]      # sing-box rule-sets routed to youtube's selector
+    chain:
+      - { state: PREFERRED,  class: zapret, strategy_id: alt12 }          # must have <script-dir>/alt12.sh
+      - { state: ALT_ZAPRET, class: zapret }                              # strategy from KB (bounded by the catalog below)
+      - { state: VPN,        class: vpn,    strategy_id: vpn_url_test }
+
+  - name: discord
+    category: messaging
+    probe_target: https://discord.com/api/v9/gateway
+    rule_sets: [geosite-discord]
+    chain:
+      - { state: PREFERRED,  class: zapret, strategy_id: alt12 }
+      - { state: VPN,        class: vpn,    strategy_id: vpn_url_test_udp }
+
+# Strategy catalog. alt11/alt12 are builtin (Flowseal launchers already on disk),
+# so this section is only needed to declare extra strategies or richer metadata.
+# In real mode (-dry-run=false) lotsmand refuses to start if any referenced
+# zapret strategy has no <zapret-script-dir>/<id>.sh launcher.
+strategies:
+  - { id: alt12, class: zapret, block_types: [tcp_reset], notes: "Flowseal ALT12" }
+  - { id: alt11, class: zapret, block_types: [tcp_reset], notes: "Flowseal ALT11" }
+
+subscriptions:
+  - { name: example-main,      url: "https://example.invalid/sub",       format: auto,  tags: [normal],          enabled: true }
+  - { name: example-emergency, url: "https://example.invalid/whitelist", format: clash, tags: [emergency, slow], enabled: true }
+
+pools:
+  vpn_url_test:
+    type: url_test
+    filter: { caps: [tcp], tags_exclude: [emergency] }
+  vpn_url_test_udp:
+    type: url_test
+    filter: { caps: [udp_native], tags_exclude: [emergency] }
+  emergency_pool:
+    type: url_test
+    filter: { tags_include: [emergency] }
+
+# Merged domain lists, rebuilt on the maintenance loop (-check-interval). Each
+# list fetches its sources, drops anything on an exclude source, dedups, and
+# writes the result atomically to `out` (the hostlist nfqws reads). A merge that
+# comes back empty (all mirrors dead) is skipped, never blanking a good file.
+hostlists:
+  - name: blocked
+    out: /opt/zapret-lotsman/lists/blocked.txt
+    sources:
+      - https://example.invalid/antifilter-domains.txt
+      - https://example.invalid/community-list.txt
+    exclude:
+      - https://example.invalid/local-whitelist.txt

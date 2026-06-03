@@ -1,0 +1,220 @@
+// Package executor adapts a strategy class to a concrete data-plane action.
+// One StrategyExecutor per class (zapret, vpn, ...). M0 ships two; the
+// interface is the seam that lets tpws/byedpi/dynamic-nfqws drop in later
+// without touching Brain or Applier (the pluggable-executor pattern).
+package executor
+
+import (
+	"context"
+	"errors"
+	"log/slog"
+	"sync"
+
+	"github.com/strace-me/lotsman/pkg/dataplane"
+	"github.com/strace-me/lotsman/pkg/registry"
+	"github.com/strace-me/lotsman/pkg/strategy"
+)
+
+// StrategyExecutor routes a service's traffic through one mechanism. Enable
+// must be idempotent: calling it twice with the same args is a no-op on the
+// data plane's observable state.
+type StrategyExecutor interface {
+	Class() string
+	Enable(ctx context.Context, service, strategyID string) error
+}
+
+// ScriptSwitcher activates a DPI-bypass strategy by repointing a stable symlink
+// (active.sh) at the requested strategy script and restarting the engine's
+// service. It backs both the nfqws (zapret) and byedpi engines — they differ
+// only in class, script dir, symlink, and init service. The engine process is
+// global (one strategy for all its captured traffic), so this is a GLOBAL
+// switch; the service arg is recorded for logs but does not scope it. The
+// strategy ID names a script in scriptDir (e.g. "alt12" -> <dir>/alt12.sh).
+//
+// This is how self-healing within a bypass engine works: when a strategy stops
+// working (DPI adapted), Brain escalates and the next step picks another
+// strategy, which this executor activates.
+// SelectorSetter points a sing-box selector at a target outbound over the Clash
+// API. *dataplane.ClashClient satisfies it; abstracted so RouteToDirect is
+// testable without HTTP.
+type SelectorSetter interface {
+	SetSelector(ctx context.Context, selector, target string) error
+}
+
+type ScriptSwitcher struct {
+	class       string
+	run         Runner
+	scriptDir   string // dir holding <strategy>.sh
+	activeLink  string // symlink the engine's init runs
+	initService string // init script path to restart, e.g. /etc/init.d/nfqws
+	dryRun      bool
+	log         *slog.Logger
+	route       SelectorSetter // non-nil => also point the service selector at "direct"
+
+	mu      sync.Mutex
+	current string // currently active strategy id (idempotency)
+}
+
+// RouteToDirect makes the switcher also point a service's per-service selector at
+// "direct" on Enable, so the service's traffic flows out direct -> nfqws (where
+// the engine desyncs it). Set this ONLY when the daemon owns a per-service
+// config (the sel-<service> selectors exist); without it the switcher just swaps
+// the global engine strategy and leaves routing alone.
+func (s *ScriptSwitcher) RouteToDirect(sel SelectorSetter) { s.route = sel }
+
+func newSwitcher(class string, run Runner, scriptDir, activeLink, initService string, dryRun bool, log *slog.Logger) *ScriptSwitcher {
+	return &ScriptSwitcher{
+		class: class, run: run, scriptDir: scriptDir, activeLink: activeLink,
+		initService: initService, dryRun: dryRun, log: log,
+	}
+}
+
+// NewZapret builds the nfqws (zapret) strategy switcher.
+func NewZapret(run Runner, scriptDir, activeLink, initService string, dryRun bool, log *slog.Logger) *ScriptSwitcher {
+	return newSwitcher(strategy.ClassZapret, run, scriptDir, activeLink, initService, dryRun, log)
+}
+
+// NewByeDPI builds the byedpi strategy switcher (alternative bypass engine).
+func NewByeDPI(run Runner, scriptDir, activeLink, initService string, dryRun bool, log *slog.Logger) *ScriptSwitcher {
+	return newSwitcher(strategy.ClassByeDPI, run, scriptDir, activeLink, initService, dryRun, log)
+}
+
+func (s *ScriptSwitcher) Class() string { return s.class }
+
+func (s *ScriptSwitcher) Enable(ctx context.Context, service, strategyID string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	// In a per-service config, ensure the service is routed direct -> nfqws every
+	// time (it may be on a VPN pool from a prior chain step). SetSelector is
+	// idempotent, so this is cheap even when already direct. Done before the
+	// strategy-idempotency check so re-entering a zapret step still re-routes.
+	if s.route != nil {
+		selector := registry.SelectorTag(service)
+		if s.dryRun {
+			s.log.Info("dry-run: would route service direct -> nfqws", "service", service, "selector", selector)
+		} else if err := s.route.SetSelector(ctx, selector, "direct"); err != nil {
+			return err
+		}
+	}
+
+	if s.current == strategyID {
+		return nil // already active: idempotent no-op, no restart
+	}
+	script := s.scriptDir + "/" + strategyID + ".sh"
+
+	if s.dryRun {
+		s.log.Info("dry-run: would switch bypass strategy",
+			"engine", s.class, "service", service, "strategy", strategyID, "script", script, "from", s.current)
+		s.current = strategyID
+		return nil
+	}
+
+	if err := s.run.Run(ctx, "ln", "-sfn", script, s.activeLink); err != nil {
+		return err
+	}
+	if err := s.run.Run(ctx, s.initService, "restart"); err != nil {
+		return err
+	}
+	s.log.Info("switched bypass strategy",
+		"engine", s.class, "service", service, "strategy", strategyID, "from", s.current)
+	s.current = strategyID
+	return nil
+}
+
+// VPN routes a service through a VPN pool by pointing the service's sing-box
+// selector at that pool over the Clash API. On the R5S all tproxy traffic
+// already flows through sing-box, so routing is a selector flip, not an nft
+// change. Each service has its own selector (registry.SelectorTag), so services
+// route independently. The strategy ID is the pool to select (e.g. vpn_url_test).
+type VPN struct {
+	clash    *dataplane.ClashClient
+	dryRun   bool
+	log      *slog.Logger
+	bestNode func(service string) string // advisory: ranker's best node for a service ("" = use pool)
+}
+
+// NewVPN builds the vpn executor.
+func NewVPN(clash *dataplane.ClashClient, dryRun bool, log *slog.Logger) *VPN {
+	return &VPN{clash: clash, dryRun: dryRun, log: log}
+}
+
+// WithBestNode wires an advisory best-node lookup (e.g. noderank.Best). When it
+// returns a node for the service, Enable points the selector at that concrete
+// node instead of the pool url-test; an empty result (or a stale node the
+// selector no longer lists) falls back to the pool. The ranker only advises —
+// this executor is the single writer, so a VPN-node choice can never leak into
+// a service Brain has placed on zapret/direct.
+func (v *VPN) WithBestNode(fn func(service string) string) *VPN { v.bestNode = fn; return v }
+
+func (v *VPN) Class() string { return strategy.ClassVPN }
+
+// target is the selector value to set for a VPN step: the ranker's advised node
+// when it has one, else the pool url-test. Pure (no I/O) so it is unit-testable.
+func (v *VPN) target(service, pool string) string {
+	if v.bestNode != nil {
+		if n := v.bestNode(service); n != "" {
+			return n
+		}
+	}
+	return pool
+}
+
+func (v *VPN) Enable(ctx context.Context, service, strategyID string) error {
+	selector := registry.SelectorTag(service)
+	pool := strategyID // VPN strategy IDs name the pool to select
+	target := v.target(service, pool)
+	if v.dryRun {
+		v.log.Info("dry-run: would point selector at vpn target",
+			"service", service, "selector", selector, "pool", pool, "target", target)
+		return nil
+	}
+	if target == pool {
+		if err := v.clash.EnsurePool(ctx, pool); err != nil {
+			return err
+		}
+	}
+	if err := v.clash.SetSelector(ctx, selector, target); err != nil {
+		if target == pool {
+			return err
+		}
+		// Stale node advice (selector no longer lists it): fall back to the pool.
+		v.log.Warn("vpn: best-node pin failed, falling back to pool",
+			"service", service, "node", target, "pool", pool, "err", err.Error())
+		if err := v.clash.EnsurePool(ctx, pool); err != nil {
+			return err
+		}
+		return v.clash.SetSelector(ctx, selector, pool)
+	}
+	return nil
+}
+
+// Direct routes a service straight out by pointing its selector at "direct".
+// Used for LOCKED (banks/gov) and as the fail-safe when all VPN pools are dead.
+type Direct struct {
+	clash  *dataplane.ClashClient
+	dryRun bool
+	log    *slog.Logger
+}
+
+// NewDirect builds the direct executor.
+func NewDirect(clash *dataplane.ClashClient, dryRun bool, log *slog.Logger) *Direct {
+	return &Direct{clash: clash, dryRun: dryRun, log: log}
+}
+
+func (d *Direct) Class() string { return strategy.ClassDirect }
+
+func (d *Direct) Enable(ctx context.Context, service, _ string) error {
+	selector := registry.SelectorTag(service)
+	if d.dryRun {
+		d.log.Info("dry-run: would point selector at direct", "service", service, "selector", selector)
+		return nil
+	}
+	// A DirectOnly service (e.g. ru-direct) has no per-service selector — its
+	// route rule already sends matches to the "direct" outbound — so a missing
+	// selector is success, not a failure.
+	if err := d.clash.SetSelector(ctx, selector, "direct"); err != nil && !errors.Is(err, dataplane.ErrSelectorNotFound) {
+		return err
+	}
+	return nil
+}

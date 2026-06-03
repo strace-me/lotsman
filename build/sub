@@ -1,0 +1,49 @@
+#!/bin/bash
+# sub — inspect lotsman-sub subscription tokens (read-only).
+# Subcommands: list | show <name>
+set -uo pipefail
+source /usr/local/lib/lotsman-lib.sh
+
+usage(){ cat <<EOF
+sub — subscription URL inspector (read-only)
+
+  sub list           table of user -> https/http sub URL
+  sub show <name>    decoded links + sub URL + QR for a user
+EOF
+}
+
+cmd_list(){
+  local f uu found=0
+  printf '%-20s %s\n' "USER" "SUB-URL"
+  printf '%-20s %s\n' "----" "-------"
+  for f in "$SUB_DIR"/*; do
+    [[ -f $f ]] || continue
+    uu=$(base64 -d <"$f" 2>/dev/null | grep -om1 '#lotsman-[a-z0-9]*-[A-Za-z0-9_]*' | head -1 | sed 's/#lotsman-[a-z0-9]*-//')
+    [[ -z $uu ]] && uu="(unknown)"
+    printf '%-20s %s\n' "$uu" "$(sub_url "$(basename "$f")")"
+    found=1
+  done
+  [[ $found -eq 0 ]] && echo "(no subscription files in $SUB_DIR)"
+}
+
+cmd_show(){
+  local name=${1:-}
+  [[ -z $name ]] && { echo "Usage: sub show <name>" >&2; exit 1; }
+  local tok; tok=$(sb_token_for "$name")
+  [[ -z $tok ]] && { echo "No sub token found for '$name'." >&2; exit 1; }
+  echo "== $name =="
+  echo "Sub URL: $(sub_url "$tok")"
+  echo
+  echo "Decoded links:"
+  base64 -d <"$SUB_DIR/$tok" 2>/dev/null
+  echo
+  echo "QR (hysteria2):"
+  qr "$(base64 -d <"$SUB_DIR/$tok" 2>/dev/null | head -1)"
+}
+
+case "${1:-}" in
+  list|"") cmd_list ;;
+  show) shift; cmd_show "$@" ;;
+  -h|--help|help) usage ;;
+  *) echo "Unknown subcommand: $1" >&2; usage; exit 1 ;;
+esac
