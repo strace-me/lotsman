@@ -1,9 +1,6 @@
 name: CI
 on:
-  push:
-    branches: [main]
-  pull_request:
-    branches: [main]
+  workflow_dispatch:   # manual only (solo+local dev: tests run locally). Trigger: gh workflow run ci.yml
 
 jobs:
   test:
