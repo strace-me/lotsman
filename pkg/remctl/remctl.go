@@ -34,6 +34,25 @@
 // trust an applied remediation before judging it. Recovery R (default 6) removes
 // a remediation that has been unnecessary for a sustained window so rules do not
 // pile up.
+//
+// # QUIC-retry backoff (LOT-26)
+//
+// reject-quic (rung 2) is a TEMPORARY measure: we want UDP/QUIC back as soon as
+// the underlying flap clears. The recovery removal (above) is the optimistic
+// "let's try QUIC again" event. But if QUIC immediately re-flaps, the naive
+// remove-every-R-passes loop oscillates: remove → re-detect → re-apply →
+// recover → remove …, a sing-box restart blip every few minutes.
+//
+// To damp this, the removal timing backs off exponentially PER SERVICE. Each
+// removal that is followed by a relapse (the service re-applies a remediation
+// before it has stayed clean long enough) bumps a retry generation g, and the
+// effective recovery window grows: effRecover = min(RecoverAfter·2^g,
+// RecoverBackoffMax). So a chronically flapping service stays on reject-quic
+// (TCP) longer and longer between optimistic QUIC retries, instead of removing
+// every R passes. A service that genuinely recovers — stays clean for a full
+// RecoverBackoffMax-pass window after a removal with no re-apply — resets g to 0.
+// Backoff changes ONLY the removal timing; the apply/canary/rollback/escalate
+// ladder is unchanged.
 package remctl
 
 import (
@@ -62,14 +81,23 @@ type Config struct {
 	Hysteresis int
 	// Canary: passes to verify an applied remediation before judging it.
 	Canary int
-	// RecoverAfter: consecutive healthy passes while a remediation is active
-	// before it is removed as unnecessary (0 = never auto-remove).
+	// RecoverAfter: BASE consecutive healthy passes while a remediation is active
+	// before it is removed as unnecessary (0 = never auto-remove). With backoff
+	// (below) this is the generation-0 window; later generations require more.
 	RecoverAfter int
+	// RecoverBackoffMax caps the backed-off recovery window (passes). The effective
+	// removal threshold for retry generation g is min(RecoverAfter·2^g,
+	// RecoverBackoffMax). It also defines the "genuinely recovered" window: after a
+	// removal, staying clean (no re-apply) for this many passes resets g to 0.
+	// 0 disables backoff (every removal uses RecoverAfter, like before).
+	RecoverBackoffMax int
 }
 
-// DefaultConfig: N=3 hysteresis, K=3 canary, R=6 recover. See package doc.
+// DefaultConfig: N=3 hysteresis, K=3 canary, R=6 recover, backoff cap 96
+// (= 6·2^4, ~16 passes per pass-minute caps the QUIC-retry wait around the tens
+// of minutes for a chronically flapping service). See package doc.
 func DefaultConfig() Config {
-	return Config{Hysteresis: 3, Canary: 3, RecoverAfter: 6}
+	return Config{Hysteresis: 3, Canary: 3, RecoverAfter: 6, RecoverBackoffMax: 96}
 }
 
 // Inputs supplies the per-service facts the embedded planner needs (learned
@@ -101,6 +129,14 @@ type state struct {
 	activeRung  int              // rung currently applied (0 = none)
 	nextRung    int              // rung to try on the NEXT apply (advances after a failed canary)
 	lastVerdict misroute.Verdict // the verdict that drove the current attempt (for canary baseline + incident)
+
+	// QUIC-retry backoff (LOT-26): recoverGen is the retry generation — how many
+	// times this service's remediation has been removed-then-reapplied. It scales
+	// the recovery removal window (effRecover). idleCleanStreak counts consecutive
+	// healthy passes while idle AFTER a backed-off removal; reaching
+	// RecoverBackoffMax means a genuine recovery and resets recoverGen to 0.
+	recoverGen      int
+	idleCleanStreak int
 }
 
 // Controller runs the armed ladder state machine across observe passes. It is
@@ -173,6 +209,16 @@ func (c *Controller) step(v misroute.Verdict, in Inputs) {
 func (c *Controller) stepIdle(s *state, v misroute.Verdict, in Inputs) {
 	if !v.Misrouted {
 		s.misroutedStreak = 0
+		// QUIC-retry backoff reset: if we are idle after a backed-off removal and
+		// the service stays clean for a full RecoverBackoffMax window with no
+		// re-apply, it genuinely recovered — drop the retry generation back to 0.
+		if s.recoverGen > 0 && c.cfg.RecoverBackoffMax > 0 {
+			s.idleCleanStreak++
+			if s.idleCleanStreak >= c.cfg.RecoverBackoffMax {
+				s.recoverGen = 0
+				s.idleCleanStreak = 0
+			}
+		}
 		return
 	}
 	s.misroutedStreak++
@@ -211,6 +257,7 @@ func (c *Controller) stepIdle(s *state, v misroute.Verdict, in Inputs) {
 	s.canaryLeft = c.cfg.Canary
 	s.misroutedStreak = 0
 	s.healthyStreak = 0
+	s.idleCleanStreak = 0 // re-applied before the reset window closed: backoff stands
 	c.record(v, plan, incident.PhaseApplied, "remediation applied; canary verifying")
 }
 
@@ -245,7 +292,7 @@ func (c *Controller) stepMonitoring(s *state, v misroute.Verdict, in Inputs) {
 		return
 	}
 	s.healthyStreak++
-	if c.cfg.RecoverAfter > 0 && s.healthyStreak >= c.cfg.RecoverAfter {
+	if c.cfg.RecoverAfter > 0 && s.healthyStreak >= c.effRecover(s) {
 		if err := c.actions.Rollback(v.Service); err != nil {
 			c.record(v, plan, incident.PhaseResolved, "recovery remove failed (remediation kept): "+err.Error())
 			return
@@ -256,7 +303,35 @@ func (c *Controller) stepMonitoring(s *state, v misroute.Verdict, in Inputs) {
 		s.nextRung = 0 // fully recovered → reset the ladder
 		s.healthyStreak = 0
 		s.misroutedStreak = 0
+		// QUIC-retry backoff (LOT-26): this removal is an optimistic QUIC retry.
+		// Bump the retry generation so that if QUIC re-flaps and we re-apply, the
+		// NEXT removal requires a longer healthy window. The reset (stepIdle) drops
+		// it back to 0 once the service stays clean for a full RecoverBackoffMax
+		// window with no re-apply.
+		if c.cfg.RecoverBackoffMax > 0 {
+			s.recoverGen++
+			s.idleCleanStreak = 0
+		}
 	}
+}
+
+// effRecover is the effective recovery-removal window (passes) for the service's
+// current retry generation: min(RecoverAfter·2^gen, RecoverBackoffMax). With
+// RecoverBackoffMax==0 (backoff disabled) it is just RecoverAfter.
+func (c *Controller) effRecover(s *state) int {
+	base := c.cfg.RecoverAfter
+	if c.cfg.RecoverBackoffMax <= 0 || s.recoverGen == 0 {
+		return base
+	}
+	// Compute base<<gen with overflow/cap guard (gen can grow unbounded otherwise).
+	eff := base
+	for i := 0; i < s.recoverGen; i++ {
+		eff *= 2
+		if eff >= c.cfg.RecoverBackoffMax {
+			return c.cfg.RecoverBackoffMax
+		}
+	}
+	return eff
 }
 
 // rollbackAndEscalate removes the current remediation and advances the rung so
