@@ -236,6 +236,54 @@ func TestReconcileAppliesOnRealChange(t *testing.T) {
 	}
 }
 
+// Regression guard (LOT-18b): an empty/nil Remediations provider must leave the
+// generated config byte-identical to no provider at all, so an armed-but-idle
+// controller never causes a spurious apply/restart.
+func TestReconcileEmptyRemediationsAreNoOp(t *testing.T) {
+	// Baseline: reconcile with no provider, capture the written config.
+	run := &fakeRunner{}
+	rBase, basePath := testReconciler(t, run, fakeLoader{nodes: []subscription.Node{node(t)}}, false)
+	if err := rBase.Reconcile(context.Background()); err != nil {
+		t.Fatalf("baseline reconcile: %v", err)
+	}
+	base, _ := os.ReadFile(basePath)
+
+	// With a provider that returns nil and one that returns an empty map, the
+	// generated config must be identical to the baseline.
+	for name, provider := range map[string]func() map[string]singbox.Remediation{
+		"nil-map":   func() map[string]singbox.Remediation { return nil },
+		"empty-map": func() map[string]singbox.Remediation { return map[string]singbox.Remediation{} },
+	} {
+		run2 := &fakeRunner{}
+		r, path := testReconciler(t, run2, fakeLoader{nodes: []subscription.Node{node(t)}}, false)
+		r.Remediations = provider
+		if err := r.Reconcile(context.Background()); err != nil {
+			t.Fatalf("%s reconcile: %v", name, err)
+		}
+		got, _ := os.ReadFile(path)
+		if string(got) != string(base) {
+			t.Errorf("%s: config differs from baseline (must be byte-identical)", name)
+		}
+	}
+
+	// And a NON-empty provider DOES change the config (proving the seam is wired).
+	run3 := &fakeRunner{}
+	r, path := testReconciler(t, run3, fakeLoader{nodes: []subscription.Node{node(t)}}, false)
+	r.Remediations = func() map[string]singbox.Remediation {
+		return map[string]singbox.Remediation{"youtube": {RejectQUIC: true}}
+	}
+	if err := r.Reconcile(context.Background()); err != nil {
+		t.Fatalf("active-remediation reconcile: %v", err)
+	}
+	got, _ := os.ReadFile(path)
+	if string(got) == string(base) {
+		t.Error("active remediation did not change the generated config")
+	}
+	if !run3.ran("check") || !run3.ran("restart") {
+		t.Errorf("active remediation must apply (check+restart), calls=%v", run3.calls)
+	}
+}
+
 func TestReconcileSkipsDegradedNodeSet(t *testing.T) {
 	run := &fakeRunner{}
 	r, _ := testReconciler(t, run, fakeLoader{nodes: []subscription.Node{node(t)}}, false)

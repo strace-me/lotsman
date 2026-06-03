@@ -42,6 +42,7 @@ import (
 	"github.com/strace-me/lotsman/pkg/executor"
 	"github.com/strace-me/lotsman/pkg/faillog"
 	"github.com/strace-me/lotsman/pkg/flowseal"
+	"github.com/strace-me/lotsman/pkg/incident"
 	"github.com/strace-me/lotsman/pkg/iplearn"
 	"github.com/strace-me/lotsman/pkg/kb"
 	"github.com/strace-me/lotsman/pkg/metrics"
@@ -52,6 +53,7 @@ import (
 	"github.com/strace-me/lotsman/pkg/probing"
 	"github.com/strace-me/lotsman/pkg/reconcile"
 	"github.com/strace-me/lotsman/pkg/registry"
+	"github.com/strace-me/lotsman/pkg/remctl"
 	"github.com/strace-me/lotsman/pkg/remediate"
 	"github.com/strace-me/lotsman/pkg/rulesets"
 	"github.com/strace-me/lotsman/pkg/singbox"
@@ -89,6 +91,8 @@ func main() {
 		smart           = flag.Bool("smart", true, "enable the intelligence layer (policy/correlate/damper/adaptive/anomaly) in escalation decisions")
 		checkInterval   = flag.Duration("check-interval", 0, "run background maintenance (Flowseal update, subscription refresh) every interval (0 = disabled)")
 		observeInterval = flag.Duration("observe-interval", 30*time.Second, "run the passive-observation eye (observe/detect/propose, PROPOSE-ONLY) every interval, independent of -check-interval (0 = disabled)")
+		remediateArm    = flag.Bool("remediate", false, "ARM the self-heal remediation ladder (LOT-18b): the observe loop AUTO-APPLIES remediations to the live sing-box config with canary+auto-rollback. DEFAULT OFF = propose-only. Requires -reconcile + -singbox-config; refuses to arm otherwise. -dry-run still gates whether reconcile actually writes.")
+		incidentLog     = flag.String("incident-log", "", "append armed-remediation lifecycle events (detected/applied/resolved/rolled-back/escalated) as JSONL to this path (empty = disabled)")
 		flowsealBase    = flag.String("flowseal-base", "/opt", "parent dir for Flowseal bundles (holds flowseal-current symlink)")
 		reconcileSB     = flag.Bool("reconcile", false, "daemon owns the sing-box config: regenerate from config+subs and apply on structural change (needs -singbox-config + a config with subscriptions; -dry-run gates whether it actually applies)")
 		singboxConfig   = flag.String("singbox-config", "", "path to the sing-box config the daemon reconciles/owns")
@@ -238,6 +242,19 @@ func main() {
 		log.Info("fail log enabled", "path", *failLog)
 	}
 
+	// Incident log (LOT-18b): the armed remediation controller's lifecycle trail.
+	var incidents incident.Recorder = incident.Nop{}
+	if *incidentLog != "" {
+		ir, err := incident.NewFileRecorder(*incidentLog, log)
+		if err != nil {
+			log.Error("incident log open failed", "path", *incidentLog, "err", err)
+			os.Exit(1)
+		}
+		defer ir.Close()
+		incidents = ir
+		log.Info("incident log enabled", "path", *incidentLog)
+	}
+
 	br := brain.New(bus, reg, knowledge, cfg, rec, log)
 	// Re-converge the data plane toward desired state every probe interval, so a
 	// sing-box restart that reset selectors — or fresh node-ranker advice — heals
@@ -311,6 +328,15 @@ func main() {
 	}
 	eng := probing.New(bus, prober, br, reg, knowledge, mc, fails, *interval, log)
 
+	// The sing-box config reconciler is constructed once here (independent of the
+	// maintenance loop) so both the maintenance loop AND the armed remediation
+	// controller (LOT-18b) can share the same instance — the controller needs it
+	// to apply/revert remediations even when -check-interval is off.
+	var rc *reconcile.Reconciler
+	if *reconcileSB && *singboxConfig != "" && conf != nil {
+		rc = newReconciler(conf, reg, clash, *singboxConfig, *singboxBin, *singboxRestart, *reconcileBackup, *probeProxy, *dryRun, log)
+	}
+
 	// Background maintenance loop (Flowseal update, subscription refresh).
 	runners := []func(context.Context){br.Run, ap.Run, eng.Run}
 	if *checkInterval > 0 {
@@ -369,9 +395,7 @@ func main() {
 			}})
 			log.Info("per-service node ranker enabled (advisory)", "dry_run", *dryRun)
 		}
-		var rc *reconcile.Reconciler
-		if *reconcileSB && *singboxConfig != "" && conf != nil {
-			rc = newReconciler(conf, reg, clash, *singboxConfig, *singboxBin, *singboxRestart, *reconcileBackup, *probeProxy, *dryRun, log)
+		if rc != nil {
 			pr.Add(periodic.Task{Name: "singbox-reconcile", Interval: *checkInterval, RunAtStart: true, Fn: rc.Reconcile})
 			log.Info("sing-box config reconcile enabled", "path", *singboxConfig, "dry_run", *dryRun)
 		}
@@ -428,6 +452,54 @@ func main() {
 			defer eyeMu.Unlock()
 			return plans
 		})
+
+		// Armed remediation controller (LOT-18b), GATED behind -remediate (default
+		// OFF). When off, ctl stays nil and the loop below is unchanged propose-only.
+		// When on, it REQUIRES a reconciler (needs -reconcile -singbox-config): if
+		// missing, refuse to arm (log error) and stay propose-only — never act
+		// without the apply mechanism. The controller owns the active-remediations
+		// map; the reconciler reads it via rc.Remediations and Apply/Rollback update
+		// it then call Reconcile. passCtx carries the current observe pass's context
+		// into the synchronous Apply/Rollback calls.
+		var ctl *remctl.Controller
+		var passCtx context.Context // the current observe pass's context, used by Apply/Rollback
+		if *remediateArm {
+			if rc == nil {
+				log.Error("-remediate set but no reconciler (needs -reconcile and -singbox-config with subscriptions); staying PROPOSE-ONLY")
+			} else {
+				var remMu sync.Mutex
+				active := map[string]singbox.Remediation{}
+				rc.Remediations = func() map[string]singbox.Remediation {
+					remMu.Lock()
+					defer remMu.Unlock()
+					if len(active) == 0 {
+						return nil
+					}
+					cp := make(map[string]singbox.Remediation, len(active))
+					for k, v := range active {
+						cp[k] = v
+					}
+					return cp
+				}
+				actions := remctl.Actions{
+					Apply: func(service string, _ int, rem singbox.Remediation) error {
+						remMu.Lock()
+						active[service] = rem
+						remMu.Unlock()
+						return rc.Reconcile(passCtx)
+					},
+					Rollback: func(service string) error {
+						remMu.Lock()
+						delete(active, service)
+						remMu.Unlock()
+						return rc.Reconcile(passCtx)
+					},
+				}
+				ctl = remctl.New(remctl.DefaultConfig(), actions, incidents)
+				log.Warn("ARMED remediation controller enabled (LOT-18b): observe loop will AUTO-APPLY remediations with canary+rollback", "dry_run", *dryRun)
+			}
+		}
+
 		op.Add(periodic.Task{Name: "observe", Interval: *observeInterval, RunAtStart: true, Fn: func(c context.Context) error {
 			snap, err := eye.Observe(c)
 			if err != nil {
@@ -470,6 +542,12 @@ func main() {
 			for _, p := range ps {
 				log.Warn("remediation proposed", "service", p.Service, "rung", p.Rung,
 					"action", p.Action, "cidrs", len(p.CIDRs), "reason", p.Reason)
+			}
+			// Armed path (LOT-18b): feed this pass's verdicts to the controller, which
+			// applies/canaries/rolls-back via the reconciler. nil ctl = propose-only.
+			if ctl != nil {
+				passCtx = c
+				ctl.Pass(vs, in)
 			}
 			return nil
 		}})

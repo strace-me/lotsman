@@ -54,6 +54,14 @@ type Reconciler struct {
 	Alive      func(context.Context) bool // post-restart health (nil = skip the check)
 	Log        *slog.Logger
 
+	// Remediations supplies the armed controller's active per-service self-heal
+	// remediations (LOT-18b), read fresh on every Reconcile and folded into the
+	// generated config via opts.Remediations. nil (or a nil/empty return) means
+	// no remediations are active, in which case the generated config is
+	// byte-identical to today (LOT-18a guarantees this for empty Remediations).
+	// The controller updates the backing map and calls Reconcile to apply/revert.
+	Remediations func() map[string]singbox.Remediation
+
 	last      []byte // last config bytes we wrote/observed (skip re-validation)
 	lastNodes int    // node count of the last clean apply (anti-churn baseline)
 }
@@ -76,6 +84,11 @@ func (r *Reconciler) Reconcile(ctx context.Context) error {
 	memberships := r.Pools.Memberships(nodes)
 	opts := r.Opts
 	opts.PoolOpts = singbox.PoolOptionsFrom(r.Pools)
+	if r.Remediations != nil {
+		// Fold in the armed controller's active remediations (LOT-18b). When none
+		// are active this is nil/empty and generation is byte-identical to today.
+		opts.Remediations = r.Remediations()
+	}
 	res, err := singbox.Generate(r.Services, r.Devices, nodes, memberships, opts)
 	if err != nil {
 		return fmt.Errorf("reconcile: generate: %w", err)
