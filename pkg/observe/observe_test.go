@@ -135,6 +135,57 @@ func TestObserveLeakAndDeadRatios(t *testing.T) {
 	}
 }
 
+// TestLeakOnlyForTunnelIntended covers LOT-22: a zapret-PREFERRED service whose
+// flows all go "direct" is NOT leaking (direct is its by-design path), while a
+// VPN-PREFERRED service with the same direct flows IS leaking.
+func TestLeakOnlyForTunnelIntended(t *testing.T) {
+	// Two flows to "direct", matched by distinct domains.
+	conns := []Conn{
+		{Chains: []string{"direct"}, Upload: 100, Download: 200, Host: "play.epicgames.com", Network: "tcp"},
+		{Chains: []string{"direct"}, Upload: 100, Download: 200, Host: "play.epicgames.com", Network: "tcp"},
+	}
+
+	// zapret-PREFERRED (with a VPN fallback further down the chain): direct is
+	// by design, so it must NOT be flagged.
+	zapretReg := &registry.Registry{Services: map[string]registry.Service{
+		"gaming-epic": {
+			Name:    "gaming-epic",
+			Domains: []string{"epicgames.com"},
+			Chain: []registry.ChainStep{
+				{Position: 0, State: registry.StatePreferred, StrategyClass: strategy.ClassZapret},
+				{Position: 1, State: registry.StateVPN, StrategyClass: strategy.ClassVPN, StrategyID: "vpn_url_test_udp"},
+			},
+		},
+	}}
+	snap, err := New(fakeSource{conns}, zapretReg).Observe(context.Background())
+	if err != nil {
+		t.Fatalf("Observe (zapret): %v", err)
+	}
+	if g := snap.Services["gaming-epic"]; g.Flows != 2 || g.LeakFlows != 0 || g.LeakRatio != 0 {
+		t.Errorf("zapret-preferred gaming-epic flows=%d leak=%d ratio=%v, want 2/0/0 (direct is by design)",
+			g.Flows, g.LeakFlows, g.LeakRatio)
+	}
+
+	// VPN-PREFERRED: the same direct flows ARE a leak.
+	vpnReg := &registry.Registry{Services: map[string]registry.Service{
+		"gaming-epic": {
+			Name:    "gaming-epic",
+			Domains: []string{"epicgames.com"},
+			Chain: []registry.ChainStep{
+				{Position: 0, State: registry.StateVPN, StrategyClass: strategy.ClassVPN, StrategyID: "vpn_url_test_udp"},
+			},
+		},
+	}}
+	snap, err = New(fakeSource{conns}, vpnReg).Observe(context.Background())
+	if err != nil {
+		t.Fatalf("Observe (vpn): %v", err)
+	}
+	if g := snap.Services["gaming-epic"]; g.Flows != 2 || g.LeakFlows != 2 || g.LeakRatio != 1 {
+		t.Errorf("vpn-preferred gaming-epic flows=%d leak=%d ratio=%v, want 2/2/1",
+			g.Flows, g.LeakFlows, g.LeakRatio)
+	}
+}
+
 func TestMatchByDomainSuffix(t *testing.T) {
 	m := matcher{suffixes: []string{"googlevideo.com"}}
 	cases := []struct {

@@ -59,6 +59,20 @@ func (s Service) DirectOnly() bool {
 	return len(s.Chain) > 0 && s.Chain[0].StrategyClass == strategy.ClassDirect
 }
 
+// TunnelIntended reports whether the service's PREFERRED (position-0) path is a
+// VPN tunnel. Only such services treat a "direct" flow as a leak: zapret/direct/
+// emergency-preferred services route "direct" by design (e.g. nfqws desyncs
+// direct traffic), so "direct" is a legitimate path for them and must not be
+// counted as a leak (LOT-22). The decision is made on the preferred step alone:
+// a zapret-preferred service with a VPN fallback is still tunnel-intended only
+// once it actually escalates, so its preferred-state "direct" flows are fine.
+func (s Service) TunnelIntended() bool {
+	if s.DirectOnly() {
+		return false
+	}
+	return len(s.Chain) > 0 && s.Chain[0].StrategyClass == strategy.ClassVPN
+}
+
 // Category defines the default behavior a service inherits. A service declaring
 // `category: streaming` and no explicit chain uses streaming's DefaultChain.
 // RequiredCaps documents what its VPN pool must carry (e.g. messaging needs
