@@ -81,6 +81,25 @@ type Options struct {
 	TargetVersion    string                 // sing-box version to target (e.g. "1.12.17"); gates version-specific knobs. "" = baseline
 	FakeIP           *FakeIPOptions         // emit a fakeip DNS section (nil = off)
 	Multiplex        *MultiplexOptions      // default outbound multiplex for TCP proxies (nil = off)
+	Remediations     map[string]Remediation // per-service self-heal remediation rules (nil/absent = no change; LOT-18). Keyed by service name.
+}
+
+// Remediation describes the self-heal rules to inject for one service (LOT-18).
+// It is opt-in and additive: a service with no Remediation entry generates
+// EXACTLY as before (byte-identical output), so PROPOSE-ONLY mode (18a, nothing
+// passed) cannot alter the live config. Two independent primitives:
+//
+//   - RejectQUIC: emit a route rule matching this service on network:udp,
+//     port:443 with action:reject, placed BEFORE the service's normal rule so it
+//     wins for UDP/443 — forcing the client to fall back to TLS-over-TCP (which
+//     sniffs reliably). Matches the service the same way its normal rule does
+//     (rule_set/domain_suffix/ip_cidr).
+//   - FallbackCIDRs: emit an ip_cidr rule for these CIDRs -> the service's
+//     sel-<svc> selector, so un-sniffed QUIC reaches the tunnel by IP instead of
+//     leaking to direct. Ignored for a direct-only service (it has no selector).
+type Remediation struct {
+	RejectQUIC    bool     // reject this service's udp/443 (QUIC-kill, TCP fallback)
+	FallbackCIDRs []string // CIDRs routed to sel-<svc> (IP-fallback for un-sniffed QUIC)
 }
 
 // MultiplexOptions configures the default `multiplex` block injected into TCP
@@ -225,6 +244,36 @@ func svcRule(match map[string]any, target string, fragment bool) map[string]any 
 		match["outbound"] = target
 	}
 	return match
+}
+
+// rejectQUICRules builds the reject-QUIC route rules for a service (LOT-18): one
+// rule per match kind (rule_set / domain_suffix / ip_cidr), each constrained to
+// network:["udp"], port:[443] with action:"reject". One rule per match kind
+// preserves OR semantics across kinds (a single rule's fields AND together, so
+// rule_set+ip_cidr in one rule would wrongly require both). Emitted into a tier
+// ahead of the service's normal rules so QUIC on udp/443 is rejected — forcing
+// the client to retry over TCP, which sniffs reliably — while TCP/443 still
+// follows the normal route.
+func rejectQUICRules(svc registry.Service) []any {
+	var out []any
+	add := func(matchKey string, matchVal any) {
+		out = append(out, map[string]any{
+			matchKey:  matchVal,
+			"network": []string{"udp"},
+			"port":    []int{443},
+			"action":  "reject",
+		})
+	}
+	if len(svc.RuleSets) > 0 {
+		add("rule_set", svc.RuleSets)
+	}
+	if len(svc.Domains) > 0 {
+		add("domain_suffix", svc.Domains)
+	}
+	if len(svc.IPs) > 0 {
+		add("ip_cidr", svc.IPs)
+	}
+	return out
 }
 
 // Result is a generated config plus the nodes that were skipped (unsupported
@@ -423,7 +472,7 @@ func Generate(services []registry.Service, devices []registry.Device, nodes []su
 	// (voice UDP, ECH, dedicated blocks). Within each tier, service Priority order
 	// (set above) is preserved.
 	allRuleSets := map[string]bool{}
-	var domainRules, ipRules []any
+	var rejectRules, domainRules, ipRules []any
 	for _, svc := range services {
 		if len(svc.RuleSets) == 0 && len(svc.Domains) == 0 && len(svc.IPs) == 0 {
 			continue // nothing to route for this service yet
@@ -483,8 +532,23 @@ func Generate(services []registry.Service, devices []registry.Device, nodes []su
 		if len(svc.IPs) > 0 {
 			ipRules = append(ipRules, svcRule(map[string]any{"ip_cidr": svc.IPs}, target, frag))
 		}
+
+		// Self-heal remediation (LOT-18), opt-in per service. Absent => no rules
+		// added => byte-identical to the no-remediation config. reject-QUIC rules
+		// are collected in their own (earlier) tier so they win over this service's
+		// normal domain/ip rules for udp/443; the IP-fallback rule joins the IP tier.
+		if rem, ok := opts.Remediations[svc.Name]; ok {
+			if rem.RejectQUIC {
+				rejectRules = append(rejectRules, rejectQUICRules(svc)...)
+			}
+			if len(rem.FallbackCIDRs) > 0 && !svc.DirectOnly() {
+				ipRules = append(ipRules, svcRule(map[string]any{"ip_cidr": rem.FallbackCIDRs}, target, frag))
+			}
+		}
 	}
-	// Domain tier first, then IP tier (see tiering note above).
+	// reject-QUIC tier first (so udp/443 is killed before the service's own match
+	// could route it), then domain tier, then IP tier (see tiering note above).
+	routeRules = append(routeRules, rejectRules...)
 	routeRules = append(routeRules, domainRules...)
 	routeRules = append(routeRules, ipRules...)
 

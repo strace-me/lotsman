@@ -16,14 +16,16 @@ import (
 	"github.com/strace-me/lotsman/pkg/brain"
 	"github.com/strace-me/lotsman/pkg/misroute"
 	"github.com/strace-me/lotsman/pkg/observe"
+	"github.com/strace-me/lotsman/pkg/remediate"
 )
 
 // Collector gathers metrics and serves them.
 type Collector struct {
-	brainSnap    func() []brain.ServiceState
-	kbSnap       func() map[string]float64
-	observeSnap  func() observe.Snapshot   // optional; nil = observe eye disabled
-	misrouteSnap func() []misroute.Verdict // optional; nil = misroute detector disabled
+	brainSnap       func() []brain.ServiceState
+	kbSnap          func() map[string]float64
+	observeSnap     func() observe.Snapshot   // optional; nil = observe eye disabled
+	misrouteSnap    func() []misroute.Verdict // optional; nil = misroute detector disabled
+	remediationSnap func() []remediate.Plan   // optional; nil = remediation planner disabled (LOT-18a)
 
 	mu        sync.Mutex
 	probeOK   map[string]int
@@ -47,6 +49,12 @@ func (c *Collector) SetObserveSnapshot(fn func() observe.Snapshot) { c.observeSn
 // The function should return the most recent Detect result; metrics reads it at
 // scrape time and publishes lotsman_service_misrouted. No-op effect until set.
 func (c *Collector) SetMisrouteSnapshot(fn func() []misroute.Verdict) { c.misrouteSnap = fn }
+
+// SetRemediationSnapshot wires the remediation planner's latest proposed plans
+// (LOT-18a, PROPOSE-ONLY). The function should return the most recent set of
+// non-none plans; metrics reads it at scrape time and publishes
+// lotsman_service_remediation_proposed. No-op effect until set.
+func (c *Collector) SetRemediationSnapshot(fn func() []remediate.Plan) { c.remediationSnap = fn }
 
 // ObserveProbe records a probe outcome. Implements probing.ProbeObserver.
 func (c *Collector) ObserveProbe(service string, ok bool, _ int) {
@@ -155,6 +163,16 @@ func (c *Collector) ServeHTTP(w http.ResponseWriter, _ *http.Request) {
 		b.WriteString("# TYPE lotsman_service_misrouted gauge\n")
 		for _, v := range vs {
 			fmt.Fprintf(&b, "lotsman_service_misrouted{service=%q,kind=%q} %d\n", v.Service, v.Kind, b2i(v.Misrouted))
+		}
+	}
+
+	if c.remediationSnap != nil {
+		ps := c.remediationSnap()
+		sort.Slice(ps, func(i, j int) bool { return ps[i].Service < ps[j].Service })
+		b.WriteString("# HELP lotsman_service_remediation_proposed Whether a remediation was proposed for a service (1) or not (0). PROPOSE-ONLY (LOT-18a): not applied.\n")
+		b.WriteString("# TYPE lotsman_service_remediation_proposed gauge\n")
+		for _, p := range ps {
+			fmt.Fprintf(&b, "lotsman_service_remediation_proposed{service=%q,action=%q} %d\n", p.Service, p.Action, b2i(p.Action != remediate.ActionNone))
 		}
 	}
 
