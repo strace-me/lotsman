@@ -247,6 +247,113 @@ func TestRecoveryRemovesAfterSustainedHealth(t *testing.T) {
 	}
 }
 
+// applyThenRecover drives a service from idle through apply (rung 2 / reject-quic)
+// and then `healthy` healthy passes. It returns the rollback count observed right
+// after the run. Hysteresis and canary are 1 here so apply+monitoring start fast.
+// The first healthy pass takes canary→monitoring (healthyStreak=1), so to reach an
+// effective window W the caller must pass `healthy` = W healthy passes total.
+func applyThenRecover(t *testing.T, c *Controller, fa *fakeActions, svc string, healthyPasses int) {
+	t.Helper()
+	c.Pass([]misroute.Verdict{dead(svc)}, noCIDRs()) // hysteresis=1 → apply rung 2, phaseCanary
+	for i := 0; i < healthyPasses; i++ {
+		c.Pass([]misroute.Verdict{healthy(svc)}, noCIDRs())
+	}
+}
+
+// LOT-26 (a): the FIRST recovery removes after the base RecoverAfter window.
+func TestBackoffFirstRecoveryUsesBase(t *testing.T) {
+	fa := &fakeActions{}
+	c := New(Config{Hysteresis: 1, Canary: 1, RecoverAfter: 2, RecoverBackoffMax: 8}, fa.actions(), nil)
+
+	c.Pass([]misroute.Verdict{dead("youtube")}, noCIDRs())    // apply, phaseCanary
+	c.Pass([]misroute.Verdict{healthy("youtube")}, noCIDRs()) // canary→monitoring, streak=1
+	if len(fa.rollbacks) != 0 {
+		t.Fatalf("removed at streak 1; want base RecoverAfter=2, got rollbacks=%d", len(fa.rollbacks))
+	}
+	c.Pass([]misroute.Verdict{healthy("youtube")}, noCIDRs()) // streak=2 → remove
+	if len(fa.rollbacks) != 1 {
+		t.Fatalf("first recovery rollbacks=%d, want 1 at base window 2", len(fa.rollbacks))
+	}
+	if g := c.st["youtube"].recoverGen; g != 1 {
+		t.Errorf("recoverGen=%d after first removal, want 1 (bumped for next retry)", g)
+	}
+}
+
+// LOT-26 (b): a service that relapses after removal needs a LONGER healthy window
+// before the next removal — backoff grows base(2) → 4 → cap.
+func TestBackoffGrowsAcrossRelapses(t *testing.T) {
+	fa := &fakeActions{}
+	c := New(Config{Hysteresis: 1, Canary: 1, RecoverAfter: 2, RecoverBackoffMax: 8}, fa.actions(), nil)
+
+	// gen 0: removes after 2 healthy passes.
+	applyThenRecover(t, c, fa, "youtube", 2)
+	if len(fa.rollbacks) != 1 {
+		t.Fatalf("gen0 rollbacks=%d, want 1", len(fa.rollbacks))
+	}
+
+	// Relapse immediately, re-apply. gen is now 1 → effRecover=4. Two healthy passes
+	// (the gen-0 window) must NOT remove yet.
+	c.Pass([]misroute.Verdict{dead("youtube")}, noCIDRs())    // re-detect+apply (hysteresis=1)
+	c.Pass([]misroute.Verdict{healthy("youtube")}, noCIDRs()) // →monitoring, streak=1
+	c.Pass([]misroute.Verdict{healthy("youtube")}, noCIDRs()) // streak=2 (would remove at gen0)
+	if len(fa.rollbacks) != 1 {
+		t.Fatalf("gen1 removed too early at streak 2; rollbacks=%d, want still 1", len(fa.rollbacks))
+	}
+	c.Pass([]misroute.Verdict{healthy("youtube")}, noCIDRs()) // streak=3
+	c.Pass([]misroute.Verdict{healthy("youtube")}, noCIDRs()) // streak=4 → remove
+	if len(fa.rollbacks) != 2 {
+		t.Fatalf("gen1 rollbacks=%d, want 2 at window 4", len(fa.rollbacks))
+	}
+	if g := c.st["youtube"].recoverGen; g != 2 {
+		t.Errorf("recoverGen=%d after second removal, want 2", g)
+	}
+}
+
+// LOT-26 (c): the generation resets to 0 after sustained health (a full
+// RecoverBackoffMax idle-clean window with no re-apply) → next removal uses base.
+func TestBackoffResetsAfterSustainedHealth(t *testing.T) {
+	fa := &fakeActions{}
+	c := New(Config{Hysteresis: 1, Canary: 1, RecoverAfter: 2, RecoverBackoffMax: 8}, fa.actions(), nil)
+
+	applyThenRecover(t, c, fa, "youtube", 2) // first removal → recoverGen=1
+	if c.st["youtube"].recoverGen != 1 {
+		t.Fatalf("setup: recoverGen=%d, want 1", c.st["youtube"].recoverGen)
+	}
+	// Stay clean (idle, healthy, no re-apply) for the full RecoverBackoffMax window.
+	for i := 0; i < 8; i++ {
+		c.Pass([]misroute.Verdict{healthy("youtube")}, noCIDRs())
+	}
+	if g := c.st["youtube"].recoverGen; g != 0 {
+		t.Fatalf("recoverGen=%d after sustained health, want 0 (reset)", g)
+	}
+	// Next flap removes after the BASE window again (2), proving the reset.
+	applyThenRecover(t, c, fa, "youtube", 2)
+	if len(fa.rollbacks) != 2 {
+		t.Fatalf("post-reset rollbacks=%d, want 2 at base window 2", len(fa.rollbacks))
+	}
+}
+
+// LOT-26 (d): the backed-off window is capped at RecoverBackoffMax.
+func TestBackoffRespectsCap(t *testing.T) {
+	c := New(Config{Hysteresis: 1, Canary: 1, RecoverAfter: 2, RecoverBackoffMax: 8}, (&fakeActions{}).actions(), nil)
+	s := &state{}
+
+	cases := map[int]int{0: 2, 1: 4, 2: 8, 3: 8, 10: 8} // 2,4,8(cap),then stays 8
+	for gen, want := range cases {
+		s.recoverGen = gen
+		if got := c.effRecover(s); got != want {
+			t.Errorf("effRecover(gen=%d)=%d, want %d (cap=8)", gen, got, want)
+		}
+	}
+
+	// Backoff disabled (RecoverBackoffMax=0) → always base regardless of gen.
+	c2 := New(Config{Hysteresis: 1, Canary: 1, RecoverAfter: 2, RecoverBackoffMax: 0}, (&fakeActions{}).actions(), nil)
+	s2 := &state{recoverGen: 5}
+	if got := c2.effRecover(s2); got != 2 {
+		t.Errorf("effRecover with backoff disabled=%d, want base 2", got)
+	}
+}
+
 // Apply error: config unchanged, stays idle, retries (no rung advance).
 func TestApplyErrorDoesNotAdvance(t *testing.T) {
 	fa := &fakeActions{applyErr: errors.New("reconcile boom")}
