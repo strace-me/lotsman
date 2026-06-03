@@ -442,9 +442,10 @@ func main() {
 		// remediation rung. PROPOSE-ONLY — it logs and publishes a metric; it does
 		// NOT call the generator with the plan, trigger reconcile, or touch the live
 		// config (auto-apply + canary/rollback is LOT-18b). The Learner is the
-		// IP-fallback CIDR source; empty for now, so a leak proposes reject-quic
-		// until CIDRs are learned. The same learner instance is observed/snapshotted
-		// over time once iplearn wiring lands.
+		// IP-fallback CIDR source: a single instance lives for the daemon's lifetime
+		// and every observe pass feeds it the matched flows' destination IPs (below),
+		// so ip-fallback gets real CDN CIDRs. Cold start proposes reject-quic until
+		// the first IPs land; state is in-memory and rebuilds from traffic in minutes.
 		learner := iplearn.NewLearner()
 		var plans []remediate.Plan
 		mc.SetRemediationSnapshot(func() []remediate.Plan {
@@ -506,6 +507,15 @@ func main() {
 				return err
 			}
 			vs := misroute.Detect(snap, misrouteCfg)
+			// Feed this pass's matched destination IPs into the persistent Learner so
+			// the ip-fallback rung accumulates real CDN CIDRs over time (in-memory: it
+			// rebuilds from observed traffic within minutes of a restart — no file). The
+			// Learner dedups/contains internally, so re-observing the same edge is cheap.
+			for _, sm := range snap.Services {
+				for _, ip := range sm.DestIPs {
+					learner.Observe(sm.Service, ip)
+				}
+			}
 			// Propose a remediation per misrouted service (PROPOSE-ONLY). CIDRs come
 			// from the learner snapshot; nothing here applies anything.
 			misrouted := make([]string, 0, len(vs))
