@@ -9,6 +9,7 @@ import (
 
 	"github.com/strace-me/lotsman/pkg/events"
 	"github.com/strace-me/lotsman/pkg/quality"
+	"github.com/strace-me/lotsman/pkg/stunprobe"
 )
 
 // Probe types. HTTP measures app-layer reachability; TCP measures whether a
@@ -136,8 +137,9 @@ func (m *MultiProber) probeSTUN(ctx context.Context, service string, position in
 	defer conn.Close()
 	conn.SetDeadline(time.Now().Add(m.timeout))
 
-	req, txID := stunBindingRequest()
-	if _, err := conn.Write(req); err != nil {
+	var txID [12]byte
+	rand.Read(txID[:])
+	if _, err := conn.Write(stunprobe.BuildBindingRequest(txID)); err != nil {
 		v.RTTms = int(time.Since(start).Milliseconds())
 		v.Err = "write: " + err.Error()
 		return v
@@ -150,41 +152,10 @@ func (m *MultiProber) probeSTUN(ctx context.Context, service string, position in
 		v.Err = "no STUN response: " + err.Error()
 		return v
 	}
-	if !isStunResponse(buf[:n], txID) {
+	if !stunprobe.IsBindingResponse(buf[:n], txID) {
 		v.Err = "malformed STUN response"
 		return v
 	}
 	v.OK = true
 	return v
-}
-
-// stunBindingRequest builds a 20-byte RFC 5389 Binding Request and returns it
-// with its transaction ID.
-func stunBindingRequest() ([]byte, [12]byte) {
-	var tx [12]byte
-	rand.Read(tx[:])
-	msg := make([]byte, 20)
-	// message type 0x0001 (Binding Request), length 0x0000
-	msg[0], msg[1] = 0x00, 0x01
-	msg[2], msg[3] = 0x00, 0x00
-	// magic cookie 0x2112A442
-	msg[4], msg[5], msg[6], msg[7] = 0x21, 0x12, 0xA4, 0x42
-	copy(msg[8:20], tx[:])
-	return msg, tx
-}
-
-func isStunResponse(b []byte, tx [12]byte) bool {
-	if len(b) < 20 {
-		return false
-	}
-	// magic cookie present and transaction ID echoed back.
-	if b[4] != 0x21 || b[5] != 0x12 || b[6] != 0xA4 || b[7] != 0x42 {
-		return false
-	}
-	for i := 0; i < 12; i++ {
-		if b[8+i] != tx[i] {
-			return false
-		}
-	}
-	return true
 }
