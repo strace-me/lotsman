@@ -21,6 +21,7 @@ import (
 	"log/slog"
 	"os"
 	"os/signal"
+	"sort"
 	"strings"
 	"sync"
 	"syscall"
@@ -44,6 +45,7 @@ import (
 	"github.com/strace-me/lotsman/pkg/kb"
 	"github.com/strace-me/lotsman/pkg/metrics"
 	"github.com/strace-me/lotsman/pkg/noderank"
+	"github.com/strace-me/lotsman/pkg/observe"
 	"github.com/strace-me/lotsman/pkg/periodic"
 	"github.com/strace-me/lotsman/pkg/probing"
 	"github.com/strace-me/lotsman/pkg/reconcile"
@@ -379,6 +381,34 @@ func main() {
 				return knowledge.Save(*kbFile)
 			}})
 		}
+		// Passive-observation eye (LOT-15): read sing-box's live /connections,
+		// compute per-service leak/dead-flow/throughput in Go, publish to metrics
+		// and log a summary. Observe-only — no remediation. Behind the clash client.
+		eye := observe.New(clashConnSource{clash}, reg)
+		var eyeMu sync.Mutex
+		var eyeSnap observe.Snapshot
+		mc.SetObserveSnapshot(func() observe.Snapshot {
+			eyeMu.Lock()
+			defer eyeMu.Unlock()
+			return eyeSnap
+		})
+		pr.Add(periodic.Task{Name: "observe", Interval: *checkInterval, Fn: func(c context.Context) error {
+			snap, err := eye.Observe(c)
+			if err != nil {
+				return err
+			}
+			eyeMu.Lock()
+			eyeSnap = snap
+			eyeMu.Unlock()
+			for _, name := range sortedServiceNames(snap.Services) {
+				sm := snap.Services[name]
+				log.Info("observe", "service", name, "flows", sm.Flows,
+					"leak_ratio", sm.LeakRatio, "dead_flow_ratio", sm.DeadFlowRatio,
+					"udp_flows", sm.UDPFlows, "bytes", sm.Bytes)
+			}
+			return nil
+		}})
+		log.Info("observe eye enabled (passive)", "interval", checkInterval.String())
 		runners = append(runners, pr.Run)
 		log.Info("maintenance loop enabled", "interval", checkInterval.String())
 	}
@@ -406,6 +436,36 @@ func main() {
 		}
 	}
 	log.Info("lotsmand stopped")
+}
+
+// clashConnSource adapts *dataplane.ClashClient to observe.Source: it maps the
+// dataplane /connections records into the dataplane-free shape the eye consumes.
+type clashConnSource struct{ c *dataplane.ClashClient }
+
+func (s clashConnSource) Connections(ctx context.Context) ([]observe.Conn, error) {
+	cs, err := s.c.Connections(ctx)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]observe.Conn, len(cs))
+	for i, c := range cs {
+		out[i] = observe.Conn{
+			Chains: c.Chains, Upload: c.Upload, Download: c.Download,
+			Host: c.Metadata.Host, DestIP: c.Metadata.DestinationIP, Network: c.Metadata.Network,
+		}
+	}
+	return out, nil
+}
+
+// sortedServiceNames returns the snapshot's service names in stable order so the
+// per-service observe log lines are deterministic.
+func sortedServiceNames(m map[string]observe.ServiceMetrics) []string {
+	out := make([]string, 0, len(m))
+	for k := range m {
+		out = append(out, k)
+	}
+	sort.Strings(out)
+	return out
 }
 
 // zapretStrategyIDs returns every zapret strategy that could be applied: the
