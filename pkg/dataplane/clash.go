@@ -84,7 +84,9 @@ func (c *ClashClient) NodeDelay(ctx context.Context, name, testURL string, timeo
 		Delay   int    `json:"delay"`
 		Message string `json:"message"`
 	}
-	json.NewDecoder(resp.Body).Decode(&body)
+	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
+		return 0, fmt.Errorf("clash: node %q delay decode: %w", name, err)
+	}
 	if resp.StatusCode != http.StatusOK || body.Delay == 0 {
 		msg := body.Message
 		if msg == "" {
