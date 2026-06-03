@@ -14,14 +14,16 @@ import (
 	"sync"
 
 	"github.com/strace-me/lotsman/pkg/brain"
+	"github.com/strace-me/lotsman/pkg/misroute"
 	"github.com/strace-me/lotsman/pkg/observe"
 )
 
 // Collector gathers metrics and serves them.
 type Collector struct {
-	brainSnap   func() []brain.ServiceState
-	kbSnap      func() map[string]float64
-	observeSnap func() observe.Snapshot // optional; nil = observe eye disabled
+	brainSnap    func() []brain.ServiceState
+	kbSnap       func() map[string]float64
+	observeSnap  func() observe.Snapshot   // optional; nil = observe eye disabled
+	misrouteSnap func() []misroute.Verdict // optional; nil = misroute detector disabled
 
 	mu        sync.Mutex
 	probeOK   map[string]int
@@ -40,6 +42,11 @@ func New(brainSnap func() []brain.ServiceState, kbSnap func() map[string]float64
 // (LOT-15). The function should return the most recent Snapshot; metrics reads
 // it at scrape time. No-op effect until set.
 func (c *Collector) SetObserveSnapshot(fn func() observe.Snapshot) { c.observeSnap = fn }
+
+// SetMisrouteSnapshot wires the misroute detector's latest verdicts (LOT-16).
+// The function should return the most recent Detect result; metrics reads it at
+// scrape time and publishes lotsman_service_misrouted. No-op effect until set.
+func (c *Collector) SetMisrouteSnapshot(fn func() []misroute.Verdict) { c.misrouteSnap = fn }
 
 // ObserveProbe records a probe outcome. Implements probing.ProbeObserver.
 func (c *Collector) ObserveProbe(service string, ok bool, _ int) {
@@ -138,6 +145,16 @@ func (c *Collector) ServeHTTP(w http.ResponseWriter, _ *http.Request) {
 		b.WriteString("# TYPE lotsman_service_bytes gauge\n")
 		for _, s := range svcs {
 			fmt.Fprintf(&b, "lotsman_service_bytes{service=%q} %d\n", s, osnap.Services[s].Bytes)
+		}
+	}
+
+	if c.misrouteSnap != nil {
+		vs := c.misrouteSnap()
+		sort.Slice(vs, func(i, j int) bool { return vs[i].Service < vs[j].Service })
+		b.WriteString("# HELP lotsman_service_misrouted Whether the misroute detector flagged a service (1) or not (0).\n")
+		b.WriteString("# TYPE lotsman_service_misrouted gauge\n")
+		for _, v := range vs {
+			fmt.Fprintf(&b, "lotsman_service_misrouted{service=%q,kind=%q} %d\n", v.Service, v.Kind, b2i(v.Misrouted))
 		}
 	}
 
