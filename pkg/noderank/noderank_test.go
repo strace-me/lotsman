@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"sync"
 	"testing"
 	"time"
 
@@ -14,10 +15,17 @@ import (
 
 // fakeAPI is an in-memory Clash stand-in. delays[node][url] = latency ms; a
 // missing entry or 0 means that probe fails (node dead for that URL).
+//
+// The screen URL (defaultScreenURL) models a generic liveness check: a node is
+// reachable for the screen iff it has ANY non-zero delay entry. This mirrors
+// real life — a live exit answers a generate_204, a dead one answers nothing —
+// without forcing every test to add an explicit screen-URL entry per node.
 type fakeAPI struct {
-	info     dataplane.ProxyInfo
-	delays   map[string]map[string]int
-	setCalls []string // targets passed to SetSelector, in order
+	mu         sync.Mutex
+	info       dataplane.ProxyInfo
+	delays     map[string]map[string]int
+	setCalls   []string       // targets passed to SetSelector, in order
+	probeCalls map[string]int // node -> count of FULL (non-screen) NodeDelay calls
 }
 
 func (f *fakeAPI) Proxy(_ context.Context, _ string) (dataplane.ProxyInfo, error) {
@@ -25,7 +33,26 @@ func (f *fakeAPI) Proxy(_ context.Context, _ string) (dataplane.ProxyInfo, error
 }
 
 func (f *fakeAPI) NodeDelay(_ context.Context, name, testURL string, _ time.Duration) (int, error) {
-	if m, ok := f.delays[name]; ok {
+	if testURL == defaultScreenURL {
+		// Screen phase: alive iff the node has any non-zero delay entry.
+		f.mu.Lock()
+		m := f.delays[name]
+		f.mu.Unlock()
+		for _, d := range m {
+			if d > 0 {
+				return d, nil
+			}
+		}
+		return 0, fmt.Errorf("fake: %s dead on screen", name)
+	}
+	f.mu.Lock()
+	if f.probeCalls == nil {
+		f.probeCalls = map[string]int{}
+	}
+	f.probeCalls[name]++
+	m, ok := f.delays[name]
+	f.mu.Unlock()
+	if ok {
 		if d, ok := m[testURL]; ok && d > 0 {
 			return d, nil
 		}
@@ -239,6 +266,84 @@ func TestWinnerNotSelectorMember(t *testing.T) {
 	}
 	if len(api.setCalls) != 0 {
 		t.Fatalf("must not pin a non-member, got %v", api.setCalls)
+	}
+}
+
+// Switch margin (anti-flap): once a node is advised, a marginally-better node
+// must NOT flip the advice; only a clearly-better one (beating the advised node
+// by more than SwitchMargin) wins. Stickiness keeps the service from ping-ponging
+// between two near-equal exits every cycle.
+func TestSwitchMarginKeepsStickyNode(t *testing.T) {
+	api := newFake("direct", []string{"a", "b", "direct"},
+		map[string]map[string]int{"a": {svcURL: 30}, "b": {svcURL: 90}})
+	r := New(api, 1, false, quietLog())
+	svc := Service{Name: "x", Selector: "sel-x", ProbeURL: svcURL, Weights: balancer.ProfileFor("general")}
+	cands := []Candidate{{"a", ""}, {"b", ""}}
+
+	// Cycle 1: a (30ms) clearly beats b (90ms) -> a is advised.
+	if got, _ := r.Pick(context.Background(), svc, cands); got != "a" {
+		t.Fatalf("cycle1: got %q, want a", got)
+	}
+	// Cycle 2: b improves to be only MARGINALLY better than a. The score delta
+	// stays under SwitchMargin, so advice must STAY on a (no flap).
+	api.delays = map[string]map[string]int{"a": {svcURL: 30}, "b": {svcURL: 28}}
+	if got, _ := r.Pick(context.Background(), svc, cands); got != "a" {
+		t.Fatalf("marginal improvement must not flip advice, got %q, want a (sticky)", got)
+	}
+	// Cycle 3: b becomes CLEARLY better (much lower latency) -> exceeds margin,
+	// advice flips to b.
+	api.delays = map[string]map[string]int{"a": {svcURL: 200}, "b": {svcURL: 10}}
+	if got, _ := r.Pick(context.Background(), svc, cands); got != "b" {
+		t.Fatalf("clear improvement must flip advice, got %q, want b", got)
+	}
+}
+
+// Switch margin only guards healthy-vs-healthy churn: if the currently-advised
+// node goes DOWN, advice switches to the best survivor regardless of margin.
+func TestSwitchMarginIgnoredWhenAdvisedDown(t *testing.T) {
+	api := newFake("direct", []string{"a", "b", "direct"},
+		map[string]map[string]int{"a": {svcURL: 30}, "b": {svcURL: 90}})
+	r := New(api, 1, false, quietLog())
+	svc := Service{Name: "x", Selector: "sel-x", ProbeURL: svcURL, Weights: balancer.ProfileFor("general")}
+	cands := []Candidate{{"a", ""}, {"b", ""}}
+
+	// Cycle 1: a advised.
+	if got, _ := r.Pick(context.Background(), svc, cands); got != "a" {
+		t.Fatalf("cycle1: got %q, want a", got)
+	}
+	// a goes dead; downAfter=3 -> three failing cycles to evict it. b stays the
+	// only healthy node throughout. Even while a is merely degraded a healthy b
+	// outranks it, and once a is DOWN the margin cannot keep it.
+	api.delays = map[string]map[string]int{"b": {svcURL: 90}}
+	for i := 1; i <= 3; i++ {
+		if got, _ := r.Pick(context.Background(), svc, cands); got != "b" {
+			t.Fatalf("cycle %d: advised node down/degraded, must switch to b, got %q", i, got)
+		}
+	}
+}
+
+// 2-phase validation: a node that is dead on the cheap screen is dropped BEFORE
+// the full per-service probe runs, so the expensive probe is never spent on it.
+// We assert this via the fake's full-probe call counter.
+func TestScreenSkipsFullProbeOnDeadNode(t *testing.T) {
+	api := newFake("direct", []string{"live", "dead", "direct"},
+		map[string]map[string]int{
+			"live": {svcURL: 20}, // answers screen + full probe
+			"dead": {},           // no entries -> fails the screen
+		})
+	r := New(api, 2, false, quietLog()) // samples=2: full probe would be 2 calls if it ran
+	svc := Service{Name: "x", Selector: "sel-x", ProbeURL: svcURL, Weights: balancer.ProfileFor("general")}
+	cands := []Candidate{{"live", ""}, {"dead", ""}}
+
+	got, _ := r.Pick(context.Background(), svc, cands)
+	if got != "live" {
+		t.Fatalf("got %q, want live (dead screened out)", got)
+	}
+	if n := api.probeCalls["dead"]; n != 0 {
+		t.Fatalf("dead node screened out but full probe ran %d times, want 0", n)
+	}
+	if n := api.probeCalls["live"]; n != r.samples {
+		t.Fatalf("live node full probe ran %d times, want %d", n, r.samples)
 	}
 }
 

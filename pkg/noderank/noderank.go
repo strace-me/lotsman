@@ -71,6 +71,22 @@ type nodeHealth struct {
 // a (deprioritized) candidate so one bad probe never throws away a good node.
 const downAfter = 3
 
+// defaultSwitchMargin is the score delta a NEW node must beat the currently-
+// advised node by before advice flips (anti-flap, à la mihomo url-test
+// tolerance). Scores are in [0,1]; 0.05 ignores ~5% noise between near-equal
+// nodes so a service does not ping-pong between two good exits every cycle.
+const defaultSwitchMargin = 0.05
+
+// defaultScreenURL is the cheap generic target for the screen phase. It is a
+// generate_204 endpoint (tiny, no body), reachable from any live exit, so a
+// failure here means the node is dead — not that the service path is bad.
+const defaultScreenURL = "http://www.gstatic.com/generate_204"
+
+// defaultScreenTimeout bounds the screen probe. Much tighter than the full
+// per-service timeout: a dead node should fail fast so we never spend the
+// (slower, multi-sample) service probe budget on it.
+const defaultScreenTimeout = 1500 * time.Millisecond
+
 // Ranker probes and pins. One instance serves all services and keeps per-node
 // health between cycles (so it must be created once and reused).
 type Ranker struct {
@@ -79,6 +95,21 @@ type Ranker struct {
 	timeout time.Duration
 	dryRun  bool
 	log     *slog.Logger
+
+	// SwitchMargin is the minimum score advantage (in [0,1]) a new top node
+	// must have over the currently-advised node before advice flips. While the
+	// advised node stays healthy and within this margin, it is kept (stickiness).
+	// If it goes DOWN/ineligible, advice switches regardless. Defaults to
+	// defaultSwitchMargin; set <0 to disable (always take the top node).
+	SwitchMargin float64
+
+	// ScreenURL / ScreenTimeout configure the cheap first phase: a single
+	// short-timeout delay check against a generic URL to drop obviously-dead
+	// nodes before the full per-service probe runs. ScreenTimeout <= 0 or an
+	// empty ScreenURL disables screening (every node goes straight to the full
+	// probe — the pre-2-phase behaviour).
+	ScreenURL     string
+	ScreenTimeout time.Duration
 
 	mu     sync.Mutex
 	health map[string]*nodeHealth
@@ -98,8 +129,11 @@ func New(api API, samples int, dryRun bool, log *slog.Logger) *Ranker {
 	}
 	return &Ranker{
 		api: api, samples: samples, timeout: 5 * time.Second, dryRun: dryRun, log: log,
-		health: map[string]*nodeHealth{},
-		advice: map[string]string{},
+		SwitchMargin:  defaultSwitchMargin,
+		ScreenURL:     defaultScreenURL,
+		ScreenTimeout: defaultScreenTimeout,
+		health:        map[string]*nodeHealth{},
+		advice:        map[string]string{},
 	}
 }
 
@@ -151,6 +185,10 @@ func (r *Ranker) observe(tag string, q quality.Quality) (eff quality.Quality, he
 // winner is not a selector member). Never errors on a single bad node — only on
 // a failure to read the selector itself.
 func (r *Ranker) Pick(ctx context.Context, svc Service, cands []Candidate) (string, error) {
+	// Remember the node we currently advise BEFORE clearing it: the switch
+	// margin below keeps advising it (stickiness) unless a new node clearly
+	// beats it or it is no longer eligible/healthy.
+	prev := r.Best(svc.Name)
 	// Clear first: if no node survives below, Best() returns "" and the VPN
 	// executor falls back to the pool url-test (which finds a live node itself).
 	r.setAdvice(svc.Name, "")
@@ -195,6 +233,16 @@ func (r *Ranker) Pick(ctx context.Context, svc Service, cands []Candidate) (stri
 			defer wg.Done()
 			sem <- struct{}{}
 			defer func() { <-sem }()
+			// Phase 1 (cheap screen): a single short-timeout delay against a
+			// generic URL. If it fails the node is obviously dead, so we skip
+			// the (slower, multi-sample) service probe entirely and record a
+			// total-loss quality — existing hysteresis then degrades/evicts it
+			// exactly as a full-probe failure would.
+			if !r.screen(ctx, tag) {
+				raw[i] = quality.FromRTTs(nil, r.samples)
+				return
+			}
+			// Phase 2 (full): probe through the service's own URL.
 			raw[i] = r.probe(ctx, tag, svc.ProbeURL)
 		}(i, c.Tag)
 	}
@@ -224,6 +272,26 @@ func (r *Ranker) Pick(ctx context.Context, svc Service, cands []Candidate) (stri
 	})
 	best := pool[0].cand
 
+	// Switch margin (anti-flap): if the previously-advised node is still in the
+	// pool, healthy, and a selector member, only flip to a new top node when it
+	// beats the advised node's score by more than SwitchMargin. Otherwise keep
+	// the advised node (stickiness). A DOWN/ineligible advised node is not in
+	// the pool, so we fall through and take the new top — the margin only guards
+	// healthy-vs-healthy churn.
+	if prev != "" && prev != best.ID && r.SwitchMargin >= 0 {
+		for _, p := range pool {
+			if p.cand.ID != prev || !p.healthy || !members[prev] {
+				continue
+			}
+			topScore := balancer.Score(best, svc.Weights)
+			prevScore := balancer.Score(p.cand, svc.Weights)
+			if topScore-prevScore <= r.SwitchMargin {
+				best = p.cand // within margin: stay put
+			}
+			break
+		}
+	}
+
 	if !members[best.ID] {
 		// The generated selector does not list this concrete node, so a PUT would
 		// 400. Surface it loudly — the config generator and the candidate set have
@@ -240,6 +308,19 @@ func (r *Ranker) Pick(ctx context.Context, svc Service, cands []Candidate) (stri
 	r.log.Info("noderank: recommend node", "service", svc.Name, "selector", svc.Selector,
 		"now", info.Now, "best", best.ID, "p95ms", best.Q.P95ms, "loss", best.Q.Loss)
 	return best.ID, nil
+}
+
+// screen is the cheap phase-1 liveness check: a single short-timeout delay
+// against the generic ScreenURL. Returns true if the node answered (passes to
+// the full probe) or if screening is disabled (empty URL / non-positive
+// timeout — then every node passes through). A node that passes the screen but
+// later fails the full service probe is still handled by the usual hysteresis.
+func (r *Ranker) screen(ctx context.Context, node string) bool {
+	if r.ScreenURL == "" || r.ScreenTimeout <= 0 {
+		return true
+	}
+	_, err := r.api.NodeDelay(ctx, node, r.ScreenURL, r.ScreenTimeout)
+	return err == nil
 }
 
 // probe runs samples delay tests through the service URL; failures count as loss.
