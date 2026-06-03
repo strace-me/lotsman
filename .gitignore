@@ -13,3 +13,6 @@
 # editor/OS
 .DS_Store
 *.swp
+
+# agent worktrees (ephemeral)
+.claude/worktrees/
