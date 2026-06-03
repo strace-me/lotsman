@@ -128,10 +128,33 @@ func TestObserveLeakAndDeadRatios(t *testing.T) {
 		t.Errorf("youtube bytes=%d, want %d", yt.Bytes, wantBytes)
 	}
 
+	// DestIPs: the 4 matched youtube flows carry 4 distinct parseable IPs; the
+	// unmatched github flow (140.82.112.3) must NOT appear.
+	gotIPs := map[string]bool{}
+	for _, ip := range yt.DestIPs {
+		gotIPs[ip.String()] = true
+	}
+	wantIPs := []string{"142.251.1.1", "142.251.1.2", "142.251.1.3", "142.251.99.4"}
+	if len(yt.DestIPs) != len(wantIPs) {
+		t.Errorf("youtube DestIPs=%v, want %v", yt.DestIPs, wantIPs)
+	}
+	for _, w := range wantIPs {
+		if !gotIPs[w] {
+			t.Errorf("youtube DestIPs missing %s (got %v)", w, yt.DestIPs)
+		}
+	}
+	if gotIPs["140.82.112.3"] {
+		t.Error("youtube DestIPs must not include the unmatched github flow IP")
+	}
+
 	// ru_mail is direct-only: its direct flow is NOT a leak.
 	rm := snap.Services["ru_mail"]
 	if rm.Flows != 1 || rm.LeakFlows != 0 || rm.LeakRatio != 0 {
 		t.Errorf("ru_mail flows=%d leak=%d ratio=%v, want 1/0/0", rm.Flows, rm.LeakFlows, rm.LeakRatio)
+	}
+	// ru_mail's single matched flow contributes its dest IP.
+	if len(rm.DestIPs) != 1 || rm.DestIPs[0].String() != "94.100.180.200" {
+		t.Errorf("ru_mail DestIPs=%v, want [94.100.180.200]", rm.DestIPs)
 	}
 }
 
@@ -183,6 +206,22 @@ func TestLeakOnlyForTunnelIntended(t *testing.T) {
 	if g := snap.Services["gaming-epic"]; g.Flows != 2 || g.LeakFlows != 2 || g.LeakRatio != 1 {
 		t.Errorf("vpn-preferred gaming-epic flows=%d leak=%d ratio=%v, want 2/2/1",
 			g.Flows, g.LeakFlows, g.LeakRatio)
+	}
+}
+
+// TestDestIPsDedup: many flows to the same edge collapse to one DestIPs entry.
+func TestDestIPsDedup(t *testing.T) {
+	conns := []Conn{
+		{Chains: []string{"sel-youtube"}, Host: "a.googlevideo.com", DestIP: "142.251.1.1", Network: "udp"},
+		{Chains: []string{"sel-youtube"}, Host: "b.googlevideo.com", DestIP: "142.251.1.1", Network: "udp"},
+		{Chains: []string{"sel-youtube"}, Host: "c.googlevideo.com", DestIP: "142.251.1.2", Network: "udp"},
+	}
+	snap, err := New(fakeSource{conns}, testRegistry()).Observe(context.Background())
+	if err != nil {
+		t.Fatalf("Observe: %v", err)
+	}
+	if got := snap.Services["youtube"].DestIPs; len(got) != 2 {
+		t.Errorf("DestIPs=%v, want 2 distinct (dedup of 142.251.1.1)", got)
 	}
 }
 

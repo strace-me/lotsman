@@ -75,6 +75,12 @@ type ServiceMetrics struct {
 	// Bytes is total upload+download across matched flows.
 	Bytes int64
 
+	// DestIPs is the set of distinct, parseable destination IPs observed across
+	// this service's matched flows. It feeds the iplearn Learner so the
+	// remediation planner's ip-fallback rung gets real CDN CIDRs. Deduplicated
+	// per pass; only real (net.ParseIP-able) addresses are collected.
+	DestIPs []net.IP
+
 	// LeakRatio = LeakFlows / Flows (0 when Flows == 0).
 	LeakRatio float64
 	// DeadFlowRatio = DeadUDPFlows / UDPFlows (0 when UDPFlows == 0).
@@ -168,6 +174,9 @@ func (e *Eye) Observe(ctx context.Context) (Snapshot, error) {
 		return Snapshot{}, err
 	}
 	snap := Snapshot{Services: map[string]ServiceMetrics{}}
+	// seenIP dedups destination IPs per service within this pass, so DestIPs holds
+	// each distinct address once even when many flows share a CDN edge.
+	seenIP := map[string]map[string]bool{}
 	for _, c := range conns {
 		var hit *matcher
 		for i := range e.matchers {
@@ -186,6 +195,19 @@ func (e *Eye) Observe(ctx context.Context) (Snapshot, error) {
 		sm.Service = hit.svc.Name
 		sm.Flows++
 		sm.Bytes += c.Upload + c.Download
+		if c.DestIP != "" {
+			if ip := net.ParseIP(c.DestIP); ip != nil {
+				seen := seenIP[hit.svc.Name]
+				if seen == nil {
+					seen = map[string]bool{}
+					seenIP[hit.svc.Name] = seen
+				}
+				if key := ip.String(); !seen[key] {
+					seen[key] = true
+					sm.DestIPs = append(sm.DestIPs, ip)
+				}
+			}
+		}
 		if hit.svc.TunnelIntended() && c.finalOutbound() == directOutbound {
 			sm.LeakFlows++
 		}
