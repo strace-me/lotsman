@@ -64,7 +64,9 @@ type ServiceMetrics struct {
 	// Flows is the number of live connections matched to this service.
 	Flows int
 	// LeakFlows is matched flows whose final outbound is "direct" while the
-	// service is NOT direct-only (i.e. it should have ridden its selector).
+	// service is tunnel-intended (PREFERRED step is VPN, i.e. it should have
+	// ridden its selector). Zapret/direct-preferred services route "direct" by
+	// design, so their direct flows are not leaks (LOT-22).
 	LeakFlows int
 	// UDPFlows is matched UDP/QUIC connections (the dead-flow denominator).
 	UDPFlows int
@@ -157,8 +159,9 @@ func New(src Source, reg *registry.Registry) *Eye {
 }
 
 // Observe fetches the live connection table and computes per-service metrics. A
-// connection is attributed to the first matching service. Direct-only services
-// never count leaks (direct IS their intended path).
+// connection is attributed to the first matching service. Only tunnel-intended
+// services (VPN-preferred) count "direct" flows as leaks; zapret/direct-preferred
+// services route direct by design, so direct IS a legitimate path for them.
 func (e *Eye) Observe(ctx context.Context) (Snapshot, error) {
 	conns, err := e.src.Connections(ctx)
 	if err != nil {
@@ -183,7 +186,7 @@ func (e *Eye) Observe(ctx context.Context) (Snapshot, error) {
 		sm.Service = hit.svc.Name
 		sm.Flows++
 		sm.Bytes += c.Upload + c.Download
-		if !hit.svc.DirectOnly() && c.finalOutbound() == directOutbound {
+		if hit.svc.TunnelIntended() && c.finalOutbound() == directOutbound {
 			sm.LeakFlows++
 		}
 		if isUDP(c.Network) {

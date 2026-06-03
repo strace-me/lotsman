@@ -88,6 +88,7 @@ func main() {
 		kbFile          = flag.String("kb-file", "", "persist/restore learned strategy success (KB) to this JSON file so experience survives restart (empty = disabled)")
 		smart           = flag.Bool("smart", true, "enable the intelligence layer (policy/correlate/damper/adaptive/anomaly) in escalation decisions")
 		checkInterval   = flag.Duration("check-interval", 0, "run background maintenance (Flowseal update, subscription refresh) every interval (0 = disabled)")
+		observeInterval = flag.Duration("observe-interval", 30*time.Second, "run the passive-observation eye (observe/detect/propose, PROPOSE-ONLY) every interval, independent of -check-interval (0 = disabled)")
 		flowsealBase    = flag.String("flowseal-base", "/opt", "parent dir for Flowseal bundles (holds flowseal-current symlink)")
 		reconcileSB     = flag.Bool("reconcile", false, "daemon owns the sing-box config: regenerate from config+subs and apply on structural change (needs -singbox-config + a config with subscriptions; -dry-run gates whether it actually applies)")
 		singboxConfig   = flag.String("singbox-config", "", "path to the sing-box config the daemon reconciles/owns")
@@ -384,9 +385,17 @@ func main() {
 				return knowledge.Save(*kbFile)
 			}})
 		}
-		// Passive-observation eye (LOT-15): read sing-box's live /connections,
-		// compute per-service leak/dead-flow/throughput in Go, publish to metrics
-		// and log a summary. Observe-only — no remediation. Behind the clash client.
+		runners = append(runners, pr.Run)
+		log.Info("maintenance loop enabled", "interval", checkInterval.String())
+	}
+
+	// Passive-observation eye (LOT-15/16/18a) on its own SHORT interval, separate
+	// from the 15m maintenance loop (LOT-21): a ~1-minute video stall must be
+	// visible to the detector, so this fires every -observe-interval and once at
+	// start. It is cheap (one clash /connections GET + in-memory compute) and
+	// stays PROPOSE-ONLY — it logs + publishes metrics; it never applies.
+	if *observeInterval > 0 {
+		op := periodic.New(log)
 		eye := observe.New(clashConnSource{clash}, reg)
 		var eyeMu sync.Mutex
 		var eyeSnap observe.Snapshot
@@ -419,7 +428,7 @@ func main() {
 			defer eyeMu.Unlock()
 			return plans
 		})
-		pr.Add(periodic.Task{Name: "observe", Interval: *checkInterval, Fn: func(c context.Context) error {
+		op.Add(periodic.Task{Name: "observe", Interval: *observeInterval, RunAtStart: true, Fn: func(c context.Context) error {
 			snap, err := eye.Observe(c)
 			if err != nil {
 				return err
@@ -464,9 +473,8 @@ func main() {
 			}
 			return nil
 		}})
-		log.Info("observe eye enabled (passive)", "interval", checkInterval.String())
-		runners = append(runners, pr.Run)
-		log.Info("maintenance loop enabled", "interval", checkInterval.String())
+		runners = append(runners, op.Run)
+		log.Info("observe eye enabled (passive, propose-only)", "interval", observeInterval.String())
 	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
