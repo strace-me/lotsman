@@ -44,6 +44,7 @@ import (
 	"github.com/strace-me/lotsman/pkg/flowseal"
 	"github.com/strace-me/lotsman/pkg/kb"
 	"github.com/strace-me/lotsman/pkg/metrics"
+	"github.com/strace-me/lotsman/pkg/misroute"
 	"github.com/strace-me/lotsman/pkg/noderank"
 	"github.com/strace-me/lotsman/pkg/observe"
 	"github.com/strace-me/lotsman/pkg/periodic"
@@ -392,19 +393,37 @@ func main() {
 			defer eyeMu.Unlock()
 			return eyeSnap
 		})
+		// Misroute detector (LOT-16): turn the eye's snapshot into per-service
+		// verdicts. Phase 1 is detect-only — it logs and publishes a metric, no
+		// remediation, no Brain escalation (that is LOT-18).
+		misrouteCfg := misroute.DefaultConfig()
+		var verdicts []misroute.Verdict
+		mc.SetMisrouteSnapshot(func() []misroute.Verdict {
+			eyeMu.Lock()
+			defer eyeMu.Unlock()
+			return verdicts
+		})
 		pr.Add(periodic.Task{Name: "observe", Interval: *checkInterval, Fn: func(c context.Context) error {
 			snap, err := eye.Observe(c)
 			if err != nil {
 				return err
 			}
+			vs := misroute.Detect(snap, misrouteCfg)
 			eyeMu.Lock()
 			eyeSnap = snap
+			verdicts = vs
 			eyeMu.Unlock()
 			for _, name := range sortedServiceNames(snap.Services) {
 				sm := snap.Services[name]
 				log.Info("observe", "service", name, "flows", sm.Flows,
 					"leak_ratio", sm.LeakRatio, "dead_flow_ratio", sm.DeadFlowRatio,
 					"udp_flows", sm.UDPFlows, "bytes", sm.Bytes)
+			}
+			for _, v := range vs {
+				if v.Misrouted {
+					log.Warn("misroute detected", "service", v.Service, "kind", v.Kind,
+						"leak_ratio", v.LeakRatio, "dead_ratio", v.DeadFlowRatio, "reason", v.Reason)
+				}
 			}
 			return nil
 		}})
