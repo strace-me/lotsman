@@ -1,0 +1,38 @@
+#!/bin/bash
+# panel-help — quick reference for the lotsman monitor + management CLIs.
+cat <<'EOF'
+LOTSMAN — btop-style live monitor + management CLIs
+
+  panel              launch the live MONITOR (read-only btop-style TUI)
+  panel --snapshot   render ONE frame to stdout and exit (for verification)
+  panel --help       this help
+
+MONITOR KEYS (panel is read-only; it manages nothing):
+  q / Esc / Ctrl-C   quit
+  +                  faster refresh
+  -                  slower refresh
+
+MANAGEMENT CLIs (all config changes: flock + backup + validate + rollback):
+
+  sing-box users (hy2 + anytls + tuic):
+    sbuser list              list users + sub token + URL
+    sbuser add  <name>       create user, write sub, print URL + QR
+    sbuser rm   <name>       remove user + delete sub
+    sbuser show <name>       links + sub URL + QR
+
+  subscriptions (read-only):
+    sub list                 user -> sub URL table
+    sub show <name>          decoded links + QR
+
+  protocols (read-only):
+    proto                    ports / users / live conns
+
+  xray REALITY (existing, unchanged):
+    userlist                 list REALITY clients
+    newuser                  add REALITY client
+    rmuser                   remove REALITY client
+    sharelink                print a client's REALITY link + QR
+    mainuser                 main REALITY client link
+
+Never disables ufw; never touches SSH (port 51389).
+EOF

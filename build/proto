@@ -1,0 +1,21 @@
+#!/bin/bash
+# proto — show protocol ports, user counts, and live connection counts (read-only).
+set -uo pipefail
+source /usr/local/lib/lotsman-lib.sh
+
+conns(){ local f=-tn; [[ ${2:-t} == u ]] && f=-un
+  ss -H $f state established "( sport = :$1 )" 2>/dev/null | wc -l | tr -d ' '; }
+conns_tcp_all(){ ss -H -tn "( sport = :$1 )" 2>/dev/null | wc -l | tr -d ' '; }
+proto_ucount(){ jq -r --arg t "$1" '[.inbounds[]|select(.type==$t).users[]?]|length' "$SB_CONF" 2>/dev/null || echo 0; }
+xr_ucount(){ jq -r '.inbounds[0].settings.clients|length' "$XR_CONF" 2>/dev/null || echo 0; }
+
+echo "Lotsman protocols  (public IP: $(pubip), SNI: $SNI)"
+echo
+printf '%-22s %-10s %-7s %-7s\n' "PROTOCOL" "PORT" "USERS" "CONNS"
+printf '%-22s %-10s %-7s %-7s\n' "--------" "----" "-----" "-----"
+printf '%-22s %-10s %-7s %-7s\n' "REALITY (xray)"      "tcp/443"  "$(xr_ucount)"             "$(conns_tcp_all 443)"
+printf '%-22s %-10s %-7s %-7s\n' "AnyTLS"              "tcp/8443" "$(proto_ucount anytls)"   "$(conns 8443 t)"
+printf '%-22s %-10s %-7s %-7s\n' "Hysteria2+salamander" "udp/2096" "$(proto_ucount hysteria2)" "$(conns 2096 u)"
+printf '%-22s %-10s %-7s %-7s\n' "TUIC"                "udp/2097" "$(proto_ucount tuic)"     "$(conns 2097 u)"
+echo
+echo "* Hysteria2+salamander (udp/2096) is the best option under TSPU."

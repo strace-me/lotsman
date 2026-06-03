@@ -1,0 +1,110 @@
+#!/bin/bash
+# sbuser — manage sing-box users (hysteria2 + anytls + tuic) and their sub tokens.
+# Subcommands: list | add <name> | rm <name> | show <name>
+# Mutating ops: flock + timestamped backup + sing-box check + restart + auto-rollback.
+# Never touches ufw / SSH.
+set -uo pipefail
+source /usr/local/lib/lotsman-lib.sh
+
+usage(){ cat <<EOF
+sbuser — sing-box user management (hy2 + anytls + tuic)
+
+  sbuser list            list users, sub token, live conns
+  sbuser add  <name>     create user (fresh creds), write sub, print URL + QR
+  sbuser rm   <name>     remove user and delete sub
+  sbuser show <name>     print links + sub URL + QR for a user
+
+Every change is backed up + validated (sing-box check) + restarted with
+automatic rollback on failure.  Read-only: list, show.
+EOF
+}
+
+cmd_list(){
+  local n=0 names; names=$(sb_users)
+  if [[ -z $names ]]; then echo "(no sing-box users)"; return 0; fi
+  printf '%-20s %-34s %s\n' "USER" "SUB-TOKEN" "SUB-URL"
+  printf '%-20s %-34s %s\n' "----" "---------" "-------"
+  local u tok
+  while IFS= read -r u; do
+    [[ -z $u ]] && continue
+    tok=$(sb_token_for "$u"); [[ -z $tok ]] && tok="(none)"
+    printf '%-20s %-34s %s\n' "$u" "$tok" "$( [[ $tok == "(none)" ]] && echo "-" || sub_url "$tok")"
+    n=$((n+1))
+  done <<<"$names"
+  echo
+  echo "total: $n users  (ports: hy2 udp/2096  anytls tcp/8443  tuic udp/2097)"
+}
+
+cmd_add(){
+  need_root
+  local name=${1:-}
+  [[ -z $name || $name == *" "* ]] && { echo "Invalid/empty name." >&2; exit 1; }
+  sb_has_user "$name" && { echo "User '$name' already exists." >&2; exit 1; }
+  (
+    flock -x 9
+    backup "$SB_CONF"
+    local pw uuid tpw
+    pw=$(openssl rand -hex 16); uuid=$(cat /proc/sys/kernel/random/uuid); tpw=$(openssl rand -hex 16)
+    jq --arg n "$name" --arg pw "$pw" --arg uuid "$uuid" --arg tpw "$tpw" '
+      .inbounds |= map(
+        if .type=="hysteria2" or .type=="anytls" then .users += [{name:$n,password:$pw}]
+        elif .type=="tuic" then .users += [{name:$n,uuid:$uuid,password:$tpw}] else . end)' \
+      "$SB_CONF" >"$SB_CONF.tmp" && mv "$SB_CONF.tmp" "$SB_CONF"
+    if ! sb_validate_restart >/tmp/.sbuser_err 2>&1; then
+      sb_rollback
+      echo "ADD FAILED — rolled back:" >&2; cat /tmp/.sbuser_err >&2
+      exit 1
+    fi
+  ) 9>"$LOCK" || exit 1
+  local tok; tok=$(sb_write_sub "$name")
+  echo "== sing-box user '$name' added =="
+  echo "Sub URL: $(sub_url "$tok")"
+  echo
+  sb_links "$name"
+  echo
+  echo "QR (hysteria2):"
+  qr "$(sb_links "$name" | head -1)"
+}
+
+cmd_rm(){
+  need_root
+  local name=${1:-}
+  [[ -z $name ]] && { echo "Usage: sbuser rm <name>" >&2; exit 1; }
+  sb_has_user "$name" || { echo "User '$name' not found." >&2; exit 1; }
+  (
+    flock -x 9
+    backup "$SB_CONF"
+    jq --arg n "$name" '.inbounds |= map(.users |= map(select(.name!=$n)))' \
+      "$SB_CONF" >"$SB_CONF.tmp" && mv "$SB_CONF.tmp" "$SB_CONF"
+    if ! sb_validate_restart >/tmp/.sbuser_err 2>&1; then
+      sb_rollback
+      echo "RM FAILED — rolled back:" >&2; cat /tmp/.sbuser_err >&2
+      exit 1
+    fi
+  ) 9>"$LOCK" || exit 1
+  local tok; tok=$(sb_token_for "$name"); [[ -n $tok ]] && rm -f "$SUB_DIR/$tok"
+  echo "User '$name' removed; sub deleted. sing-box: $(systemctl is-active sing-box)"
+}
+
+cmd_show(){
+  local name=${1:-}
+  [[ -z $name ]] && { echo "Usage: sbuser show <name>" >&2; exit 1; }
+  sb_has_user "$name" || { echo "User '$name' not found." >&2; exit 1; }
+  local tok; tok=$(sb_token_for "$name")
+  echo "== $name =="
+  [[ -n $tok ]] && echo "Sub URL: $(sub_url "$tok")" || echo "Sub URL: (no token; run 'sbuser add' or regenerate)"
+  echo
+  sb_links "$name"
+  echo
+  echo "QR (hysteria2):"
+  qr "$(sb_links "$name" | head -1)"
+}
+
+case "${1:-}" in
+  list|"") cmd_list ;;
+  add)  shift; cmd_add  "$@" ;;
+  rm)   shift; cmd_rm   "$@" ;;
+  show) shift; cmd_show "$@" ;;
+  -h|--help|help) usage ;;
+  *) echo "Unknown subcommand: $1" >&2; usage; exit 1 ;;
+esac

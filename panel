@@ -1,0 +1,625 @@
+#!/bin/bash
+# Lotsman control panel — htop-style live TUI dashboard
+# Manages: Xray (VLESS+REALITY tcp/443) + sing-box (anytls/hy2+salamander/tuic) + lotsman-sub.
+# Safe by design: every config-mutating action does flock + backup + validate + restart + rollback.
+# Never touches ufw-disable / SSH(51389). Read-only live monitoring; writes only on explicit F-key actions.
+set -uo pipefail
+
+#==============================================================================
+# CONFIG / CONSTANTS
+#==============================================================================
+SB_CONF=/etc/sing-box/config.json
+XR_CONF=/usr/local/etc/xray/config.json
+SUB_DIR=/opt/lotsman-sub
+BAK_DIR=/var/backups/lotsman-panel
+LOCK=/run/lock/lotsman-panel.lock
+WAN=""                                   # auto-detected below
+SNI=www.bing.com
+SB_CERT=/etc/sing-box/cert.pem
+SB_KEY=/etc/sing-box/key.pem
+SUB_PORT=8080
+REFRESH=1.5
+
+# ---- WAN iface autodetect (fallback ens3) ----
+WAN=$(ip route get 8.8.8.8 2>/dev/null | grep -oP 'dev \K\S+' | head -1)
+[[ -z $WAN || ! -e /sys/class/net/$WAN ]] && WAN=ens3
+
+# ---- public IP (cache; refreshed lazily) ----
+PUBIP=""
+pubip() {
+  [[ -n $PUBIP ]] && { echo "$PUBIP"; return; }
+  PUBIP=$(ip -4 addr show "$WAN" 2>/dev/null | grep -oP 'inet \K[0-9.]+' | head -1)
+  [[ -z $PUBIP ]] && PUBIP=$(hostname -I 2>/dev/null | awk '{print $1}')
+  echo "$PUBIP"
+}
+
+#==============================================================================
+# CAPABILITIES: colors / unicode  (graceful fallback)
+#==============================================================================
+NCOL=$(tput colors 2>/dev/null || echo 0); [[ $NCOL =~ ^[0-9]+$ ]] || NCOL=0
+USE_COLOR=0; [[ $NCOL -ge 8 && -t 1 ]] && USE_COLOR=1
+USE_UNICODE=0
+case "${LANG:-}${LC_ALL:-}${LC_CTYPE:-}" in *[Uu][Tt][Ff]*) USE_UNICODE=1 ;; esac
+# --snapshot still wants color/unicode for the owner to preview the layout:
+SNAPSHOT=0
+[[ "${1:-}" == "--snapshot" ]] && { SNAPSHOT=1; USE_COLOR=1; USE_UNICODE=1; }
+
+if [[ $USE_COLOR -eq 1 ]]; then
+  e(){ printf '\033[%sm' "$1"; }
+  RST=$(e 0); BOLD=$(e 1); DIM=$(e 2)
+  FG_R=$(e 31); FG_G=$(e 32); FG_Y=$(e 33); FG_B=$(e 34); FG_M=$(e 35); FG_C=$(e 36); FG_W=$(e 37)
+  HDR="${BOLD}${FG_C}"; STAR="${BOLD}${FG_M}"
+else
+  RST=""; BOLD=""; DIM=""; FG_R=""; FG_G=""; FG_Y=""; FG_B=""; FG_M=""; FG_C=""; FG_W=""; HDR=""; STAR=""
+fi
+
+if [[ $USE_UNICODE -eq 1 ]]; then
+  TL='┌'; TR='┐'; BL='└'; BR='┘'; HZ='─'; VT='│'; TT='├'; RT='┤'
+  DOT='●'; UP='▲'; DN='▼'; BARF='|'; BARE=' '; STARC='★'
+else
+  TL='+'; TR='+'; BL='+'; BR='+'; HZ='-'; VT='|'; TT='+'; RT='+'
+  DOT='*'; UP='^'; DN='v'; BARF='#'; BARE=' '; STARC='*'
+fi
+
+#==============================================================================
+# small helpers
+#==============================================================================
+have(){ command -v "$1" >/dev/null 2>&1; }
+HAVE_WT=0; have whiptail && HAVE_WT=1
+
+# colorize a percentage by htop thresholds
+pctcol(){ local p=${1%.*}; if   ((p<60)); then echo "$FG_G"; elif ((p<85)); then echo "$FG_Y"; else echo "$FG_R"; fi; }
+
+# strip ANSI -> visible length
+vlen(){ local s=$1; s=$(printf '%s' "$s" | sed $'s/\033\[[0-9;]*m//g'); printf '%s' "${#s}"; }
+
+#==============================================================================
+# DATA COLLECTORS  (all defensive; print n/a on missing)
+#==============================================================================
+# CPU% via /proc/stat delta (state cached across frames)
+_CPU_PREV_IDLE=0; _CPU_PREV_TOTAL=0
+cpu_pct(){
+  local cpu a b c idle rest total diff_total diff_idle
+  read -r cpu a b c idle rest < <(grep -m1 '^cpu ' /proc/stat 2>/dev/null)
+  [[ -z ${idle:-} ]] && { echo 0; return; }
+  total=0; for x in $a $b $c $idle $rest; do total=$((total+x)); done
+  diff_total=$((total-_CPU_PREV_TOTAL)); diff_idle=$((idle-_CPU_PREV_IDLE))
+  _CPU_PREV_TOTAL=$total; _CPU_PREV_IDLE=$idle
+  ((diff_total<=0)) && { echo 0; return; }
+  echo $(( (100*(diff_total-diff_idle))/diff_total ))
+}
+mem_info(){ # echoes "usedpct usedMB totalMB"
+  local t a; t=$(grep -m1 MemTotal /proc/meminfo|awk '{print $2}')
+  a=$(grep -m1 MemAvailable /proc/meminfo|awk '{print $2}')
+  [[ -z $t || -z $a ]] && { echo "0 0 0"; return; }
+  local used=$((t-a)); echo "$(( used*100/t )) $((used/1024)) $((t/1024))"
+}
+# NET rate Mbit/s via /sys statistics delta
+_NET_PREV_RX=0; _NET_PREV_TX=0; _NET_PREV_T=0
+net_rate(){ # echoes "up_mbit down_mbit"
+  local rx tx now drx dtx dt
+  rx=$(cat /sys/class/net/$WAN/statistics/rx_bytes 2>/dev/null)
+  tx=$(cat /sys/class/net/$WAN/statistics/tx_bytes 2>/dev/null)
+  now=$(date +%s.%N)
+  [[ -z $rx || -z $tx ]] && { echo "n/a n/a"; return; }
+  if (( _NET_PREV_T==0 )); then _NET_PREV_RX=$rx; _NET_PREV_TX=$tx; _NET_PREV_T=${now%.*}; echo "0.0 0.0"; return; fi
+  dt=$(awk -v a="$now" -v b="$_NET_PREV_T" 'BEGIN{d=a-b; if(d<=0)d=1; print d}')
+  drx=$((rx-_NET_PREV_RX)); dtx=$((tx-_NET_PREV_TX))
+  _NET_PREV_RX=$rx; _NET_PREV_TX=$tx; _NET_PREV_T=$now
+  awk -v dtx="$dtx" -v drx="$drx" -v dt="$dt" 'BEGIN{printf "%.1f %.1f", (dtx*8/dt)/1e6, (drx*8/dt)/1e6}'
+}
+svc_active(){ systemctl is-active "$1" 2>/dev/null; }
+svc_pid(){ systemctl show -p MainPID --value "$1" 2>/dev/null; }
+# established conn count for a port (tcp or udp)
+conns(){ # $1 port  $2 proto(t|u)
+  local f=-tn; [[ $2 == u ]] && f=-un
+  ss -H $f state established "( sport = :$1 )" 2>/dev/null | wc -l | tr -d ' '
+}
+conns_any(){ ss -H -tn "( sport = :$1 )" 2>/dev/null | wc -l | tr -d ' '; }
+
+sb_users(){ jq -r '[.inbounds[].users[]?.name]|unique|.[]' "$SB_CONF" 2>/dev/null; }
+sb_ucount(){ jq -r '[.inbounds[].users[]?.name]|unique|length' "$SB_CONF" 2>/dev/null||echo 0; }
+xr_users(){ jq -r '.inbounds[0].settings.clients[]?.email' "$XR_CONF" 2>/dev/null; }
+xr_ucount(){ jq -r '.inbounds[0].settings.clients|length' "$XR_CONF" 2>/dev/null||echo 0; }
+proto_ucount(){ jq -r --arg t "$1" '[.inbounds[]|select(.type==$t).users[]?]|length' "$SB_CONF" 2>/dev/null||echo 0; }
+
+#==============================================================================
+# RENDER PRIMITIVES
+#==============================================================================
+COLS=80; ROWS=24
+read_dims(){ COLS=$(tput cols 2>/dev/null||echo 80); ROWS=$(tput lines 2>/dev/null||echo 24); }
+
+# horizontal gauge bar. $1 pct  $2 width
+bar(){
+  local pct=$1 w=$2 col fill i out=""
+  ((pct<0))&&pct=0; ((pct>100))&&pct=100
+  col=$(pctcol "$pct"); fill=$(( pct*w/100 ))
+  out="${col}"
+  for ((i=0;i<w;i++)); do (( i<fill )) && out+="$BARF" || out+="${DIM}${BARE}${RST}${col}"; done
+  printf '%s%s' "$out" "$RST"
+}
+
+OUT=""   # frame buffer
+p(){ OUT+="$1"$'\n'; }            # add a line
+prow(){ OUT+="$1"; }              # add raw (no newline)
+
+# box top with embedded title
+boxtop(){ # $1 title  $2 innerwidth
+  local title=" $1 "; local tw=${#title} w=$2
+  printf '%s%s%s%s%s%s%s%s\n' "$DIM" "$TL" "$RST" "$HDR" "$title" "$RST$DIM" "$(repeat "$HZ" $((w-tw)))" "$TR$RST"
+}
+boxsep(){ printf '%s%s%s%s\n' "$DIM" "$TT" "$(repeat "$HZ" "$1")" "$RT$RST"; }
+boxbot(){ printf '%s%s%s%s\n' "$DIM" "$BL" "$(repeat "$HZ" "$1")" "$BR$RST"; }
+repeat(){ local s="" i; for ((i=0;i<$2;i++)); do s+="$1"; done; printf '%s' "$s"; }
+# a content line inside a box: VT content padded VT (handles ANSI)
+bl(){ local c=$1 w=$2; local vl pad; vl=$(vlen "$c"); pad=$((w-vl-1)); ((pad<0))&&pad=0
+  printf '%s%s%s %s%s%s%s%s\n' "$DIM" "$VT" "$RST" "$c" "$(repeat ' ' "$pad")" "$DIM" "$VT" "$RST"; }
+
+#==============================================================================
+# FRAME RENDER
+#==============================================================================
+render(){
+  read_dims
+  local IW=$((COLS-2)); ((IW<40))&&IW=40
+  OUT=""
+
+  # ---------- TITLE LINE ----------
+  local host clock up
+  host=$(hostname 2>/dev/null||echo "?")
+  clock=$(date '+%Y-%m-%d %H:%M:%S')
+  up=$(uptime -p 2>/dev/null|sed 's/^up //'); [[ -z $up ]]&&up="n/a"
+  local title="${HDR}  LOTSMAN PANEL${RST}${DIM} · ${RST}${FG_W}$host${RST}${DIM} · ${RST}$(pubip)${DIM} · ${RST}$clock"
+  p "$(bl "$title" "$IW")"
+
+  # ---------- HEADER GAUGES ----------
+  boxtopv "System" "$IW"
+  local cpu mem net load
+  cpu=$(cpu_pct); read -r mp mu mt < <(mem_info); read -r nup ndn < <(net_rate)
+  load=$(awk '{print $1" "$2" "$3}' /proc/loadavg 2>/dev/null); [[ -z $load ]]&&load="n/a"
+  local gw=$(( IW>70 ? 28 : 16 ))
+  local cpustr="${BOLD}CPU${RST} [$(bar "$cpu" "$gw")$(pctcol "$cpu")$(printf '%4s%%' "$cpu")${RST}]"
+  local memstr="${BOLD}MEM${RST} [$(bar "$mp" "$gw")$(pctcol "$mp")$(printf '%4s%%' "$mp")${RST}] ${DIM}${mu}/${mt}MB${RST}"
+  p "$(bl "$cpustr" "$IW")"
+  p "$(bl "$memstr" "$IW")"
+  local netcol="$FG_G"; awk -v u="$nup" -v d="$ndn" 'BEGIN{exit !(u+d>50)}' && netcol="$FG_Y"
+  local netstr="${BOLD}NET${RST} ${FG_C}$UP${RST}${netcol}$(printf '%7s' "$nup")${RST} ${BOLD}Mbit/s up${RST}   ${FG_C}$DN${RST}${netcol}$(printf '%7s' "$ndn")${RST} ${BOLD}Mbit/s down${RST} ${DIM}($WAN)${RST}"
+  p "$(bl "$netstr" "$IW")"
+  p "$(bl "${BOLD}LOAD${RST} ${load}   ${DIM}uptime${RST} ${up}" "$IW")"
+
+  # ---------- SERVICES ----------
+  boxsepv "$IW"
+  p "$(bl "${HDR}SERVICES${RST}" "$IW")"
+  svc_line xray       "REALITY tcp/443"   443  t "$IW"
+  svc_line sing-box   "anytls/hy2/tuic"   8443 t "$IW"
+  svc_line lotsman-sub "sub http/$SUB_PORT" "$SUB_PORT" t "$IW"
+  ufw_line "$IW"
+
+  # ---------- PROTOCOLS ----------
+  boxsepv "$IW"
+  p "$(bl "${HDR}PROTOCOLS${RST}" "$IW")"
+  proto_line "REALITY"          "tcp/443"  443  t "$(xr_ucount)" "" "$IW"
+  proto_line "AnyTLS"           "tcp/8443" 8443 t "$(proto_ucount anytls)" "" "$IW"
+  proto_line "Hysteria2+salama" "udp/2096" 2096 u "$(proto_ucount hysteria2)" "best" "$IW"
+  proto_line "TUIC"             "udp/2097" 2097 u "$(proto_ucount tuic)" "" "$IW"
+
+  # ---------- USERS ----------
+  boxsepv "$IW"
+  local sbc xrc tot
+  sbc=$(sb_ucount); xrc=$(xr_ucount); tot=$((sbc+xrc))
+  p "$(bl "${HDR}USERS${RST} ${DIM}(sing-box:$sbc  xray:$xrc  total:$tot)${RST}" "$IW")"
+  users_block "$IW"
+
+  # ---------- LOG ----------
+  boxsepv "$IW"
+  p "$(bl "${HDR}LOG${RST} ${DIM}journalctl -u sing-box${RST}" "$IW")"
+  local ll
+  while IFS= read -r ll; do
+    [[ -z $ll ]] && continue
+    ll=${ll//$'\t'/ }
+    local maxc=$((IW-2)); ((${#ll}>maxc)) && ll="${ll:0:maxc}"
+    p "$(bl "${DIM}$ll${RST}" "$IW")"
+  done < <(journalctl -u sing-box -n 3 --no-pager -o short 2>/dev/null | tail -3)
+
+  boxbotv "$IW"
+
+  # ---------- FOOTER HOTKEYS ----------
+  footer "$IW"
+
+  printf '%s' "$OUT"
+}
+
+# box helpers writing into OUT buffer
+boxtopv(){ p "$(boxtop "$1" "$2")"; }
+boxsepv(){ p "$(boxsep "$1")"; }
+boxbotv(){ p "$(boxbot "$1")"; }
+
+svc_line(){ # $1 svc $2 desc $3 port $4 proto $5 IW
+  local svc=$1 desc=$2 port=$3 pr=$4 iw=$5 st dot pid c
+  st=$(svc_active "$svc")
+  if [[ $st == active ]]; then dot="${FG_G}${DOT}${RST}"; else dot="${FG_R}${DOT}${RST}"; fi
+  pid=$(svc_pid "$svc"); [[ -z $pid || $pid == 0 ]] && pid="-"
+  c=$(conns_any "$port"); [[ $pr == u ]] && c=$(conns "$port" u)
+  local line; line=$(printf '%s %-12s %-18s %s port:%-5s pid:%-7s conn:%s' \
+      "$dot" "$svc" "$desc" "${DIM}" "$port" "$pid" "$c")
+  p "$(bl "$line${RST}" "$iw")"
+}
+ufw_line(){
+  local iw=$1 st dot n
+  st=$(systemctl is-active ufw 2>/dev/null); [[ $st != active ]] && st=$(ufw status 2>/dev/null|grep -qi 'Status: active'&&echo active||echo inactive)
+  if [[ $st == active ]]; then dot="${FG_G}${DOT}${RST}"; else dot="${FG_R}${DOT}${RST}"; fi
+  n=$(ufw status numbered 2>/dev/null|grep -c '^\[')
+  [[ $n =~ ^[0-9]+$ ]] || n="n/a"
+  local line; line=$(printf '%s %-12s %-18s %srules:%s' "$dot" "ufw" "firewall" "${DIM}" "$n")
+  p "$(bl "$line${RST}" "$iw")"
+}
+proto_line(){ # $1 name $2 portlabel $3 port $4 proto $5 ucount $6 best $7 IW
+  local name=$1 pl=$2 port=$3 pr=$4 uc=$5 best=$6 iw=$7 c star=""
+  [[ $best == best ]] && star=" ${STAR}${STARC} best under TSPU${RST}"
+  if [[ $pr == u ]]; then c=$(conns "$port" u); else c=$(conns "$port" t); fi
+  local line; line=$(printf '%s %-16s %-9s %susers:%-3s conn:%-4s%s' \
+     "${FG_B}»${RST}" "$name" "$pl" "${DIM}" "$uc" "$c" "${RST}")
+  p "$(bl "$line$star" "$iw")"
+}
+users_block(){
+  local iw=$1
+  local -a names=()
+  local u
+  while read -r u; do [[ -n $u ]] && names+=("sb:$u"); done < <(sb_users)
+  while read -r u; do [[ -n $u ]] && names+=("xr:$u"); done < <(xr_users)
+  [[ ${#names[@]} -eq 0 ]] && { p "$(bl "${DIM}(no users)${RST}" "$iw")"; return; }
+  # pack into columns
+  local colw=22; local percol=$(( (iw-1)/colw )); ((percol<1))&&percol=1
+  local i line="" cnt=0
+  for ((i=0;i<${#names[@]};i++)); do
+    local nm=${names[$i]}; local tag=${nm%%:*} val=${nm#*:}
+    local cc="$FG_G"; [[ $tag == xr ]] && cc="$FG_M"
+    line+="$(printf '%s%-3s%s%-18s' "$cc" "$tag" "$RST" "${val:0:18}")"
+    cnt=$((cnt+1))
+    if ((cnt>=percol)); then p "$(bl "$line" "$iw")"; line=""; cnt=0; fi
+  done
+  [[ -n $line ]] && p "$(bl "$line" "$iw")"
+}
+footer(){
+  local iw=$1
+  local keys=("F1 Help" "F2 Users" "F3 Subs" "F4 Proto" "F5 Restart" "F6 ufw" "F7 Logs" "F8 Update" "F10 Quit")
+  local fl="" k
+  for k in "${keys[@]}"; do
+    local fk=${k%% *} lbl=${k#* }
+    fl+="${BOLD}${FG_C}${fk}${RST}${DIM}${lbl}${RST} "
+  done
+  p "$(bl "$fl" "$iw")"
+}
+
+#==============================================================================
+# SNAPSHOT MODE — one frame, no loop, no alt buffer
+#==============================================================================
+if [[ $SNAPSHOT -eq 1 ]]; then
+  cpu_pct >/dev/null; net_rate >/dev/null   # prime deltas
+  sleep 0.3
+  render
+  exit 0
+fi
+
+#==============================================================================
+# WHIPTAIL ACTION HELPERS  (used by F-key submenus)
+#==============================================================================
+NEED_ROOT(){ [[ $EUID -ne 0 ]]; }
+msg(){ if [[ $HAVE_WT -eq 1 ]]; then whiptail --title "$1" --msgbox "$2" 24 78; else clear; echo "== $1 =="; echo -e "$2"; read -rp "Enter..."; fi; }
+yesno(){ if [[ $HAVE_WT -eq 1 ]]; then whiptail --title "$1" --yesno "$2" 12 70; else read -rp "$2 [y/N] " a; [[ $a == y* || $a == Y* ]]; fi; }
+inbox(){ if [[ $HAVE_WT -eq 1 ]]; then whiptail --title "$1" --inputbox "$2" 10 70 "${3:-}" 3>&1 1>&2 2>&3; else read -rp "$2 " a; echo "$a"; fi; }
+pick(){ local t=$1 x=$2; shift 2
+  if [[ $HAVE_WT -eq 1 ]]; then whiptail --title "$t" --menu "$x" 24 76 14 "$@" 3>&1 1>&2 2>&3; return; fi
+  local -a tg=() lb=(); while (($#)); do tg+=("$1"); lb+=("$2"); shift 2; done
+  echo "== $t ==" >&2; local i; for i in "${!tg[@]}"; do echo " ${tg[$i]}) ${lb[$i]}" >&2; done
+  read -rp "$x " a; echo "$a"; }
+
+backup(){ local f=$1; mkdir -p "$BAK_DIR"; [[ -f $f ]] && cp -a "$f" "$BAK_DIR/$(basename "$f").$(date +%Y%m%d-%H%M%S).bak"; }
+latest_bak(){ ls -t "$BAK_DIR/$(basename "$1")".*.bak 2>/dev/null | head -1; }
+
+sb_validate_restart(){ # validate then restart; nonzero on failure
+  local out; out=$(sing-box check -c "$SB_CONF" 2>&1) || { echo "$out"; return 1; }
+  systemctl restart sing-box; sleep 1
+  systemctl is-active --quiet sing-box || { journalctl -u sing-box -n 15 --no-pager; return 1; }
+}
+xr_validate_restart(){
+  xray -test -c "$XR_CONF" >/dev/null 2>&1 || return 1
+  systemctl reload xray 2>/dev/null || systemctl restart xray; sleep 1
+  systemctl is-active --quiet xray
+}
+
+# ---- sing-box link/sub helpers (mirror v1) ----
+OBFS_PW(){ jq -r '.inbounds[]|select(.type=="hysteria2").obfs.password' "$SB_CONF" 2>/dev/null; }
+sb_links(){ local u=$1
+  jq -r --arg u "$u" --arg ip "$(pubip)" --arg sni "$SNI" --arg obfs "$(OBFS_PW)" '
+    (.inbounds[]|select(.type=="hysteria2").users[]?|select(.name==$u).password) as $pw |
+    (.inbounds[]|select(.type=="tuic").users[]?|select(.name==$u)) as $t |
+    if $pw and $t then
+      "hysteria2://\($pw)@\($ip):2096/?obfs=salamander&obfs-password=\($obfs)&sni=\($sni)&insecure=1#lotsman-hy2-\($u)",
+      "anytls://\($pw)@\($ip):8443/?sni=\($sni)&insecure=1#lotsman-anytls-\($u)",
+      "tuic://\($t.uuid):\($t.password)@\($ip):2097/?congestion_control=bbr&alpn=h3&sni=\($sni)&allow_insecure=1&udp_relay_mode=native#lotsman-tuic-\($u)"
+    else empty end' "$SB_CONF"
+}
+sb_token_for(){ local u=$1 f frag; for f in "$SUB_DIR"/*; do [[ -f $f ]]||continue
+    frag=$(base64 -d <"$f" 2>/dev/null | grep -om1 "#lotsman-[a-z0-9]*-${u}\$"); [[ -n $frag ]]&&{ basename "$f"; return; }; done; }
+sb_write_sub(){ local u=$1 tok; tok=$(sb_token_for "$u"); [[ -z $tok ]]&&tok=$(tr -dc 'A-Za-z0-9_-' </dev/urandom|head -c 32)
+    sb_links "$u" | base64 -w0 > "$SUB_DIR/$tok"; chmod 644 "$SUB_DIR/$tok"; echo "$tok"; }
+xr_link(){ local email=$1
+  local proto port uuid pbk sid sni ip
+  proto=$(jq -r '.inbounds[0].protocol' "$XR_CONF"); port=$(jq -r '.inbounds[0].port' "$XR_CONF")
+  uuid=$(jq -r --arg e "$email" '.inbounds[0].settings.clients[]|select(.email==$e).id' "$XR_CONF")
+  pbk=$(awk -F': ' '/Password/{print $2}' /usr/local/etc/xray/.keys 2>/dev/null)
+  sid=$(awk -F': ' '/shortsid/{print $2}' /usr/local/etc/xray/.keys 2>/dev/null)
+  sni=$(jq -r '.inbounds[0].streamSettings.realitySettings.serverNames[0]' "$XR_CONF")
+  ip=$(pubip)
+  echo "$proto://$uuid@$ip:$port?security=reality&sni=$sni&fp=firefox&pbk=$pbk&sid=$sid&spx=/&type=tcp&flow=xtls-rprx-vision&encryption=none#$email"
+}
+qr(){ have qrencode && echo "$1" | qrencode -t ansiutf8 2>/dev/null || echo "(qrencode missing)"; }
+
+#==============================================================================
+# F-KEY ACTIONS
+#==============================================================================
+act_help(){
+  msg "F1 · Help / About" \
+"LOTSMAN PANEL — htop-style live dashboard\n\nLive header: CPU/MEM bars, NET up/down Mbit/s, LOAD, uptime.\nPanels: Services · Protocols · Users · Log.\n\nHotkeys (also accept lowercase letter):\n  F1 Help   F2 Users   F3 Subs    F4 Proto/Setup\n  F5 Restart F6 ufw     F7 Logs    F8 Update\n  F10 / q  Quit\n\nProtocols: REALITY tcp/443, AnyTLS tcp/8443,\nHysteria2+salamander udp/2096 (★ best under TSPU),\nTUIC udp/2097.\n\nEvery config change: flock + backup + validate + restart\n+ auto-rollback on failure. Never disables ufw or SSH."
+}
+
+act_users(){
+  while true; do
+    local ch; ch=$(pick "F2 · Users" "sing-box + Xray user management:" \
+      list "List all users" \
+      add  "Add user (all sing-box protos + sub + QR)" \
+      remove "Remove a sing-box user" \
+      regen "Regenerate a sing-box user's creds" \
+      show "Show user sub URL + links + QR" \
+      xradd "Add Xray REALITY client" \
+      xrdel "Remove Xray REALITY client" \
+      back "Back to dashboard") || return
+    case "$ch" in
+      list) local o=""; local u
+        o+="sing-box:\n"; while read -r u; do [[ -n $u ]]&&o+="  $u  (sub:$(sb_token_for "$u"||echo none))\n"; done < <(sb_users)
+        o+="\nXray REALITY:\n"; while read -r u; do [[ -n $u ]]&&o+="  $u\n"; done < <(xr_users)
+        msg "All users" "$o" ;;
+      add) users_add ;;
+      remove) users_remove ;;
+      regen) users_regen ;;
+      show) users_show ;;
+      xradd) xr_add ;;
+      xrdel) xr_del ;;
+      back|"") return ;;
+    esac
+  done
+}
+users_add(){
+  local name; name=$(inbox "Add user" "New user name (no spaces):"); [[ -z $name||$name == *" "* ]]&&{ msg "Add" "Invalid/empty name."; return; }
+  sb_users|grep -qx "$name" && { msg "Add" "User '$name' already exists."; return; }
+  ( flock -x 9
+    backup "$SB_CONF"
+    local pw uuid tpw; pw=$(openssl rand -hex 16); uuid=$(cat /proc/sys/kernel/random/uuid); tpw=$(openssl rand -hex 16)
+    jq --arg n "$name" --arg pw "$pw" --arg uuid "$uuid" --arg tpw "$tpw" '
+      .inbounds |= map(
+        if .type=="hysteria2" or .type=="anytls" then .users += [{name:$n,password:$pw}]
+        elif .type=="tuic" then .users += [{name:$n,uuid:$uuid,password:$tpw}] else . end)' \
+      "$SB_CONF" >"$SB_CONF.tmp" && mv "$SB_CONF.tmp" "$SB_CONF"
+    if ! sb_validate_restart >/tmp/.lp_err 2>&1; then
+      cp -a "$(latest_bak "$SB_CONF")" "$SB_CONF"; systemctl restart sing-box
+      msg "Add FAILED" "Rolled back.\n$(cat /tmp/.lp_err)"; exit 1
+    fi
+  ) 9>"$LOCK" || return
+  local tok; tok=$(sb_write_sub "$name")
+  clear; echo "== User '$name' added =="; echo "Sub URL: http://$(pubip):$SUB_PORT/$tok"; echo; sb_links "$name"; echo
+  echo "Scan (hysteria2):"; qr "$(sb_links "$name"|head -1)"; read -rp "Enter..."
+}
+users_remove(){
+  local args=() u; while read -r u; do [[ -n $u ]]&&args+=("$u" ""); done < <(sb_users)
+  [[ ${#args[@]} -eq 0 ]]&&{ msg "Remove" "No users."; return; }
+  local name; name=$(pick "Remove user" "Select:" "${args[@]}"); [[ -z $name ]]&&return
+  yesno "Confirm" "Remove sing-box user '$name'?" || return
+  ( flock -x 9; backup "$SB_CONF"
+    jq --arg n "$name" '.inbounds |= map(.users |= map(select(.name!=$n)))' "$SB_CONF" >"$SB_CONF.tmp" && mv "$SB_CONF.tmp" "$SB_CONF"
+    if ! sb_validate_restart >/tmp/.lp_err 2>&1; then cp -a "$(latest_bak "$SB_CONF")" "$SB_CONF"; systemctl restart sing-box; msg "Remove FAILED" "Rolled back.\n$(cat /tmp/.lp_err)"; exit 1; fi
+  ) 9>"$LOCK" || return
+  local tok; tok=$(sb_token_for "$name"); [[ -n $tok ]]&&rm -f "$SUB_DIR/$tok"
+  msg "Removed" "User '$name' removed; sub deleted.\nsing-box: $(svc_active sing-box)"
+}
+users_regen(){
+  local args=() u; while read -r u; do [[ -n $u ]]&&args+=("$u" ""); done < <(sb_users)
+  [[ ${#args[@]} -eq 0 ]]&&{ msg "Regen" "No users."; return; }
+  local name; name=$(pick "Regenerate creds" "Select:" "${args[@]}"); [[ -z $name ]]&&return
+  yesno "Confirm" "Regenerate ALL creds for '$name'? Old links stop working." || return
+  ( flock -x 9; backup "$SB_CONF"
+    local pw uuid tpw; pw=$(openssl rand -hex 16); uuid=$(cat /proc/sys/kernel/random/uuid); tpw=$(openssl rand -hex 16)
+    jq --arg n "$name" --arg pw "$pw" --arg uuid "$uuid" --arg tpw "$tpw" '
+      .inbounds |= map(
+        if .type=="hysteria2" or .type=="anytls" then .users |= map(if .name==$n then .password=$pw else . end)
+        elif .type=="tuic" then .users |= map(if .name==$n then .uuid=$uuid|.password=$tpw else . end) else . end)' \
+      "$SB_CONF" >"$SB_CONF.tmp" && mv "$SB_CONF.tmp" "$SB_CONF"
+    if ! sb_validate_restart >/tmp/.lp_err 2>&1; then cp -a "$(latest_bak "$SB_CONF")" "$SB_CONF"; systemctl restart sing-box; msg "Regen FAILED" "Rolled back.\n$(cat /tmp/.lp_err)"; exit 1; fi
+  ) 9>"$LOCK" || return
+  local tok; tok=$(sb_write_sub "$name")
+  clear; echo "== '$name' creds regenerated =="; echo "Sub URL: http://$(pubip):$SUB_PORT/$tok"; echo; sb_links "$name"; read -rp "Enter..."
+}
+users_show(){
+  local args=() u; while read -r u; do [[ -n $u ]]&&args+=("$u" ""); done < <(sb_users)
+  [[ ${#args[@]} -eq 0 ]]&&{ msg "Show" "No users."; return; }
+  local name; name=$(pick "Show user" "Select:" "${args[@]}"); [[ -z $name ]]&&return
+  local tok; tok=$(sb_token_for "$name"); [[ -z $tok ]]&&tok=$(sb_write_sub "$name")
+  clear; echo "== $name =="; echo "Sub URL: http://$(pubip):$SUB_PORT/$tok"; echo; sb_links "$name"; echo
+  echo "QR (hysteria2):"; qr "$(sb_links "$name"|head -1)"; read -rp "Enter..."
+}
+xr_add(){
+  local name; name=$(inbox "Add Xray client" "Client email (no spaces):"); [[ -z $name||$name == *" "* ]]&&{ msg "Xray" "Invalid name."; return; }
+  xr_users|grep -qx "$name" && { msg "Xray" "Client exists."; return; }
+  ( flock -x 9; backup "$XR_CONF"; local uuid; uuid=$(xray uuid)
+    jq --arg e "$name" --arg u "$uuid" '.inbounds[0].settings.clients += [{"email":$e,"id":$u,"flow":"xtls-rprx-vision"}]' "$XR_CONF" >"$XR_CONF.tmp" && mv "$XR_CONF.tmp" "$XR_CONF"
+    if ! xr_validate_restart; then cp -a "$(latest_bak "$XR_CONF")" "$XR_CONF"; systemctl restart xray; msg "Xray FAILED" "Rolled back."; exit 1; fi
+  ) 9>"$LOCK" || return
+  clear; echo "== Xray client '$name' added =="; echo; xr_link "$name"; echo; qr "$(xr_link "$name")"; read -rp "Enter..."
+}
+xr_del(){
+  local args=() u; while read -r u; do [[ -n $u ]]&&args+=("$u" ""); done < <(xr_users)
+  [[ ${#args[@]} -eq 0 ]]&&{ msg "Xray" "No clients."; return; }
+  local name; name=$(pick "Remove Xray client" "Select:" "${args[@]}"); [[ -z $name ]]&&return
+  yesno "Confirm" "Remove Xray client '$name'?" || return
+  ( flock -x 9; backup "$XR_CONF"
+    jq --arg e "$name" '(.inbounds[0].settings.clients)|=map(select(.email!=$e))' "$XR_CONF" >"$XR_CONF.tmp" && mv "$XR_CONF.tmp" "$XR_CONF"
+    if ! xr_validate_restart; then cp -a "$(latest_bak "$XR_CONF")" "$XR_CONF"; systemctl restart xray; msg "Xray FAILED" "Rolled back."; exit 1; fi
+  ) 9>"$LOCK" || return
+  msg "Removed" "Xray client '$name' removed.\nxray: $(svc_active xray)"
+}
+
+act_subs(){
+  while true; do
+    local ch; ch=$(pick "F3 · Subscriptions" "Subscription URLs:" table "Show user -> sub URL table" show "Show one user's links + QR" back "Back") || return
+    case "$ch" in
+      table) local o="user                 sub URL\n" f uu
+        for f in "$SUB_DIR"/*; do [[ -f $f ]]||continue
+          uu=$(base64 -d <"$f" 2>/dev/null|grep -om1 '#lotsman-[a-z0-9]*-[A-Za-z0-9_]*'|head -1|sed 's/#lotsman-[a-z0-9]*-//')
+          o+="$(printf '%-20s http://%s:%s/%s\n' "$uu" "$(pubip)" "$SUB_PORT" "$(basename "$f")")\n"
+        done; msg "Subscriptions" "$o" ;;
+      show) users_show ;;
+      back|"") return ;;
+    esac
+  done
+}
+
+act_proto(){
+  while true; do
+    local ch; ch=$(pick "F4 · Proto / Setup" "Protocol & server setup:" \
+      ports "View protocol ports & status" \
+      chport "Change a protocol port (+ufw)" \
+      obfs "Rotate salamander obfs password" \
+      cert "Regenerate self-signed TLS cert" \
+      back "Back") || return
+    case "$ch" in
+      ports) local o; o=$(jq -r '.inbounds[]|"  \(.type)  port:\(.listen_port//.port)  users:\([.users[]?]|length)"' "$SB_CONF" 2>/dev/null)
+        o+="\n  REALITY(xray) port:$(jq -r .inbounds[0].port "$XR_CONF")  users:$(xr_ucount)"
+        msg "Protocol ports" "$o" ;;
+      chport) proto_chport ;;
+      obfs) proto_obfs ;;
+      cert) proto_cert ;;
+      back|"") return ;;
+    esac
+  done
+}
+proto_chport(){
+  local t; t=$(pick "Change port" "Which protocol:" anytls "anytls tcp" hysteria2 "hy2 udp" tuic "tuic udp") || return
+  [[ -z $t ]]&&return
+  local cur; cur=$(jq -r --arg t "$t" '.inbounds[]|select(.type==$t)|.listen_port//.port' "$SB_CONF")
+  local np; np=$(inbox "Change $t port" "New port (current $cur):" "$cur"); [[ -z $np || ! $np =~ ^[0-9]+$ ]]&&{ msg "Port" "Invalid."; return; }
+  local pr=tcp; [[ $t == hysteria2 || $t == tuic ]]&&pr=udp
+  yesno "Confirm" "Change $t to $np/$pr and update ufw?" || return
+  ( flock -x 9; backup "$SB_CONF"
+    jq --arg t "$t" --argjson p "$np" '.inbounds |= map(if .type==$t then .listen_port=$p else . end)' "$SB_CONF" >"$SB_CONF.tmp" && mv "$SB_CONF.tmp" "$SB_CONF"
+    if ! sb_validate_restart >/tmp/.lp_err 2>&1; then cp -a "$(latest_bak "$SB_CONF")" "$SB_CONF"; systemctl restart sing-box; msg "Port FAILED" "Rolled back.\n$(cat /tmp/.lp_err)"; exit 1; fi
+    ufw allow "$np/$pr" >/dev/null 2>&1; ufw delete allow "$cur/$pr" >/dev/null 2>&1
+  ) 9>"$LOCK" || return
+  msg "Port changed" "$t now on $np/$pr. ufw updated. NOTE: update client links/subs."
+}
+proto_obfs(){
+  yesno "Confirm" "Rotate salamander obfs password? All hy2 clients must update." || return
+  ( flock -x 9; backup "$SB_CONF"; local np; np=$(openssl rand -hex 16)
+    jq --arg p "$np" '.inbounds |= map(if .type=="hysteria2" then .obfs.password=$p else . end)' "$SB_CONF" >"$SB_CONF.tmp" && mv "$SB_CONF.tmp" "$SB_CONF"
+    if ! sb_validate_restart >/tmp/.lp_err 2>&1; then cp -a "$(latest_bak "$SB_CONF")" "$SB_CONF"; systemctl restart sing-box; msg "Obfs FAILED" "Rolled back.\n$(cat /tmp/.lp_err)"; exit 1; fi
+  ) 9>"$LOCK" || return
+  for u in $(sb_users); do sb_write_sub "$u" >/dev/null; done
+  msg "Obfs rotated" "New salamander password set; subs regenerated."
+}
+proto_cert(){
+  yesno "Confirm" "Regenerate self-signed cert ($SNI)?" || return
+  ( flock -x 9; backup "$SB_CERT"; backup "$SB_KEY"
+    openssl req -x509 -newkey ed25519 -days 3650 -nodes -keyout "$SB_KEY.tmp" -out "$SB_CERT.tmp" -subj "/CN=$SNI" >/dev/null 2>&1
+    mv "$SB_KEY.tmp" "$SB_KEY"; mv "$SB_CERT.tmp" "$SB_CERT"; chmod 600 "$SB_KEY"
+    if ! sb_validate_restart >/tmp/.lp_err 2>&1; then cp -a "$(latest_bak "$SB_CERT")" "$SB_CERT"; cp -a "$(latest_bak "$SB_KEY")" "$SB_KEY"; systemctl restart sing-box; msg "Cert FAILED" "Rolled back.\n$(cat /tmp/.lp_err)"; exit 1; fi
+  ) 9>"$LOCK" || return
+  msg "Cert regenerated" "New self-signed cert installed; sing-box restarted."
+}
+
+act_restart(){
+  local svc; svc=$(pick "F5 · Restart" "Select service:" xray "" sing-box "" lotsman-sub "" ufw "reload") || return
+  [[ -z $svc ]]&&return; yesno "Confirm" "Restart $svc?" || return
+  systemctl restart "$svc"; sleep 1; msg "Restart" "$svc: $(svc_active "$svc")"
+}
+act_ufw(){
+  while true; do
+    local ch; ch=$(pick "F6 · ufw" "Firewall (never disables):" view "View rules" add "Add allow rule" del "Delete a rule" back "Back") || return
+    case "$ch" in
+      view) msg "ufw rules" "$(ufw status numbered 2>/dev/null|sed 's/^/  /')" ;;
+      add) local r; r=$(inbox "Add ufw allow" "Rule (e.g. 9000/tcp):"); [[ -z $r ]]&&continue
+        yesno "Confirm" "ufw allow $r ?" || continue; ufw allow "$r" >/dev/null 2>&1; msg "ufw" "$(ufw status numbered|grep -F "$r"||echo done)" ;;
+      del) local n; n=$(inbox "Delete ufw rule" "Rule NUMBER (see view):"); [[ -z $n || ! $n =~ ^[0-9]+$ ]]&&continue
+        yesno "Confirm" "Delete ufw rule #$n ?" || continue; yes|ufw delete "$n" >/dev/null 2>&1; msg "ufw" "Deleted #$n.\n$(ufw status numbered|sed 's/^/  /')" ;;
+      back|"") return ;;
+    esac
+  done
+}
+act_logs(){
+  local svc; svc=$(pick "F7 · Logs" "Service:" xray "" sing-box "" lotsman-sub "") || return
+  [[ -z $svc ]]&&return
+  local m; m=$(pick "Logs: $svc" "Mode:" last "Last 50 lines" follow "Follow (Ctrl-C to stop)") || return
+  if [[ $m == follow ]]; then clear; echo "Following $svc — Ctrl-C to return..."; journalctl -u "$svc" -f --no-pager 2>&1 || true; read -rp "Enter...";
+  else msg "Logs: $svc (last 50)" "$(journalctl -u "$svc" -n 50 --no-pager 2>&1)"; fi
+}
+act_update(){
+  local o="Installed versions:\n"
+  o+="  sing-box: $(sing-box version 2>/dev/null|head -1|awk '{print $3}')\n"
+  o+="  xray:     $(xray version 2>/dev/null|head -1|awk '{print $2}')\n\n"
+  local lsb lxr
+  lsb=$(curl -s --max-time 6 https://api.github.com/repos/SagerNet/sing-box/releases/latest 2>/dev/null|jq -r '.tag_name'|sed 's/^v//')
+  lxr=$(curl -s --max-time 6 https://api.github.com/repos/XTLS/Xray-core/releases/latest 2>/dev/null|jq -r '.tag_name'|sed 's/^v//')
+  o+="Latest (github):\n  sing-box: ${lsb:-n/a}\n  xray:     ${lxr:-n/a}\n\n"
+  o+="Updating runs the official installer with backup+validate+rollback.\nDo it manually per service to stay safe."
+  local ch; ch=$(pick "F8 · Update" "$o" check "Just show (above)" sbup "Update sing-box (official script)" xrup "Update xray (official script)" back "Back") || { msg "Versions" "$o"; return; }
+  case "$ch" in
+    sbup) yesno "Confirm" "Update sing-box via official installer?" || return
+      backup "$SB_CONF"; bash <(curl -fsSL https://sing-box.app/install.sh) 2>&1|tail -5
+      if ! sb_validate_restart >/tmp/.lp_err 2>&1; then msg "Update" "Validate failed:\n$(cat /tmp/.lp_err)"; else msg "Update" "sing-box now $(sing-box version|head -1)"; fi ;;
+    xrup) yesno "Confirm" "Update xray via official installer?" || return
+      backup "$XR_CONF"; bash <(curl -fsSL https://github.com/XTLS/Xray-install/raw/main/install-release.sh) @ install 2>&1|tail -5
+      xr_validate_restart && msg "Update" "xray now $(xray version|head -1)" || msg "Update" "xray validate failed — check config." ;;
+    *) msg "Versions" "$o" ;;
+  esac
+}
+
+#==============================================================================
+# LIVE LOOP  (alt screen, hidden cursor, resize-aware, non-blocking key)
+#==============================================================================
+restore(){ tput rmcup 2>/dev/null; tput cnorm 2>/dev/null; stty echo 2>/dev/null; clear 2>/dev/null||true; }
+run_action(){ tput rmcup 2>/dev/null; tput cnorm 2>/dev/null; stty echo 2>/dev/null; "$@"; tput smcup 2>/dev/null; tput civis 2>/dev/null; cpu_pct >/dev/null; net_rate >/dev/null; }
+
+main_loop(){
+  trap restore EXIT INT TERM
+  tput smcup 2>/dev/null; tput civis 2>/dev/null; clear
+  cpu_pct >/dev/null; net_rate >/dev/null   # prime deltas
+  while true; do
+    tput cup 0 0 2>/dev/null
+    local frame; frame=$(render)
+    printf '\033[H'; printf '%s\033[J' "$frame"
+    # non-blocking read; handle ESC sequences (F-keys send \033O.. or \033[..)
+    local k=""; IFS= read -rsn1 -t "$REFRESH" k || continue
+    if [[ $k == $'\033' ]]; then
+      local rest=""; read -rsn2 -t 0.05 rest; k+="$rest"
+      # some F-keys are longer (F5..F12 -> \033[NN~)
+      [[ $k == $'\033['[12] ]] && { local more; read -rsn2 -t 0.05 more; k+="$more"; }
+    fi
+    case "$k" in
+      $'\033OP'|h|H) run_action act_help ;;            # F1
+      $'\033OQ'|u|U) run_action act_users ;;           # F2
+      $'\033OR'|s|S) run_action act_subs ;;            # F3
+      $'\033OS'|p|P) run_action act_proto ;;           # F4
+      $'\033[15~'|r|R) run_action act_restart ;;       # F5
+      $'\033[17~'|f|F) run_action act_ufw ;;            # F6
+      $'\033[18~'|l|L) run_action act_logs ;;          # F7
+      $'\033[19~'|w|W) run_action act_update ;;         # F8
+      $'\033[21~'|q|Q) break ;;                          # F10 / q
+    esac
+  done
+  restore
+}
+
+#==============================================================================
+# ENTRY
+#==============================================================================
+# Actions need root; the live dashboard is read-only but re-exec as root so
+# F-keys work seamlessly (matches v1 behavior).
+if [[ $EUID -ne 0 ]]; then exec sudo -p '' "$0" "$@"; fi
+main_loop

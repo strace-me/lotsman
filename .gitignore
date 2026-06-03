@@ -1,0 +1,15 @@
+# build artifacts
+/bin/
+/lotsmand
+/lotsmanctl
+*.elf
+*.bin
+
+# user data (lives in /etc/smart-routing/, never in repo)
+/etc/
+*.db
+*.db-*
+
+# editor/OS
+.DS_Store
+*.swp
