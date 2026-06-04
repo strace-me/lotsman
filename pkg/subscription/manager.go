@@ -114,6 +114,14 @@ func (f *HTTPFetcher) Fetch(ctx context.Context, url string) ([]byte, error) {
 // Manager turns a set of declarations into one merged, deduplicated node list.
 type Manager struct {
 	fetcher Fetcher
+
+	// Tracker (optional, LOT-6) is the node-health janitor. When set, Load drops
+	// nodes it has proven dead or removed (lenient policy: everything else — fresh,
+	// quarantined, active — is still admitted). The maintenance health-check loop
+	// is the sole mutator (OnSeen/OnMissing/OnCheck/Prune); Load only reads it, so
+	// a cold Tracker (nothing checked yet) excludes nothing and the pool is never
+	// emptied by the filter. nil = no health filtering (today's behavior).
+	Tracker *Tracker
 }
 
 // NewManager builds a Manager over the given fetcher.
@@ -185,6 +193,11 @@ func (m *Manager) Load(ctx context.Context, decls []Declaration) (nodes []Node, 
 	sort.Strings(order)
 	nodes = make([]Node, 0, len(order))
 	for _, id := range order {
+		// Health filter (LOT-6): drop nodes the tracker has proven dead/removed.
+		// Lenient — fresh/quarantined/active and untracked nodes all pass.
+		if m.Tracker != nil && m.Tracker.ShouldExclude(id) {
+			continue
+		}
 		nodes = append(nodes, *merged[id])
 	}
 	return nodes, errs
