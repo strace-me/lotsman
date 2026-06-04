@@ -11,7 +11,10 @@ import (
 	"context"
 	"flag"
 	"fmt"
+	"io"
+	"net/http"
 	"os"
+	"sort"
 	"strings"
 
 	"time"
@@ -19,6 +22,7 @@ import (
 	"github.com/strace-me/lotsman/pkg/blockcheck"
 	"github.com/strace-me/lotsman/pkg/coherence"
 	"github.com/strace-me/lotsman/pkg/config"
+	"github.com/strace-me/lotsman/pkg/dataplane"
 	"github.com/strace-me/lotsman/pkg/domainscan"
 	"github.com/strace-me/lotsman/pkg/registry"
 	"github.com/strace-me/lotsman/pkg/singbox"
@@ -41,6 +45,8 @@ func main() {
 		doctor(os.Args[2:])
 	case "scan":
 		scan(os.Args[2:])
+	case "status":
+		status(os.Args[2:])
 	default:
 		usage()
 		os.Exit(2)
@@ -54,6 +60,7 @@ func usage() {
 	fmt.Fprintln(os.Stderr, "  lotsmanctl harvest -script <blockcheck.sh> [-domains a,b] [-scanlevel force]")
 	fmt.Fprintln(os.Stderr, "  lotsmanctl doctor -config <path> [-nfqws-exclude <list-exclude.txt>]")
 	fmt.Fprintln(os.Stderr, "  lotsmanctl scan -config <path> [-timeout 6s] [-concurrency 8]   (run ON the router)")
+	fmt.Fprintln(os.Stderr, "  lotsmanctl status [-metrics-addr 127.0.0.1:9101] [-clash-base http://127.0.0.1:9090]   (live daemon)")
 }
 
 // scan probes each service's inline domains over this host's own path (which
@@ -313,6 +320,129 @@ func harvest(args []string) {
 		fmt.Printf("%-28s  %s\n", d.ID, strings.Join(d.NFQWSArgs, " "))
 	}
 	fmt.Fprintf(os.Stderr, "harvested %d distinct nfqws strategies (simulate=%v, scanlevel=%s)\n", len(defs), *simulate, *scan)
+}
+
+// status is the operator's at-a-glance view of the LIVE daemon. It scrapes the
+// Prometheus /metrics text for per-service health gauges (position/state, broken,
+// leak/dead-flow ratios, flows, misroute, fails) and, for each service seen,
+// queries the clash-api selector (sel-<service>) to show the currently chosen
+// node. Read-only: a down daemon yields a clear error and a non-zero exit.
+func status(args []string) {
+	fs := flag.NewFlagSet("status", flag.ExitOnError)
+	metricsAddr := fs.String("metrics-addr", "127.0.0.1:9101", "daemon Prometheus metrics host:port")
+	clashBase := fs.String("clash-base", "http://127.0.0.1:9090", "clash-api base URL")
+	clashSecret := fs.String("clash-secret", "", "clash-api secret (optional)")
+	_ = fs.Parse(args)
+
+	ctx := context.Background()
+
+	text, err := fetchMetrics(ctx, *metricsAddr)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "status: daemon metrics unreachable at %s: %v\n", *metricsAddr, err)
+		fmt.Fprintln(os.Stderr, "       is lotsmand running? (check /etc/init.d/lotsman status)")
+		os.Exit(1)
+	}
+
+	byService := parseMetrics(text)
+	if len(byService) == 0 {
+		fmt.Fprintln(os.Stderr, "status: daemon is up but reported no services (still warming up?)")
+		os.Exit(1)
+	}
+
+	svcs := make([]string, 0, len(byService))
+	for s := range byService {
+		svcs = append(svcs, s)
+	}
+	sort.Strings(svcs)
+
+	// Resolve the live selector node per service from the clash-api. Best-effort:
+	// the metrics view is the source of truth for health; a clash hiccup just
+	// shows "?" for the node rather than failing the whole command.
+	clash := dataplane.NewClashClient(*clashBase, *clashSecret)
+	nodes := map[string]string{}
+	for _, svc := range svcs {
+		info, err := clash.Proxy(ctx, registry.SelectorTag(svc))
+		if err != nil {
+			nodes[svc] = "?"
+			continue
+		}
+		nodes[svc] = info.Now
+	}
+
+	printStatusTable(os.Stdout, svcs, byService, nodes)
+}
+
+// fetchMetrics GETs the daemon's /metrics text.
+func fetchMetrics(ctx context.Context, addr string) (string, error) {
+	url := "http://" + addr + "/metrics"
+	client := &http.Client{Timeout: 3 * time.Second}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return "", err
+	}
+	resp, err := client.Do(req)
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("status %d", resp.StatusCode)
+	}
+	b, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return "", err
+	}
+	return string(b), nil
+}
+
+// printStatusTable renders the per-service table and a footer summary. A leading
+// "!" marks a service that is broken or misrouted — the rows an operator should
+// look at first.
+func printStatusTable(w io.Writer, svcs []string, byService map[string]*serviceStatus, nodes map[string]string) {
+	fmt.Fprintln(w, "== Lotsman live status ==")
+	fmt.Fprintf(w, "%-2s %-14s %-12s %-22s %6s %6s %-12s %5s\n",
+		"", "SERVICE", "STATE(pos)", "NODE (sel→now)", "leak", "dead", "misrouted", "fails")
+
+	misrouted := 0
+	broken := 0
+	for _, svc := range svcs {
+		s := byService[svc]
+		flag := " "
+		if s.Broken || s.Misrouted {
+			flag = "!"
+		}
+		if s.Broken {
+			broken++
+		}
+		mis := "-"
+		if s.Misrouted {
+			misrouted++
+			mis = "YES"
+			if s.MisrouteKind != "" {
+				mis = s.MisrouteKind
+			}
+		}
+		state := s.State
+		if state == "" {
+			state = "?"
+		}
+		node := nodes[svc]
+		if node == "" {
+			node = "?"
+		}
+		bk := ""
+		if s.Broken {
+			bk = " BROKEN"
+		}
+		fmt.Fprintf(w, "%-2s %-14s %-12s %-22s %6.2f %6.2f %-12s %5d%s\n",
+			flag, svc, fmt.Sprintf("%s(%d)", state, s.Position),
+			node, s.LeakRatio, s.DeadFlowRatio, mis, s.Fails, bk)
+	}
+
+	fmt.Fprintf(w, "\n%d services · %d misrouted · %d broken\n", len(svcs), misrouted, broken)
+	if misrouted == 0 && broken == 0 {
+		fmt.Fprintln(w, "all services healthy ✓")
+	}
 }
 
 func generate(args []string) {
