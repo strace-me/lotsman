@@ -31,7 +31,7 @@ func TestFlappingDemandsMoreRecovery(t *testing.T) {
 
 func TestRecoverSpreadCapped(t *testing.T) {
 	got := base().Tune(0.0, 100) // extreme flapping + unreliable
-	if got.RecoverAt != 5+6 {     // capped at base + recoverSpread(6)
+	if got.RecoverAt != 5+6 {    // capped at base + recoverSpread(6)
 		t.Errorf("capped recover = %d, want 11", got.RecoverAt)
 	}
 }

@@ -12,12 +12,12 @@ func TestCompareVersions(t *testing.T) {
 		want int
 	}{
 		{"1.9.9a", "1.9.9a", 0},
-		{"1.9.9a", "1.9.9", 1},   // suffix beats no-suffix
+		{"1.9.9a", "1.9.9", 1}, // suffix beats no-suffix
 		{"1.9.9", "1.9.9a", -1},
-		{"1.9.9a", "1.9.8c", 1},  // numeric dominates suffix
-		{"1.9.9b", "1.9.9a", 1},  // suffix order
-		{"1.10.0", "1.9.9a", 1},  // numeric, not lexical (10 > 9)
-		{"v1.9.5", "1.9.5", 0},   // leading v tolerated
+		{"1.9.9a", "1.9.8c", 1}, // numeric dominates suffix
+		{"1.9.9b", "1.9.9a", 1}, // suffix order
+		{"1.10.0", "1.9.9a", 1}, // numeric, not lexical (10 > 9)
+		{"v1.9.5", "1.9.5", 0},  // leading v tolerated
 	}
 	for _, c := range cases {
 		if got := CompareVersions(c.a, c.b); got != c.want {

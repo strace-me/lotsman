@@ -28,17 +28,17 @@ const (
 
 // fakeRanges are IPs a poisoning resolver hands back instead of the real one.
 var fakeRanges = mustCIDRs(
-	"192.0.2.0/24",   // TEST-NET-1, common sinkhole (seen on this network)
-	"198.18.0.0/15",  // sing-box default fakeip
+	"192.0.2.0/24",  // TEST-NET-1, common sinkhole (seen on this network)
+	"198.18.0.0/15", // sing-box default fakeip
 	"0.0.0.0/32",
-	"127.0.0.0/8",    // loopback as a public answer = poisoning
+	"127.0.0.0/8", // loopback as a public answer = poisoning
 )
 
 // Signals are what the prober observed.
 type Signals struct {
 	OK          bool
-	Err         string  // probe error text
-	ResolvedIP  string  // IP the target resolved to (optional)
+	Err         string // probe error text
+	ResolvedIP  string // IP the target resolved to (optional)
 	RTTms       int
 	BaselineRTT float64 // normal RTT for this service (0 = unknown)
 }

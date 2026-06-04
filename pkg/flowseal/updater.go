@@ -11,8 +11,8 @@ import (
 
 // Release is the parsed subset of a GitHub release we need.
 type Release struct {
-	Tag      string
-	ZipURL   string
+	Tag    string
+	ZipURL string
 }
 
 // ParseRelease extracts the tag and the .zip asset URL from a GitHub releases
@@ -44,7 +44,7 @@ func ParseRelease(body []byte) (Release, error) {
 // Installer performs the side effects of an update. Abstracted so the updater's
 // decision logic is testable without touching disk/network.
 type Installer interface {
-	CurrentVersion() string                                  // from the flowseal-current symlink, "" if none
+	CurrentVersion() string                                     // from the flowseal-current symlink, "" if none
 	Install(ctx context.Context, rel Release, raw []byte) error // unzip into versioned dir + repoint symlink
 }
 
