@@ -74,10 +74,14 @@ func (r *Reconciler) Reconcile(ctx context.Context) error {
 		r.Log.Warn("reconcile: subscription load issue", "err", e)
 	}
 	// Anti-churn: a flaky mirror that drops nodes must not trigger a restart to a
-	// smaller config that the next tick undoes. Skip only when the fetch errored
-	// AND the set shrank versus the last clean apply.
-	if len(errs) > 0 && len(nodes) < r.lastNodes {
-		r.Log.Warn("reconcile: skipping, degraded node set", "nodes", len(nodes), "last", r.lastNodes)
+	// smaller config the next tick undoes. Skip when the set shrank versus the last
+	// clean apply AND either the fetch errored OR the drop is dramatic (>50%). The
+	// acme subscription intermittently returns 0 nodes on a SUCCESSFUL (error-free)
+	// fetch; applying that empties the VPN pool and restarts sing-box into a
+	// node-less config — dropping every live connection (Discord gateway etc.). The
+	// dramatic-drop clause catches that case the error-only guard missed (LOT-27).
+	if r.lastNodes > 0 && len(nodes) < r.lastNodes && (len(errs) > 0 || len(nodes)*2 < r.lastNodes) {
+		r.Log.Warn("reconcile: skipping, degraded node set", "nodes", len(nodes), "last", r.lastNodes, "fetch_errs", len(errs))
 		return nil
 	}
 
