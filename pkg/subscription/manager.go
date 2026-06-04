@@ -6,6 +6,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/url"
 	"sort"
 	"strconv"
 	"strings"
@@ -22,6 +23,22 @@ func isNodeURL(s string) bool {
 		}
 	}
 	return false
+}
+
+// FetchHost returns the bare hostname that a declaration is fetched FROM, and
+// ok=false for an inline node share-link (which is the node itself, never
+// fetched). It is the host that has to be reachable to pull the subscription, so
+// callers can route that host through the VPN tunnel (LOT-28) instead of the
+// unreliable direct path. The port is stripped — route matching is by host.
+func FetchHost(d Declaration) (string, bool) {
+	if isNodeURL(d.URL) {
+		return "", false
+	}
+	u, err := url.Parse(strings.TrimSpace(d.URL))
+	if err != nil || u.Hostname() == "" {
+		return "", false
+	}
+	return u.Hostname(), true
 }
 
 // Declaration is one entry from subscriptions.yaml: where to fetch, how to
