@@ -3,8 +3,11 @@ package subscription
 import (
 	"context"
 	"fmt"
+	"io"
+	"net"
 	"net/http"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -41,9 +44,25 @@ type Fetcher interface {
 // HTTPFetcher fetches over HTTP(S).
 type HTTPFetcher struct{ Client *http.Client }
 
-// NewHTTPFetcher builds a fetcher with a sane timeout.
+// NewHTTPFetcher builds a fetcher with a sane timeout (direct egress).
 func NewHTTPFetcher() *HTTPFetcher {
 	return &HTTPFetcher{Client: &http.Client{Timeout: 15 * time.Second}}
+}
+
+// NewHTTPFetcherProxy builds a fetcher whose HTTP client dials through the
+// given no-auth SOCKS5 proxy (host:port) — i.e. the sing-box socks inbound that
+// probes use. This lets a subscription fetch egress via the VPN tunnel, which
+// matters when the upstream host is unreliable to reach directly from the RU
+// network. socksAddr is the proxy's host:port.
+func NewHTTPFetcherProxy(socksAddr string) *HTTPFetcher {
+	d := &socks5Dialer{proxy: socksAddr, timeout: 15 * time.Second}
+	tr := &http.Transport{
+		DialContext:           d.DialContext,
+		TLSHandshakeTimeout:   10 * time.Second,
+		ResponseHeaderTimeout: 15 * time.Second,
+		ExpectContinueTimeout: 1 * time.Second,
+	}
+	return &HTTPFetcher{Client: &http.Client{Timeout: 15 * time.Second, Transport: tr}}
 }
 
 func (f *HTTPFetcher) Fetch(ctx context.Context, url string) ([]byte, error) {
@@ -102,7 +121,8 @@ func (m *Manager) Load(ctx context.Context, decls []Declaration) (nodes []Node, 
 		// inline without an HTTP fetch. Lets one manual node (e.g. the single paid
 		// hysteria2 key) live in the config without a subscription endpoint.
 		var raw []byte
-		if isNodeURL(d.URL) {
+		inline := isNodeURL(d.URL)
+		if inline {
 			raw = []byte(d.URL)
 		} else {
 			fetched, err := m.fetcher.Fetch(ctx, d.URL)
@@ -110,11 +130,27 @@ func (m *Manager) Load(ctx context.Context, decls []Declaration) (nodes []Node, 
 				errs = append(errs, fmt.Errorf("subscription %q: fetch: %w", d.Name, err))
 				continue
 			}
+			// A flaky upstream (e.g. acme) can return HTTP 200 with an empty or
+			// whitespace-only body. For a FETCHED subscription that is an error,
+			// not "0 nodes" — surface it so the reconcile anti-churn guard catches
+			// it. Inline proto:// declarations are the node itself, never empty.
+			if len(strings.TrimSpace(string(fetched))) == 0 {
+				errs = append(errs, fmt.Errorf("subscription %q: fetch: empty body", d.Name))
+				continue
+			}
 			raw = fetched
 		}
 		parsed, err := Parse(raw, d.Format, d.Name)
 		if err != nil {
 			errs = append(errs, fmt.Errorf("subscription %q: parse: %w", d.Name, err))
+			continue
+		}
+		// A fetched subscription that parses to ZERO nodes (garbage body that
+		// happened to parse cleanly, all entries skipped, etc.) is likewise an
+		// error, not a silent empty pull. Inline declarations always yield their
+		// one node, so this only bites fetched subs.
+		if !inline && len(parsed) == 0 {
+			errs = append(errs, fmt.Errorf("subscription %q: parse: yielded 0 nodes", d.Name))
 			continue
 		}
 		for i := range parsed {
@@ -135,6 +171,113 @@ func (m *Manager) Load(ctx context.Context, decls []Declaration) (nodes []Node, 
 		nodes = append(nodes, *merged[id])
 	}
 	return nodes, errs
+}
+
+// socks5Dialer dials TCP through a no-auth SOCKS5 proxy (RFC 1928, CONNECT).
+// It mirrors pkg/dataplane.socks5Dialer; it is inlined here rather than reused
+// because that type is unexported (exporting it would touch another package).
+type socks5Dialer struct {
+	proxy   string // host:port of the SOCKS5 server
+	timeout time.Duration
+}
+
+// DialContext connects to addr through the proxy and returns the tunneled conn.
+func (s *socks5Dialer) DialContext(ctx context.Context, network, addr string) (net.Conn, error) {
+	switch network {
+	case "tcp", "tcp4", "tcp6":
+	default:
+		return nil, fmt.Errorf("socks5: unsupported network %q", network)
+	}
+	host, portStr, err := net.SplitHostPort(addr)
+	if err != nil {
+		return nil, err
+	}
+	port, err := strconv.Atoi(portStr)
+	if err != nil {
+		return nil, fmt.Errorf("socks5: bad port %q: %w", portStr, err)
+	}
+
+	conn, err := (&net.Dialer{Timeout: s.timeout}).DialContext(ctx, "tcp", s.proxy)
+	if err != nil {
+		return nil, err
+	}
+	if dl, ok := ctx.Deadline(); ok {
+		conn.SetDeadline(dl)
+	}
+
+	// Greeting: VER=5, one method, METHOD=0 (no auth).
+	if _, err := conn.Write([]byte{0x05, 0x01, 0x00}); err != nil {
+		conn.Close()
+		return nil, err
+	}
+	rep := make([]byte, 2)
+	if _, err := io.ReadFull(conn, rep); err != nil {
+		conn.Close()
+		return nil, err
+	}
+	if rep[0] != 0x05 || rep[1] != 0x00 {
+		conn.Close()
+		return nil, fmt.Errorf("socks5: no-auth rejected (%#x %#x)", rep[0], rep[1])
+	}
+
+	// CONNECT request. Prefer IP literal ATYP, else domain (proxy resolves).
+	req := []byte{0x05, 0x01, 0x00}
+	if ip := net.ParseIP(host); ip != nil {
+		if v4 := ip.To4(); v4 != nil {
+			req = append(req, 0x01)
+			req = append(req, v4...)
+		} else {
+			req = append(req, 0x04)
+			req = append(req, ip.To16()...)
+		}
+	} else {
+		if len(host) > 255 {
+			conn.Close()
+			return nil, fmt.Errorf("socks5: hostname too long")
+		}
+		req = append(req, 0x03, byte(len(host)))
+		req = append(req, host...)
+	}
+	req = append(req, byte(port>>8), byte(port))
+	if _, err := conn.Write(req); err != nil {
+		conn.Close()
+		return nil, err
+	}
+
+	// Reply: VER, REP, RSV, ATYP, BND.ADDR, BND.PORT.
+	head := make([]byte, 4)
+	if _, err := io.ReadFull(conn, head); err != nil {
+		conn.Close()
+		return nil, err
+	}
+	if head[1] != 0x00 {
+		conn.Close()
+		return nil, fmt.Errorf("socks5: connect failed (rep=%d)", head[1])
+	}
+	var alen int
+	switch head[3] {
+	case 0x01:
+		alen = 4
+	case 0x04:
+		alen = 16
+	case 0x03:
+		l := make([]byte, 1)
+		if _, err := io.ReadFull(conn, l); err != nil {
+			conn.Close()
+			return nil, err
+		}
+		alen = int(l[0])
+	default:
+		conn.Close()
+		return nil, fmt.Errorf("socks5: bad reply atyp %d", head[3])
+	}
+	if _, err := io.ReadFull(conn, make([]byte, alen+2)); err != nil {
+		conn.Close()
+		return nil, err
+	}
+
+	conn.SetDeadline(time.Time{}) // hand a clean conn to the caller
+	return conn, nil
 }
 
 func unionTags(a, b []string) []string {
