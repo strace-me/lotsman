@@ -37,6 +37,7 @@ type Config struct {
 	SingboxVersion  string                // target sing-box version (e.g. "1.12.17"); gates version-specific knobs ("" = generator baseline)
 	FakeIP          *FakeIP               // fakeip DNS section (nil = off)
 	Multiplex       *Multiplex            // default outbound multiplex for TCP proxies (nil = off)
+	SubViaPool      string                // route subscription endpoint hosts through this VPN pool (LOT-28); needs -probe-proxy ("" = off, direct fetch)
 }
 
 // FakeIP enables the generated fakeip DNS section (domain-accurate routing via
@@ -84,6 +85,7 @@ type fileYAML struct {
 	SingboxVersion  string                     `yaml:"singbox_version"`
 	FakeIP          *fakeipYAML                `yaml:"fakeip"`
 	Multiplex       *multiplexYAML             `yaml:"multiplex"`
+	SubViaPool      string                     `yaml:"subscription_via_pool"`
 }
 
 type fakeipYAML struct {
@@ -242,7 +244,7 @@ func Parse(data []byte) (*Config, error) {
 	if f.Multiplex != nil && f.Multiplex.Enabled {
 		mux = &Multiplex{Protocol: f.Multiplex.Protocol, MaxConnections: f.Multiplex.MaxConnections, MinStreams: f.Multiplex.MinStreams, Padding: f.Multiplex.Padding, BrutalUp: f.Multiplex.BrutalUp, BrutalDown: f.Multiplex.BrutalDown}
 	}
-	return &Config{Registry: reg, Categories: cats, Subscriptions: f.Subscriptions, Pools: pl, Zapret: instances, Devices: devices, Hostlists: hostlists, Strategies: strategies, UTLSFingerprint: f.UTLSFingerprint, SingboxVersion: f.SingboxVersion, FakeIP: fakeip, Multiplex: mux}, nil
+	return &Config{Registry: reg, Categories: cats, Subscriptions: f.Subscriptions, Pools: pl, Zapret: instances, Devices: devices, Hostlists: hostlists, Strategies: strategies, UTLSFingerprint: f.UTLSFingerprint, SingboxVersion: f.SingboxVersion, FakeIP: fakeip, Multiplex: mux, SubViaPool: f.SubViaPool}, nil
 }
 
 // buildCategories starts from the builtin seven and applies config overrides

@@ -13,6 +13,16 @@
 # NOTE: this is a committed EXAMPLE — use placeholders only, NEVER real creds.
 # The live config with real subscription URLs / hy2 passwords lives on the router
 # at /etc/lotsman/r5s.yaml (outside the repo).
+# Fetch subscriptions THROUGH the VPN tunnel (LOT-28). The acme mirror is flaky
+# to reach from the RU network directly (returns 0/10/50 nodes by mood), which
+# empties the pool and restarts sing-box (dropped Discord logins). Routing the
+# subscription host through a foreign node makes the fetch reliable. Needs
+# -probe-proxy (the socks inbound) so the box's own fetch enters sing-box to be
+# routed; the generator emits a route rule for each FETCHED subscription host ->
+# this pool. vpn_url_test contains the always-on inline hy2 nodes, so the fetch
+# bootstraps even when the acme pull itself is empty. Empty = direct fetch.
+subscription_via_pool: vpn_url_test
+
 subscriptions:
   - { name: acme, url: "https://YOUR-PANEL.example/s/SUBSCRIPTION-TOKEN", format: auto, tags: [normal], enabled: true }
   # A single paid hysteria2 node declared inline (the url IS the node — no fetch).

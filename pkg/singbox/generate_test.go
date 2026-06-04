@@ -1,6 +1,7 @@
 package singbox
 
 import (
+	"bytes"
 	"encoding/base64"
 	"encoding/json"
 	"testing"
@@ -777,5 +778,80 @@ func TestGenerateEmptyPoolFailsSafeToDirect(t *testing.T) {
 	sel := byTag[registry.SelectorTag("youtube")]
 	if sel["default"] != "direct" {
 		t.Errorf("empty pool should default selector to direct, got %v", sel["default"])
+	}
+}
+
+// subViaRule finds the route rule that sends the given host's domain_suffix to an
+// outbound, returning that outbound and whether the rule was found.
+func subViaRule(t *testing.T, js []byte, host string) (string, bool) {
+	t.Helper()
+	var cfg map[string]any
+	if err := json.Unmarshal(js, &cfg); err != nil {
+		t.Fatalf("invalid JSON: %v", err)
+	}
+	for _, r := range cfg["route"].(map[string]any)["rules"].([]any) {
+		m := r.(map[string]any)
+		ds, ok := m["domain_suffix"].([]any)
+		if !ok {
+			continue
+		}
+		for _, h := range ds {
+			if h == host {
+				out, _ := m["outbound"].(string)
+				return out, true
+			}
+		}
+	}
+	return "", false
+}
+
+func TestSubscriptionViaPool(t *testing.T) {
+	hy2 := mustParse(t, "hysteria2://pw@1.2.3.4:443?sni=x.example", subscription.FormatSingleURL)
+	services := []registry.Service{svc("youtube", "vpn_url_test", "geosite-youtube")}
+	memberships := map[string][]subscription.Node{"vpn_url_test": {hy2}}
+
+	// With a non-empty via-pool and hosts, the endpoint host routes via the pool.
+	opts := DefaultOptions()
+	opts.SubViaPool = "vpn_url_test"
+	opts.SubViaHosts = []string{"panel.example", "panel.example"} // dup tolerated
+	res, err := Generate(services, nil, []subscription.Node{hy2}, memberships, opts)
+	if err != nil {
+		t.Fatalf("generate: %v", err)
+	}
+	if out, ok := subViaRule(t, res.JSON, "panel.example"); !ok || out != "vpn_url_test" {
+		t.Errorf("sub host should route via vpn_url_test, got out=%q ok=%v", out, ok)
+	}
+}
+
+func TestSubscriptionViaPoolFailsafe(t *testing.T) {
+	hy2 := mustParse(t, "hysteria2://pw@1.2.3.4:443?sni=x.example", subscription.FormatSingleURL)
+	services := []registry.Service{svc("youtube", "vpn_url_test", "geosite-youtube")}
+
+	// Empty pool (no members) -> NO rule (fail-safe to direct fetch).
+	opts := DefaultOptions()
+	opts.SubViaPool = "vpn_url_test"
+	opts.SubViaHosts = []string{"panel.example"}
+	res, err := Generate(services, nil, nil, map[string][]subscription.Node{"vpn_url_test": nil}, opts)
+	if err != nil {
+		t.Fatalf("generate: %v", err)
+	}
+	if _, ok := subViaRule(t, res.JSON, "panel.example"); ok {
+		t.Error("empty via-pool should emit no sub-route rule (fail-safe to direct)")
+	}
+
+	// No via-pool configured -> byte-identical to plain generation (opt-in).
+	plainOpts := DefaultOptions()
+	plain, err := Generate(services, nil, []subscription.Node{hy2}, map[string][]subscription.Node{"vpn_url_test": {hy2}}, plainOpts)
+	if err != nil {
+		t.Fatalf("generate plain: %v", err)
+	}
+	offOpts := DefaultOptions()
+	offOpts.SubViaHosts = []string{"panel.example"} // hosts but no pool -> off
+	off, err := Generate(services, nil, []subscription.Node{hy2}, map[string][]subscription.Node{"vpn_url_test": {hy2}}, offOpts)
+	if err != nil {
+		t.Fatalf("generate off: %v", err)
+	}
+	if !bytes.Equal(plain.JSON, off.JSON) {
+		t.Error("via-hosts without a via-pool must not change output (opt-in, byte-identical)")
 	}
 }

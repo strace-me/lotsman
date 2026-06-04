@@ -755,6 +755,24 @@ func newReconciler(conf *config.Config, reg *registry.Registry, clash *dataplane
 	if conf.Multiplex != nil {
 		opts.Multiplex = &singbox.MultiplexOptions{Protocol: conf.Multiplex.Protocol, MaxConnections: conf.Multiplex.MaxConnections, MinStreams: conf.Multiplex.MinStreams, Padding: conf.Multiplex.Padding, BrutalUp: conf.Multiplex.BrutalUp, BrutalDown: conf.Multiplex.BrutalDown}
 	}
+
+	// Subscription-via-VPN (LOT-28): when a via-pool is configured AND we have a
+	// socks proxy to dial through, route the subscription endpoint hosts through
+	// that pool (generator emits the route rule) and fetch THROUGH the tunnel so a
+	// refresh egresses abroad instead of via the flaky RU direct path. Both pieces
+	// are required: without the proxy the route rule alone can't catch the box's
+	// own locally-generated fetch (only LAN traffic is tproxy'd), so we gate on
+	// both and otherwise fetch direct exactly as before.
+	loader := subscription.NewManager(subscription.NewHTTPFetcher())
+	if conf.SubViaPool != "" && socksProbe != "" {
+		hosts := subViaHosts(conf.Subscriptions)
+		if len(hosts) > 0 {
+			opts.SubViaPool = conf.SubViaPool
+			opts.SubViaHosts = hosts
+			loader = subscription.NewManager(subscription.NewHTTPFetcherProxy(socksProbe))
+			log.Info("reconcile: fetching subscriptions via VPN tunnel", "pool", conf.SubViaPool, "hosts", strings.Join(hosts, ","), "proxy", socksProbe)
+		}
+	}
 	alive := func(c context.Context) bool {
 		for i := 0; i < 10; i++ {
 			if _, err := clash.Proxy(c, "direct"); err == nil {
@@ -773,7 +791,7 @@ func newReconciler(conf *config.Config, reg *registry.Registry, clash *dataplane
 		Devices:    conf.Devices,
 		Opts:       opts,
 		Subs:       conf.Subscriptions,
-		Loader:     subscription.NewManager(subscription.NewHTTPFetcher()),
+		Loader:     loader,
 		Pools:      conf.Pools,
 		ConfigPath: cfgPath,
 		BackupDir:  backupDir,
@@ -797,6 +815,25 @@ func newReconciler(conf *config.Config, reg *registry.Registry, clash *dataplane
 		}
 	}
 	return rc
+}
+
+// subViaHosts returns the deduplicated endpoint hostnames of the FETCHED
+// subscriptions (inline node share-links are excluded — they are the node, not a
+// fetch). These are the hosts the generator routes through the VPN pool so a
+// refresh egresses abroad (LOT-28).
+func subViaHosts(subs []subscription.Declaration) []string {
+	seen := map[string]bool{}
+	var out []string
+	for _, d := range subs {
+		if !d.Enabled {
+			continue
+		}
+		if h, ok := subscription.FetchHost(d); ok && !seen[h] {
+			seen[h] = true
+			out = append(out, h)
+		}
+	}
+	return out
 }
 
 // loadPools fetches the configured subscriptions, computes pool membership,

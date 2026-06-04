@@ -172,6 +172,27 @@ func TestManagerInlineNodeNoFetch(t *testing.T) {
 	}
 }
 
+func TestFetchHost(t *testing.T) {
+	cases := []struct {
+		url      string
+		wantHost string
+		wantOK   bool
+	}{
+		{"https://panel.example/s/TOKEN", "panel.example", true},
+		{"https://panel.example:8443/s/TOKEN", "panel.example", true},
+		{"http://1.2.3.4:9000/sub", "1.2.3.4", true},
+		// Inline node share-links are the node itself, never a fetch host.
+		{"hysteria2://pw@192.0.2.12:443?sni=x", "", false},
+		{"vless://uuid@host:443", "", false},
+	}
+	for _, c := range cases {
+		host, ok := FetchHost(Declaration{URL: c.url})
+		if host != c.wantHost || ok != c.wantOK {
+			t.Errorf("FetchHost(%q) = (%q,%v), want (%q,%v)", c.url, host, ok, c.wantHost, c.wantOK)
+		}
+	}
+}
+
 func TestManagerTagsAndMerges(t *testing.T) {
 	ff := fakeFetcher{data: map[string][]byte{
 		"sub://normal":    []byte("vless://u@1.1.1.1:443#a\nhysteria2://p@2.2.2.2:443#b"),

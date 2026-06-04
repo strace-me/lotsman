@@ -82,6 +82,17 @@ type Options struct {
 	FakeIP           *FakeIPOptions         // emit a fakeip DNS section (nil = off)
 	Multiplex        *MultiplexOptions      // default outbound multiplex for TCP proxies (nil = off)
 	Remediations     map[string]Remediation // per-service self-heal remediation rules (nil/absent = no change; LOT-18). Keyed by service name.
+
+	// SubViaHosts/SubViaPool route the subscription-endpoint hosts through a VPN
+	// pool instead of final:direct (LOT-28), so a subscription refresh egresses
+	// abroad — the flaky `acme` mirror is unreliable to reach from the RU network
+	// directly. A domain_suffix rule for these hosts -> SubViaPool is emitted at the
+	// top of the domain tier. Opt-in and fail-safe: if SubViaPool is empty, the
+	// pool is empty, or no hosts are given, NO rule is emitted (byte-identical to
+	// before) and the fetch falls back to direct. Pair with a proxy fetcher
+	// (NewHTTPFetcherProxy) so the fetch actually enters sing-box to be routed.
+	SubViaHosts []string // subscription endpoint hostnames to route via the tunnel
+	SubViaPool  string   // pool tag to route SubViaHosts through ("" = off)
 }
 
 // Remediation describes the self-heal rules to inject for one service (LOT-18).
@@ -272,6 +283,21 @@ func rejectQUICRules(svc registry.Service) []any {
 	}
 	if len(svc.IPs) > 0 {
 		add("ip_cidr", svc.IPs)
+	}
+	return out
+}
+
+// dedupNonEmpty returns the input with blanks dropped and duplicates removed,
+// preserving first-seen order (stable generated output).
+func dedupNonEmpty(in []string) []string {
+	seen := make(map[string]bool, len(in))
+	out := make([]string, 0, len(in))
+	for _, s := range in {
+		if s == "" || seen[s] {
+			continue
+		}
+		seen[s] = true
+		out = append(out, s)
 	}
 	return out
 }
@@ -546,9 +572,26 @@ func Generate(services []registry.Service, devices []registry.Device, nodes []su
 			}
 		}
 	}
+	// Subscription-via-VPN (LOT-28): route the subscription endpoint hosts through
+	// a VPN pool so a refresh egresses abroad instead of via the unreliable RU
+	// direct path. Emitted at the top of the domain tier so it wins over any broad
+	// catch-all (e.g. geosite-ru-blocked) that might also cover the host. Fail-safe:
+	// only when a pool is named, that pool is non-empty, and hosts are present —
+	// otherwise nothing is added and the fetch falls back to direct (final:direct).
+	var subRules []any
+	if opts.SubViaPool != "" && nonEmptyPool[opts.SubViaPool] {
+		if hosts := dedupNonEmpty(opts.SubViaHosts); len(hosts) > 0 {
+			subRules = append(subRules, map[string]any{
+				"domain_suffix": hosts,
+				"outbound":      opts.SubViaPool,
+			})
+		}
+	}
+
 	// reject-QUIC tier first (so udp/443 is killed before the service's own match
 	// could route it), then domain tier, then IP tier (see tiering note above).
 	routeRules = append(routeRules, rejectRules...)
+	routeRules = append(routeRules, subRules...)
 	routeRules = append(routeRules, domainRules...)
 	routeRules = append(routeRules, ipRules...)
 
