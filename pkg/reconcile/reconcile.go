@@ -62,9 +62,28 @@ type Reconciler struct {
 	// The controller updates the backing map and calls Reconcile to apply/revert.
 	Remediations func() map[string]singbox.Remediation
 
+	// Baseline persists lastNodes across restarts so the anti-churn guard works on
+	// the very first reconcile after a restart (otherwise lastNodes resets to 0 and
+	// a degraded startup fetch is applied wholesale — LOT-29). nil = in-memory only.
+	// Construct with NewBaselineStore and seed lastNodes from its Load before the
+	// first Reconcile (see cmd/lotsmand wiring).
+	Baseline *BaselineStore
+
+	// FetchRetries / FetchBackoff bound the startup-fetch retry (LOT-29 part 2):
+	// when a baseline exists and a fetch comes back degraded, re-Load up to
+	// FetchRetries times with FetchBackoff between tries before giving up for the
+	// tick. Zero values fall back to defaults (defaultFetchRetries/Backoff).
+	FetchRetries int
+	FetchBackoff time.Duration
+
 	last      []byte // last config bytes we wrote/observed (skip re-validation)
 	lastNodes int    // node count of the last clean apply (anti-churn baseline)
 }
+
+const (
+	defaultFetchRetries = 3
+	defaultFetchBackoff = 2 * time.Second
+)
 
 // Reconcile runs one pass. It is safe to call on a ticker; it is a no-op when
 // the desired config already matches the live file.
@@ -74,15 +93,39 @@ func (r *Reconciler) Reconcile(ctx context.Context) error {
 		r.Log.Warn("reconcile: subscription load issue", "err", e)
 	}
 	// Anti-churn: a flaky mirror that drops nodes must not trigger a restart to a
-	// smaller config the next tick undoes. Skip when the set shrank versus the last
-	// clean apply AND either the fetch errored OR the drop is dramatic (>50%). The
-	// acme subscription intermittently returns 0 nodes on a SUCCESSFUL (error-free)
-	// fetch; applying that empties the VPN pool and restarts sing-box into a
-	// node-less config — dropping every live connection (Discord gateway etc.). The
-	// dramatic-drop clause catches that case the error-only guard missed (LOT-27).
-	if r.lastNodes > 0 && len(nodes) < r.lastNodes && (len(errs) > 0 || len(nodes)*2 < r.lastNodes) {
-		r.Log.Warn("reconcile: skipping, degraded node set", "nodes", len(nodes), "last", r.lastNodes, "fetch_errs", len(errs))
-		return nil
+	// smaller config the next tick undoes. When we have a baseline and the fetch is
+	// degraded (errored or dramatically shrank — see degraded), retry the fetch a
+	// few times with a short backoff to ride out a transient empty fetch and land
+	// on a good set within this tick instead of waiting a whole -check-interval
+	// (LOT-29). Only with a baseline: a genuine first-ever apply (lastNodes==0) must
+	// not be blocked or retried. If still degraded after the retries, skip and keep
+	// the last-good config — the same safety the in-tick guard gives mid-run (the
+	// acme subscription intermittently returns 0 nodes even on an error-free fetch,
+	// which would otherwise empty the VPN pool and drop every live connection).
+	if r.lastNodes > 0 && r.degraded(nodes, errs) {
+		retries, backoff := r.FetchRetries, r.FetchBackoff
+		if retries == 0 {
+			retries = defaultFetchRetries
+		}
+		if backoff == 0 {
+			backoff = defaultFetchBackoff
+		}
+		for i := 0; i < retries && r.degraded(nodes, errs); i++ {
+			r.Log.Warn("reconcile: degraded fetch, retrying", "attempt", i+1, "nodes", len(nodes), "last", r.lastNodes, "fetch_errs", len(errs))
+			select {
+			case <-time.After(backoff):
+			case <-ctx.Done():
+				return ctx.Err()
+			}
+			nodes, errs = r.Loader.Load(ctx, r.Subs)
+			for _, e := range errs {
+				r.Log.Warn("reconcile: subscription load issue", "err", e)
+			}
+		}
+		if r.degraded(nodes, errs) {
+			r.Log.Warn("reconcile: skipping, degraded node set", "nodes", len(nodes), "last", r.lastNodes, "fetch_errs", len(errs))
+			return nil
+		}
 	}
 
 	memberships := r.Pools.Memberships(nodes)
@@ -105,7 +148,7 @@ func (r *Reconciler) Reconcile(ctx context.Context) error {
 	live, _ := os.ReadFile(r.ConfigPath)
 	if sameConfig(desired, live) {
 		r.last = desired
-		r.lastNodes = len(nodes)
+		r.setLastNodes(len(nodes))
 		return nil // already in sync
 	}
 
@@ -130,9 +173,41 @@ func (r *Reconciler) Reconcile(ctx context.Context) error {
 		return err
 	}
 	r.last = desired
-	r.lastNodes = len(nodes)
+	r.setLastNodes(len(nodes))
 	r.Log.Info("reconcile: applied new sing-box config", "nodes", len(nodes), "pools", len(memberships))
 	return nil
+}
+
+// degraded reports whether a fetch result is too poor to apply versus the
+// last-good baseline: the set shrank AND either the fetch errored or the drop is
+// dramatic (>50%). Centralizes the LOT-27 anti-churn condition so the in-tick
+// guard and the startup retry (LOT-29) share one threshold. With no baseline
+// (lastNodes==0) nothing is "degraded" — the first-ever apply is never blocked.
+func (r *Reconciler) degraded(nodes []subscription.Node, errs []error) bool {
+	if r.lastNodes <= 0 || len(nodes) >= r.lastNodes {
+		return false
+	}
+	return len(errs) > 0 || len(nodes)*2 < r.lastNodes
+}
+
+// SetBaseline seeds the in-memory anti-churn baseline (lastNodes) without
+// persisting — used at construction to restore the value loaded from
+// BaselineStore so the degraded-fetch guard works on the first post-restart
+// reconcile (LOT-29).
+func (r *Reconciler) SetBaseline(n int) { r.lastNodes = n }
+
+// setLastNodes updates the anti-churn baseline and persists it best-effort (like
+// kb/state): a save failure only warns — the in-memory value still works for the
+// running process, and a missing/corrupt file is treated as a cold start on the
+// next boot.
+func (r *Reconciler) setLastNodes(n int) {
+	r.lastNodes = n
+	if r.Baseline == nil {
+		return
+	}
+	if err := r.Baseline.Save(n); err != nil {
+		r.Log.Warn("reconcile: baseline save failed (continuing)", "err", err)
+	}
 }
 
 // apply swaps tmp into place with a backup, restarts sing-box, and rolls back to

@@ -3,11 +3,13 @@ package reconcile
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/strace-me/lotsman/pkg/pools"
 	"github.com/strace-me/lotsman/pkg/registry"
@@ -48,6 +50,23 @@ type fakeLoader struct {
 
 func (f fakeLoader) Load(context.Context, []subscription.Declaration) ([]subscription.Node, []error) {
 	return f.nodes, f.errs
+}
+
+// seqLoader returns a different result on each Load call, cycling through results
+// and repeating the last one once exhausted. Tracks the number of calls so a test
+// can assert how many fetch attempts happened (LOT-29 retry).
+type seqLoader struct {
+	results []fakeLoader
+	calls   int
+}
+
+func (s *seqLoader) Load(ctx context.Context, d []subscription.Declaration) ([]subscription.Node, []error) {
+	i := s.calls
+	if i >= len(s.results) {
+		i = len(s.results) - 1
+	}
+	s.calls++
+	return s.results[i].Load(ctx, d)
 }
 
 func node(t *testing.T) subscription.Node {
@@ -320,5 +339,121 @@ func TestReconcileSkipsNodeCollapseWithoutError(t *testing.T) {
 	}
 	if len(run.calls) != 0 {
 		t.Errorf("error-free node collapse must skip (no check/restart), calls=%v", run.calls)
+	}
+}
+
+// nodesN builds n distinct reality nodes (distinct servers) so the set has a real
+// size for the anti-churn baseline/shrink logic.
+func nodesN(t *testing.T, n int) []subscription.Node {
+	t.Helper()
+	out := make([]subscription.Node, n)
+	for i := 0; i < n; i++ {
+		out[i] = realityNode(t, fmt.Sprintf("10.0.0.%d", i+1), "sid")
+	}
+	return out
+}
+
+// LOT-29 part 1: a Reconciler seeded from a baseline file containing N has
+// lastNodes==N BEFORE the first Reconcile, so a degraded first fetch (few/0
+// nodes) is skipped — no apply — even on the very first post-restart tick.
+func TestReconcileBaselineFileSkipsDegradedFirstFetch(t *testing.T) {
+	dir := t.TempDir()
+	basePath := filepath.Join(dir, "baseline.json")
+	bs := NewBaselineStore(basePath)
+	if err := bs.Save(10); err != nil {
+		t.Fatalf("save baseline: %v", err)
+	}
+
+	run := &fakeRunner{}
+	// Degraded startup fetch: 0 nodes (the deploy that landed a degraded config).
+	r, _ := testReconciler(t, run, fakeLoader{nodes: nil}, false)
+	r.Baseline = NewBaselineStore(basePath)
+	r.SetBaseline(r.Baseline.Load())
+	r.FetchBackoff = time.Millisecond // keep retries instant
+	if r.lastNodes != 10 {
+		t.Fatalf("seeded lastNodes = %d, want 10", r.lastNodes)
+	}
+
+	if err := r.Reconcile(context.Background()); err != nil {
+		t.Fatalf("reconcile: %v", err)
+	}
+	if len(run.calls) != 0 {
+		t.Errorf("degraded first fetch with persisted baseline must skip, calls=%v", run.calls)
+	}
+}
+
+// LOT-29 part 1 (negative): with NO baseline file, the first reconcile has
+// lastNodes==0, so the genuine first-ever apply proceeds even with a small set.
+func TestReconcileNoBaselineFirstApplyProceeds(t *testing.T) {
+	run := &fakeRunner{}
+	r, _ := testReconciler(t, run, fakeLoader{nodes: []subscription.Node{node(t)}}, false)
+	if r.lastNodes != 0 {
+		t.Fatalf("cold lastNodes = %d, want 0", r.lastNodes)
+	}
+	if err := r.Reconcile(context.Background()); err != nil {
+		t.Fatalf("reconcile: %v", err)
+	}
+	if !run.ran("check") || !run.ran("restart") {
+		t.Errorf("first-ever apply must proceed, calls=%v", run.calls)
+	}
+}
+
+// LOT-29 part 1: a clean apply persists the baseline to the file so the next
+// process restart can restore it.
+func TestReconcilePersistsBaselineOnApply(t *testing.T) {
+	dir := t.TempDir()
+	basePath := filepath.Join(dir, "baseline.json")
+	run := &fakeRunner{}
+	r, _ := testReconciler(t, run, fakeLoader{nodes: nodesN(t, 6)}, false)
+	r.Baseline = NewBaselineStore(basePath)
+
+	if err := r.Reconcile(context.Background()); err != nil {
+		t.Fatalf("reconcile: %v", err)
+	}
+	if got := NewBaselineStore(basePath).Load(); got != 6 {
+		t.Errorf("persisted baseline = %d, want 6", got)
+	}
+}
+
+// LOT-29 part 2: a transient empty fetch followed by a full set — reconcile
+// retries within the tick and applies the good set (does NOT wait for the next
+// tick / does not skip).
+func TestReconcileRetriesTransientThenApplies(t *testing.T) {
+	run := &fakeRunner{}
+	good := nodesN(t, 6)
+	r, _ := testReconciler(t, run, fakeLoader{}, false)
+	r.SetBaseline(6) // we have a baseline (as if restored)
+	r.FetchBackoff = time.Millisecond
+	r.Loader = &seqLoader{results: []fakeLoader{
+		{nodes: nil},  // attempt 1: transient empty
+		{nodes: nil},  // attempt 2: still empty
+		{nodes: good}, // attempt 3: recovered full set
+	}}
+
+	if err := r.Reconcile(context.Background()); err != nil {
+		t.Fatalf("reconcile: %v", err)
+	}
+	if !run.ran("check") || !run.ran("restart") {
+		t.Errorf("retry should land the good set and apply, calls=%v", run.calls)
+	}
+	if sl := r.Loader.(*seqLoader); sl.calls < 3 {
+		t.Errorf("expected >=3 fetch attempts (retry), got %d", sl.calls)
+	}
+}
+
+// LOT-29 part 2: a loader that stays degraded for every attempt — after the
+// bounded retries reconcile skips (keeps last-good), no apply.
+func TestReconcileRetriesStayDegradedThenSkips(t *testing.T) {
+	run := &fakeRunner{}
+	r, _ := testReconciler(t, run, fakeLoader{nodes: nil}, false)
+	r.SetBaseline(6)
+	r.FetchRetries = 3
+	r.FetchBackoff = time.Millisecond
+
+	if err := r.Reconcile(context.Background()); err != nil {
+		t.Fatalf("reconcile: %v", err)
+	}
+	if len(run.calls) != 0 {
+		t.Errorf("persistently degraded fetch must skip after retries, calls=%v", run.calls)
 	}
 }
