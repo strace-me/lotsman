@@ -100,6 +100,7 @@ func main() {
 		singboxRestart  = flag.String("singbox-restart", "/etc/init.d/sing-box restart", "command to restart sing-box (space-separated)")
 		reconcileBackup = flag.String("reconcile-backup-dir", "", "dir for pre-apply sing-box config backups (empty = no backup)")
 		reconcileBase   = flag.String("reconcile-baseline-file", "", "persist the reconcile anti-churn node-count baseline to this JSON file so the degraded-fetch guard survives restart (empty = in-memory only)")
+		nodeHealth      = flag.Bool("node-health", false, "subscription node health tracking (LOT-6, lenient): probe each node via clash on -check-interval and drop PROVEN-dead nodes from pools; fresh/quarantined nodes still admitted (never empties a pool). Needs -reconcile.")
 		rulesetsUpdate  = flag.Bool("rulesets-update", false, "Track A autoupdate: fetch the rule-set release, shrink-guard, swap changed .srs, trigger reconcile")
 		rulesetsRepo    = flag.String("rulesets-repo", "runetfreedom/russia-v2ray-rules-dat", "GitHub repo whose release ships sing-box.zip (.srs bundle)")
 		rulesetsPin     = flag.String("rulesets-pin", "", "pin a release tag (empty = track latest)")
@@ -333,9 +334,17 @@ func main() {
 	// maintenance loop) so both the maintenance loop AND the armed remediation
 	// controller (LOT-18b) can share the same instance — the controller needs it
 	// to apply/revert remediations even when -check-interval is off.
+	// Node health tracker (LOT-6, lenient): shared between reconcile's Loader (which
+	// drops proven-dead nodes) and the maintenance health-check loop (the sole
+	// mutator). nil unless -node-health and reconcile are both on.
+	var nodeTracker *subscription.Tracker
+	if *nodeHealth && *reconcileSB && *singboxConfig != "" && conf != nil {
+		nodeTracker = subscription.NewTracker()
+	}
+
 	var rc *reconcile.Reconciler
 	if *reconcileSB && *singboxConfig != "" && conf != nil {
-		rc = newReconciler(conf, reg, clash, *singboxConfig, *singboxBin, *singboxRestart, *reconcileBackup, *reconcileBase, *probeProxy, *dryRun, log)
+		rc = newReconciler(conf, reg, clash, *singboxConfig, *singboxBin, *singboxRestart, *reconcileBackup, *reconcileBase, *probeProxy, nodeTracker, *dryRun, log)
 	}
 
 	// Background maintenance loop (Flowseal update, subscription refresh).
@@ -399,6 +408,19 @@ func main() {
 		if rc != nil {
 			pr.Add(periodic.Task{Name: "singbox-reconcile", Interval: *checkInterval, RunAtStart: true, Fn: rc.Reconcile})
 			log.Info("sing-box config reconcile enabled", "path", *singboxConfig, "dry_run", *dryRun)
+		}
+		if nodeTracker != nil {
+			// Node health-check (LOT-6): the SOLE tracker mutator. Probes each node
+			// through its own outbound via clash; proven-dead nodes are dropped from
+			// the pool by reconcile's Load on the next pass. Uses a tracker-less manager
+			// so it still SEES (and can revive) dead nodes. Not RunAtStart: it should
+			// run AFTER the first reconcile has put the nodes into sing-box (else the
+			// clash /delay probes hit not-yet-configured outbounds).
+			hmgr := subscription.NewManager(subscription.NewHTTPFetcher())
+			pr.Add(periodic.Task{Name: "node-health", Interval: *checkInterval, Fn: func(c context.Context) error {
+				return checkNodeHealth(c, hmgr, conf.Subscriptions, nodeTracker, clash, *vpnProbeURL, log)
+			}})
+			log.Info("node health tracking enabled (LOT-6, lenient)", "probe_url", *vpnProbeURL)
 		}
 		if *rulesetsUpdate {
 			up := newRulesetsUpdater(reg, rc, *rulesetsRepo, *rulesetsPin, *rulesetsDir, *singboxBin, *rulesetsBump, *rulesetsRatio, *dryRun, log)
@@ -716,7 +738,7 @@ func newRulesetsUpdater(reg *registry.Registry, rc *reconcile.Reconciler, repo, 
 // generator Options match the R5S (socks probe-in mirrors -probe-proxy), the
 // Alive check waits for the Clash API to answer after a restart, and DryRun
 // follows the global -dry-run so a first deployment only logs what it would do.
-func newReconciler(conf *config.Config, reg *registry.Registry, clash *dataplane.ClashClient, cfgPath, sbBin, restartCmd, backupDir, baselineFile, socksProbe string, dryRun bool, log *slog.Logger) *reconcile.Reconciler {
+func newReconciler(conf *config.Config, reg *registry.Registry, clash *dataplane.ClashClient, cfgPath, sbBin, restartCmd, backupDir, baselineFile, socksProbe string, tracker *subscription.Tracker, dryRun bool, log *slog.Logger) *reconcile.Reconciler {
 	services := make([]registry.Service, 0, len(reg.Services))
 	for _, s := range reg.Services {
 		services = append(services, s)
@@ -751,6 +773,8 @@ func newReconciler(conf *config.Config, reg *registry.Registry, clash *dataplane
 			log.Info("reconcile: fetching subscriptions via VPN tunnel", "pool", conf.SubViaPool, "hosts", strings.Join(hosts, ","), "proxy", socksProbe)
 		}
 	}
+	// LOT-6: let reconcile's Load drop proven-dead nodes (lenient health filter).
+	loader.Tracker = tracker
 	alive := func(c context.Context) bool {
 		for i := 0; i < 10; i++ {
 			if _, err := clash.Proxy(c, "direct"); err == nil {
@@ -793,6 +817,55 @@ func newReconciler(conf *config.Config, reg *registry.Registry, clash *dataplane
 		}
 	}
 	return rc
+}
+
+// nodeHealthTimeout bounds one clash /delay node probe in the health-check loop.
+const nodeHealthTimeout = 5 * time.Second
+
+// checkNodeHealth runs one node-health pass (LOT-6, lenient): it records which
+// nodes are present in the latest pull (OnSeen) and which vanished (OnMissing),
+// probes each present node through its own outbound via clash, folds the result
+// into the tracker (OnCheck), and prunes long-dead/removed entries. It is the
+// SOLE tracker mutator — reconcile's Load only READS it (ShouldExclude) — so the
+// two run concurrently without a shared-state race beyond the tracker's own lock.
+// mgr is tracker-less on purpose, so a node already marked dead still appears here
+// and can recover (a passing probe reactivates it). Quarantined nodes are skipped
+// until their backoff retry is due, honoring the 1h/4h/24h schedule.
+func checkNodeHealth(ctx context.Context, mgr *subscription.Manager, subs []subscription.Declaration, tracker *subscription.Tracker, clash *dataplane.ClashClient, probeURL string, log *slog.Logger) error {
+	nodes, errs := mgr.Load(ctx, subs)
+	for _, e := range errs {
+		log.Warn("node-health: subscription load issue", "err", e)
+	}
+	now := time.Now()
+	present := make(map[string]bool, len(nodes))
+	for _, n := range nodes {
+		present[n.ID] = true
+		tracker.OnSeen(n.ID, now)
+	}
+	for _, id := range tracker.IDs() {
+		if !present[id] {
+			tracker.OnMissing(id, now)
+		}
+	}
+	checked, failed := 0, 0
+	for _, n := range nodes {
+		tag, ok := singbox.NodeTag(n)
+		if !ok {
+			continue
+		}
+		if h, tracked := tracker.Get(n.ID); tracked && h.Status == subscription.StatusQuarantine && !tracker.DueForRetry(n.ID, now) {
+			continue // honor the quarantine backoff schedule
+		}
+		_, err := clash.NodeDelay(ctx, tag, probeURL, nodeHealthTimeout)
+		tracker.OnCheck(n.ID, err == nil, now)
+		checked++
+		if err != nil {
+			failed++
+		}
+	}
+	dropped := tracker.Prune(now)
+	log.Info("node-health", "nodes", len(nodes), "checked", checked, "failed", failed, "pruned", len(dropped))
+	return nil
 }
 
 // subViaHosts returns the deduplicated endpoint hostnames of the FETCHED
