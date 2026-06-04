@@ -469,35 +469,13 @@ func main() {
 			if rc == nil {
 				log.Error("-remediate set but no reconciler (needs -reconcile and -singbox-config with subscriptions); staying PROPOSE-ONLY")
 			} else {
-				var remMu sync.Mutex
-				active := map[string]singbox.Remediation{}
-				rc.Remediations = func() map[string]singbox.Remediation {
-					remMu.Lock()
-					defer remMu.Unlock()
-					if len(active) == 0 {
-						return nil
-					}
-					cp := make(map[string]singbox.Remediation, len(active))
-					for k, v := range active {
-						cp[k] = v
-					}
-					return cp
-				}
-				actions := remctl.Actions{
-					Apply: func(service string, _ int, rem singbox.Remediation) error {
-						remMu.Lock()
-						active[service] = rem
-						remMu.Unlock()
-						return rc.Reconcile(passCtx)
-					},
-					Rollback: func(service string) error {
-						remMu.Lock()
-						delete(active, service)
-						remMu.Unlock()
-						return rc.Reconcile(passCtx)
-					},
-				}
-				ctl = remctl.New(remctl.DefaultConfig(), actions, incidents)
+				// ActiveSet owns the per-service remediation map and keeps it
+				// consistent with what reconcile actually committed (LOT-24): a failed
+				// reconcile reverts the map so it never claims a state the live config
+				// does not have. commit reconciles using the current observe pass's ctx.
+				activeSet := remctl.NewActiveSet(func() error { return rc.Reconcile(passCtx) })
+				rc.Remediations = activeSet.Snapshot
+				ctl = remctl.New(remctl.DefaultConfig(), activeSet.Actions(), incidents)
 				log.Warn("ARMED remediation controller enabled (LOT-18b): observe loop will AUTO-APPLY remediations with canary+rollback", "dry_run", *dryRun)
 			}
 		}
