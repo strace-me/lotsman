@@ -301,3 +301,24 @@ func TestReconcileSkipsDegradedNodeSet(t *testing.T) {
 		t.Errorf("degraded fetch must skip (no check/restart), calls=%v", run.calls)
 	}
 }
+
+// LOT-27: the acme subscription intermittently returns 0 nodes on a SUCCESSFUL
+// (error-free) fetch; applying it restarts sing-box into a node-less config and
+// drops every live connection (Discord gateway etc.). The dramatic-drop clause
+// must skip it even though there is no fetch error.
+func TestReconcileSkipsNodeCollapseWithoutError(t *testing.T) {
+	run := &fakeRunner{}
+	r, _ := testReconciler(t, run, fakeLoader{nodes: []subscription.Node{node(t)}}, false)
+	if err := r.Reconcile(context.Background()); err != nil {
+		t.Fatalf("first reconcile: %v", err)
+	}
+	// Error-free fetch returning zero nodes (the acme flap) → must skip.
+	r.Loader = fakeLoader{nodes: nil}
+	run.calls = nil
+	if err := r.Reconcile(context.Background()); err != nil {
+		t.Fatalf("reconcile: %v", err)
+	}
+	if len(run.calls) != 0 {
+		t.Errorf("error-free node collapse must skip (no check/restart), calls=%v", run.calls)
+	}
+}
