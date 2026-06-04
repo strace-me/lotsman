@@ -99,6 +99,7 @@ func main() {
 		singboxBin      = flag.String("singbox-bin", "sing-box", "sing-box binary used for `check`")
 		singboxRestart  = flag.String("singbox-restart", "/etc/init.d/sing-box restart", "command to restart sing-box (space-separated)")
 		reconcileBackup = flag.String("reconcile-backup-dir", "", "dir for pre-apply sing-box config backups (empty = no backup)")
+		reconcileBase   = flag.String("reconcile-baseline-file", "", "persist the reconcile anti-churn node-count baseline to this JSON file so the degraded-fetch guard survives restart (empty = in-memory only)")
 		rulesetsUpdate  = flag.Bool("rulesets-update", false, "Track A autoupdate: fetch the rule-set release, shrink-guard, swap changed .srs, trigger reconcile")
 		rulesetsRepo    = flag.String("rulesets-repo", "runetfreedom/russia-v2ray-rules-dat", "GitHub repo whose release ships sing-box.zip (.srs bundle)")
 		rulesetsPin     = flag.String("rulesets-pin", "", "pin a release tag (empty = track latest)")
@@ -334,7 +335,7 @@ func main() {
 	// to apply/revert remediations even when -check-interval is off.
 	var rc *reconcile.Reconciler
 	if *reconcileSB && *singboxConfig != "" && conf != nil {
-		rc = newReconciler(conf, reg, clash, *singboxConfig, *singboxBin, *singboxRestart, *reconcileBackup, *probeProxy, *dryRun, log)
+		rc = newReconciler(conf, reg, clash, *singboxConfig, *singboxBin, *singboxRestart, *reconcileBackup, *reconcileBase, *probeProxy, *dryRun, log)
 	}
 
 	// Background maintenance loop (Flowseal update, subscription refresh).
@@ -737,7 +738,7 @@ func newRulesetsUpdater(reg *registry.Registry, rc *reconcile.Reconciler, repo, 
 // generator Options match the R5S (socks probe-in mirrors -probe-proxy), the
 // Alive check waits for the Clash API to answer after a restart, and DryRun
 // follows the global -dry-run so a first deployment only logs what it would do.
-func newReconciler(conf *config.Config, reg *registry.Registry, clash *dataplane.ClashClient, cfgPath, sbBin, restartCmd, backupDir, socksProbe string, dryRun bool, log *slog.Logger) *reconcile.Reconciler {
+func newReconciler(conf *config.Config, reg *registry.Registry, clash *dataplane.ClashClient, cfgPath, sbBin, restartCmd, backupDir, baselineFile, socksProbe string, dryRun bool, log *slog.Logger) *reconcile.Reconciler {
 	services := make([]registry.Service, 0, len(reg.Services))
 	for _, s := range reg.Services {
 		services = append(services, s)
@@ -767,7 +768,7 @@ func newReconciler(conf *config.Config, reg *registry.Registry, clash *dataplane
 		}
 		return false
 	}
-	return &reconcile.Reconciler{
+	rc := &reconcile.Reconciler{
 		Services:   services,
 		Devices:    conf.Devices,
 		Opts:       opts,
@@ -783,6 +784,19 @@ func newReconciler(conf *config.Config, reg *registry.Registry, clash *dataplane
 		Alive:      alive,
 		Log:        log,
 	}
+	// Seed the anti-churn baseline from the persisted file (LOT-29) so the
+	// degraded-fetch guard fires on the very first reconcile after a restart
+	// instead of resetting to 0. Missing/corrupt file = cold start (Load -> 0).
+	if baselineFile != "" {
+		rc.Baseline = reconcile.NewBaselineStore(baselineFile)
+		if n := rc.Baseline.Load(); n > 0 {
+			rc.SetBaseline(n)
+			log.Info("reconcile: baseline restored", "path", baselineFile, "last_nodes", n)
+		} else {
+			log.Info("reconcile: baseline cold start (no prior file)", "path", baselineFile)
+		}
+	}
+	return rc
 }
 
 // loadPools fetches the configured subscriptions, computes pool membership,
