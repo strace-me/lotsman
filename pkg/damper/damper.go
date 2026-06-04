@@ -13,12 +13,12 @@ import (
 
 // Damper tracks recent transitions per service.
 type Damper struct {
-	mu       sync.Mutex
-	window   time.Duration // transitions within this window count toward flapping
-	maxFree  int           // this many transitions per window incur no backoff
-	base     time.Duration // backoff for the first excess transition
-	max      time.Duration // backoff ceiling
-	events   map[string][]time.Time
+	mu      sync.Mutex
+	window  time.Duration // transitions within this window count toward flapping
+	maxFree int           // this many transitions per window incur no backoff
+	base    time.Duration // backoff for the first excess transition
+	max     time.Duration // backoff ceiling
+	events  map[string][]time.Time
 }
 
 // New builds a damper. base doubles per excess transition beyond maxFree, up to

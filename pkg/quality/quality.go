@@ -12,12 +12,12 @@ import "sort"
 
 // Quality is the assessed connection quality over a set of samples.
 type Quality struct {
-	P50ms   float64 // median latency
-	P95ms   float64 // tail latency (the "L95")
-	P99ms   float64 // worse tail (the "L99")
+	P50ms    float64 // median latency
+	P95ms    float64 // tail latency (the "L95")
+	P99ms    float64 // worse tail (the "L99")
 	JitterMs float64 // mean inter-sample RTT variation (RFC3550-style)
-	Loss    float64 // failed / total, in [0,1]
-	Samples int     // total attempts considered
+	Loss     float64 // failed / total, in [0,1]
+	Samples  int     // total attempts considered
 }
 
 // FromRTTs builds Quality from the round-trip times of successful samples (in

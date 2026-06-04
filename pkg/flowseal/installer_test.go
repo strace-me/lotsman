@@ -36,9 +36,9 @@ func TestFileInstallerExtractsAndLinks(t *testing.T) {
 	}
 
 	raw := makeZip(t, map[string]string{
-		"bin/stun.bin":        "PAYLOAD",
+		"bin/stun.bin":           "PAYLOAD",
 		"lists/list-general.txt": "youtube.com\n",
-		"general (ALT12).bat": "strategy",
+		"general (ALT12).bat":    "strategy",
 	})
 	if err := inst.Install(context.Background(), Release{Tag: "1.9.9a"}, raw); err != nil {
 		t.Fatalf("install: %v", err)
