@@ -88,6 +88,7 @@ func main() {
 		metricsAddr     = flag.String("metrics-addr", "", "expose Prometheus /metrics on this addr, e.g. 127.0.0.1:9101 (empty = disabled)")
 		stateFile       = flag.String("state-file", "", "persist/restore chain positions to this JSON file (empty = disabled)")
 		kbFile          = flag.String("kb-file", "", "persist/restore learned strategy success (KB) to this JSON file so experience survives restart (empty = disabled)")
+		strategyCatalog = flag.String("strategy-catalog-file", "", "load blockcheck-discovered zapret strategies (LOT-10a) from this JSON file, written by `lotsmanctl harvest -out`; they join the catalog the KB ranks over (empty = builtin+config only)")
 		smart           = flag.Bool("smart", true, "enable the intelligence layer (policy/correlate/damper/adaptive/anomaly) in escalation decisions")
 		checkInterval   = flag.Duration("check-interval", 0, "run background maintenance (Flowseal update, subscription refresh) every interval (0 = disabled)")
 		observeInterval = flag.Duration("observe-interval", 30*time.Second, "run the passive-observation eye (observe/detect/propose, PROPOSE-ONLY) every interval, independent of -check-interval (0 = disabled)")
@@ -148,6 +149,21 @@ func main() {
 		for _, d := range conf.Strategies {
 			catalog.Add(d)
 		}
+	}
+	// Discovered strategies (LOT-10a): fold in whatever `lotsmanctl harvest -out`
+	// wrote. They carry NFQWSArgs (the raw desync profile) so the per-service
+	// composer can render launchers for them; here they just join the catalog the
+	// KB ranks over. Missing file = none; a corrupt file is fatal (operator typo).
+	if *strategyCatalog != "" {
+		discovered, err := strategy.LoadDefinitions(*strategyCatalog)
+		if err != nil {
+			log.Error("strategy catalog load failed", "path", *strategyCatalog, "err", err)
+			os.Exit(1)
+		}
+		for _, d := range discovered {
+			catalog.Add(d)
+		}
+		log.Info("discovered strategies loaded", "path", *strategyCatalog, "count", len(discovered))
 	}
 	knowledge.SetZapretSeed(catalog.ZapretIDs())
 

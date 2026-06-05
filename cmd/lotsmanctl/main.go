@@ -26,6 +26,7 @@ import (
 	"github.com/strace-me/lotsman/pkg/domainscan"
 	"github.com/strace-me/lotsman/pkg/registry"
 	"github.com/strace-me/lotsman/pkg/singbox"
+	"github.com/strace-me/lotsman/pkg/strategy"
 	"github.com/strace-me/lotsman/pkg/subscription"
 )
 
@@ -295,6 +296,7 @@ func harvest(args []string) {
 	domains := fs.String("domains", "rutracker.org", "comma-separated target domains")
 	scan := fs.String("scanlevel", "force", "quick|standard|force (force = widest search space)")
 	simulate := fs.Bool("simulate", true, "SIMULATE=1: dry harvest, no network/nfqws (safe to run anytime)")
+	outPath := fs.String("out", "", "merge discovered strategies into this JSON catalog file (LOT-10a; empty = stdout only). The daemon reads it via -strategy-catalog-file.")
 	_ = fs.Parse(args)
 
 	r := blockcheck.New(nil)
@@ -320,6 +322,22 @@ func harvest(args []string) {
 		fmt.Printf("%-28s  %s\n", d.ID, strings.Join(d.NFQWSArgs, " "))
 	}
 	fmt.Fprintf(os.Stderr, "harvested %d distinct nfqws strategies (simulate=%v, scanlevel=%s)\n", len(defs), *simulate, *scan)
+
+	// LOT-10a: persist the discovered strategies so the daemon can rank/render
+	// them. Merge over any prior harvest (by ID) so the search space accumulates.
+	if *outPath != "" {
+		prior, err := strategy.LoadDefinitions(*outPath)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "harvest: read existing catalog %s: %v\n", *outPath, err)
+			os.Exit(1)
+		}
+		merged := strategy.MergeDefinitions(prior, defs)
+		if err := strategy.SaveDefinitions(*outPath, merged); err != nil {
+			fmt.Fprintf(os.Stderr, "harvest: write catalog %s: %v\n", *outPath, err)
+			os.Exit(1)
+		}
+		fmt.Fprintf(os.Stderr, "catalog %s: %d total (%d new this run)\n", *outPath, len(merged), len(merged)-len(prior))
+	}
 }
 
 // status is the operator's at-a-glance view of the LIVE daemon. It scrapes the
