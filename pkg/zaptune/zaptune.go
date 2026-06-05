@@ -20,6 +20,7 @@ import (
 
 	"github.com/strace-me/lotsman/pkg/nfqwsgen"
 	"github.com/strace-me/lotsman/pkg/registry"
+	"github.com/strace-me/lotsman/pkg/strategy"
 	"github.com/strace-me/lotsman/pkg/strategycat"
 )
 
@@ -141,6 +142,44 @@ func FirstPicker(_ registry.Service, candidates []strategycat.Recipe) (strategyc
 		return strategycat.Recipe{}, false
 	}
 	return candidates[0], true
+}
+
+// discoveredClassFilter is the default nfqws filter scope per target-class for a
+// DISCOVERED strategy (which carries only the desync technique — blockcheck does
+// not scope it). The standard port set the curated catalog uses per class. games
+// is omitted: it needs per-game ports, with no safe blanket default.
+var discoveredClassFilter = map[strategycat.TargetClass][]string{
+	strategycat.ClassGeneralTLS: {"--filter-tcp=80,443"},
+	strategycat.ClassYouTube:    {"--filter-tcp=80,443"},
+	strategycat.ClassDiscordTCP: {"--filter-tcp=443"},
+	strategycat.ClassQUIC:       {"--filter-udp=443"},
+}
+
+// RecipesFromDefinitions converts operator-classified DISCOVERED strategies
+// (LOT-10a `lotsmanctl harvest -target-class`) into composable recipes (LOT-10b):
+// it scopes each technique-only strategy with its target-class's default filter
+// and the {{DOMAINS}} placeholder, so a harvested strategy can join the curated
+// strategycat pool the composer picks from. A definition with no TargetClass (un-
+// asserted), no NFQWSArgs (script-backed), or an unknown/unscopable class (games)
+// is skipped — it stays in the KB ranking but is not composed. Pure.
+func RecipesFromDefinitions(defs []strategy.Definition) []strategycat.Recipe {
+	var out []strategycat.Recipe
+	for _, d := range defs {
+		if d.TargetClass == "" || len(d.NFQWSArgs) == 0 {
+			continue
+		}
+		class := strategycat.TargetClass(d.TargetClass)
+		filter, ok := discoveredClassFilter[class]
+		if !ok {
+			continue // unknown / games: no safe default scope
+		}
+		args := make([]string, 0, len(filter)+1+len(d.NFQWSArgs))
+		args = append(args, filter...)
+		args = append(args, "--hostlist-domains={{DOMAINS}}")
+		args = append(args, d.NFQWSArgs...)
+		out = append(out, strategycat.Recipe{ID: d.ID, Provenance: "discovered", TargetClass: class, NfqwsArgs: args})
+	}
+	return out
 }
 
 // KBPicker (LOT-10c) ranks candidates by a learned success score (higher first),

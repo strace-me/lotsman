@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	"github.com/strace-me/lotsman/pkg/registry"
+	"github.com/strace-me/lotsman/pkg/strategy"
 	"github.com/strace-me/lotsman/pkg/strategycat"
 )
 
@@ -121,6 +122,35 @@ func TestKBPickerRanksBySuccessColdFallsToFirst(t *testing.T) {
 	})
 	if r, _ := tie(svc, cands); r.ID != "a" {
 		t.Errorf("tie should keep earliest (a), got %q", r.ID)
+	}
+}
+
+func TestRecipesFromDefinitions(t *testing.T) {
+	defs := []strategy.Definition{
+		// classified general_tls -> recipe with tcp filter + domains + technique.
+		{ID: "disc-1", Class: strategy.ClassZapret, TargetClass: "general_tls", NFQWSArgs: []string{"--dpi-desync=fake", "--dpi-desync-repeats=6"}},
+		// unclassified -> skipped (no TargetClass).
+		{ID: "disc-2", Class: strategy.ClassZapret, NFQWSArgs: []string{"--dpi-desync=split2"}},
+		// unscopable class (games) -> skipped.
+		{ID: "disc-3", Class: strategy.ClassZapret, TargetClass: "games", NFQWSArgs: []string{"--dpi-desync=fake"}},
+		// script-backed (no args) -> skipped even if classified.
+		{ID: "alt12", Class: strategy.ClassZapret, TargetClass: "general_tls"},
+	}
+	got := RecipesFromDefinitions(defs)
+	if len(got) != 1 || got[0].ID != "disc-1" {
+		t.Fatalf("only the classified+scopable+technique def should convert, got %v", got)
+	}
+	r := got[0]
+	if r.TargetClass != strategycat.ClassGeneralTLS || r.Provenance != "discovered" {
+		t.Errorf("recipe meta wrong: %+v", r)
+	}
+	joined := strings.Join(r.NfqwsArgs, " ")
+	if !strings.Contains(joined, "--filter-tcp=80,443") || !strings.Contains(joined, "--hostlist-domains={{DOMAINS}}") || !strings.Contains(joined, "--dpi-desync=fake") {
+		t.Errorf("converted recipe missing filter/domains/technique: %v", r.NfqwsArgs)
+	}
+	// The converted recipe must be domain-renderable (composable in 10b).
+	if !usableForDomains(svcWithDomains("web", "general", "x.com"), r) {
+		t.Error("converted discovered recipe should be domain-renderable")
 	}
 }
 

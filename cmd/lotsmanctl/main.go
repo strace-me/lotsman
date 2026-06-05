@@ -297,6 +297,7 @@ func harvest(args []string) {
 	scan := fs.String("scanlevel", "force", "quick|standard|force (force = widest search space)")
 	simulate := fs.Bool("simulate", true, "SIMULATE=1: dry harvest, no network/nfqws (safe to run anytime)")
 	outPath := fs.String("out", "", "merge discovered strategies into this JSON catalog file (LOT-10a; empty = stdout only). The daemon reads it via -strategy-catalog-file.")
+	targetClass := fs.String("target-class", "", "stamp discovered strategies with this strategycat target-class (general_tls|quic|discord_tcp|youtube|games) so they enter per-service composition (LOT-10b). You assert it from what you scanned (e.g. -domains discord.com -target-class discord_tcp). Empty = unclassified (KB-ranked, but not composed).")
 	_ = fs.Parse(args)
 
 	r := blockcheck.New(nil)
@@ -317,6 +318,13 @@ func harvest(args []string) {
 	if len(defs) == 0 {
 		fmt.Fprintln(os.Stderr, "harvest: no nfqws strategies parsed (check -script / output)")
 		os.Exit(1)
+	}
+	// Operator-asserted target-class: what protocol/service these were scanned for.
+	// It is how a technique-only discovered strategy becomes a composable recipe.
+	if *targetClass != "" {
+		for i := range defs {
+			defs[i].TargetClass = *targetClass
+		}
 	}
 	for _, d := range defs {
 		fmt.Printf("%-28s  %s\n", d.ID, strings.Join(d.NFQWSArgs, " "))
