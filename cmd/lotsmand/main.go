@@ -423,13 +423,18 @@ func main() {
 		if *zapretCompose && conf != nil {
 			// Per-rule nfqws composer (LOT-10b), PROPOSE-ONLY: logs what it would
 			// switch nfqws to, never touches the live strategy (the executor still
-			// owns it). Recipe source is the curated strategycat catalog; the seed
-			// picker takes the first eligible recipe (KB ranking = 10c).
+			// owns it). Recipe source is the curated strategycat catalog; the KB picker
+			// (LOT-10c) ranks candidates by learned success (cold KB = catalog order,
+			// like the seed picker — recipe scores become meaningful once armed and
+			// their probe outcomes are recorded).
 			zsvcs := make([]registry.Service, 0, len(reg.Services))
 			for _, s := range reg.Services {
 				zsvcs = append(zsvcs, s)
 			}
-			zr := zapretgen.New(zsvcs, br.Position, strategycat.Load(), zaptune.FirstPicker, "", log)
+			kbPick := zaptune.KBPicker(func(service, recipeID string) float64 {
+				return knowledge.Stats(service, recipeID).Success
+			})
+			zr := zapretgen.New(zsvcs, br.Position, strategycat.Load(), kbPick, "", log)
 			pr.Add(periodic.Task{Name: "zapret-compose", Interval: *checkInterval, RunAtStart: true, Fn: zr.Reconcile})
 			log.Info("zapret per-rule composer enabled (LOT-10b, PROPOSE-ONLY)")
 		}
