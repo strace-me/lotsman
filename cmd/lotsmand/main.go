@@ -59,9 +59,12 @@ import (
 	"github.com/strace-me/lotsman/pkg/singbox"
 	"github.com/strace-me/lotsman/pkg/state"
 	"github.com/strace-me/lotsman/pkg/strategy"
+	"github.com/strace-me/lotsman/pkg/strategycat"
 	"github.com/strace-me/lotsman/pkg/subscription"
 	"github.com/strace-me/lotsman/pkg/tspu"
 	"github.com/strace-me/lotsman/pkg/vpnbalance"
+	"github.com/strace-me/lotsman/pkg/zapretgen"
+	"github.com/strace-me/lotsman/pkg/zaptune"
 )
 
 func main() {
@@ -89,6 +92,7 @@ func main() {
 		stateFile       = flag.String("state-file", "", "persist/restore chain positions to this JSON file (empty = disabled)")
 		kbFile          = flag.String("kb-file", "", "persist/restore learned strategy success (KB) to this JSON file so experience survives restart (empty = disabled)")
 		strategyCatalog = flag.String("strategy-catalog-file", "", "load blockcheck-discovered zapret strategies (LOT-10a) from this JSON file, written by `lotsmanctl harvest -out`; they join the catalog the KB ranks over (empty = builtin+config only)")
+		zapretCompose   = flag.Bool("zapret-compose", false, "PROPOSE-ONLY (LOT-10b): on -check-interval, compose a per-rule nfqws config from the services currently on a zapret rung and LOG what it would switch to (semantic-diff, only on change). Does NOT touch the live nfqws strategy. Needs a config.")
 		smart           = flag.Bool("smart", true, "enable the intelligence layer (policy/correlate/damper/adaptive/anomaly) in escalation decisions")
 		checkInterval   = flag.Duration("check-interval", 0, "run background maintenance (Flowseal update, subscription refresh) every interval (0 = disabled)")
 		observeInterval = flag.Duration("observe-interval", 30*time.Second, "run the passive-observation eye (observe/detect/propose, PROPOSE-ONLY) every interval, independent of -check-interval (0 = disabled)")
@@ -415,6 +419,19 @@ func main() {
 		if rc != nil {
 			pr.Add(periodic.Task{Name: "singbox-reconcile", Interval: *checkInterval, RunAtStart: true, Fn: rc.Reconcile})
 			log.Info("sing-box config reconcile enabled", "path", *singboxConfig, "dry_run", *dryRun)
+		}
+		if *zapretCompose && conf != nil {
+			// Per-rule nfqws composer (LOT-10b), PROPOSE-ONLY: logs what it would
+			// switch nfqws to, never touches the live strategy (the executor still
+			// owns it). Recipe source is the curated strategycat catalog; the seed
+			// picker takes the first eligible recipe (KB ranking = 10c).
+			zsvcs := make([]registry.Service, 0, len(reg.Services))
+			for _, s := range reg.Services {
+				zsvcs = append(zsvcs, s)
+			}
+			zr := zapretgen.New(zsvcs, br.Position, strategycat.Load(), zaptune.FirstPicker, "", log)
+			pr.Add(periodic.Task{Name: "zapret-compose", Interval: *checkInterval, RunAtStart: true, Fn: zr.Reconcile})
+			log.Info("zapret per-rule composer enabled (LOT-10b, PROPOSE-ONLY)")
 		}
 		if *rulesetsUpdate {
 			up := newRulesetsUpdater(reg, rc, *rulesetsRepo, *rulesetsPin, *rulesetsDir, *singboxBin, *rulesetsBump, *rulesetsRatio, *dryRun, log)
