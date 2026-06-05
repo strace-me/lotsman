@@ -102,3 +102,104 @@ func TestSocks5DialerRejectsUDP(t *testing.T) {
 		t.Fatal("expected error for udp network")
 	}
 }
+
+func TestAddrLen(t *testing.T) {
+	cases := []struct {
+		b    []byte
+		want int
+	}{
+		{[]byte{0x01, 1, 2, 3, 4, 0, 0}, 1 + 4 + 2},           // ipv4
+		{[]byte{0x03, 3, 'a', 'b', 'c', 0, 0}, 1 + 1 + 3 + 2}, // domain "abc"
+	}
+	for _, c := range cases {
+		got, err := addrLen(c.b)
+		if err != nil || got != c.want {
+			t.Errorf("addrLen(%v) = %d,%v want %d", c.b, got, err, c.want)
+		}
+	}
+	if _, err := addrLen([]byte{0x09}); err == nil {
+		t.Error("addrLen should reject unknown atyp")
+	}
+}
+
+// fakeSocks5UDP is a minimal no-auth SOCKS5 UDP ASSOCIATE relay: it accepts the
+// TCP control conn, replies with a UDP relay address, then echoes one datagram
+// back (same SOCKS header + payload). It records the requested UDP destination.
+func fakeSocks5UDP(t *testing.T) (addr string, gotDst chan string) {
+	t.Helper()
+	tcpln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	uconn, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	gotDst = make(chan string, 1)
+	go func() {
+		defer tcpln.Close()
+		defer uconn.Close()
+		conn, err := tcpln.Accept()
+		if err != nil {
+			return
+		}
+		defer conn.Close()
+
+		g := make([]byte, 3)
+		if _, err := io.ReadFull(conn, g); err != nil || g[0] != 0x05 {
+			return
+		}
+		conn.Write([]byte{0x05, 0x00}) // no-auth
+
+		// ASSOCIATE request: VER CMD RSV ATYP + addr(4)+port(2) for ATYP=1.
+		head := make([]byte, 4)
+		if _, err := io.ReadFull(conn, head); err != nil || head[1] != 0x03 {
+			return
+		}
+		io.ReadFull(conn, make([]byte, 6))
+
+		// Reply with the relay's real addr so the client dials it directly.
+		ra := uconn.LocalAddr().(*net.UDPAddr)
+		reply := []byte{0x05, 0x00, 0x00, 0x01}
+		reply = append(reply, ra.IP.To4()...)
+		reply = append(reply, byte(ra.Port>>8), byte(ra.Port))
+		conn.Write(reply)
+
+		// Serve one datagram: parse the SOCKS UDP header, record dst, echo back.
+		buf := make([]byte, 1500)
+		n, caddr, err := uconn.ReadFromUDP(buf)
+		if err != nil || n < 5 {
+			return
+		}
+		// dst host for ATYP=domain (0x03): buf[4]=len, name follows.
+		if buf[3] == 0x03 {
+			l := int(buf[4])
+			gotDst <- string(buf[5 : 5+l])
+		} else {
+			gotDst <- "non-domain"
+		}
+		uconn.WriteToUDP(buf[:n], caddr) // echo header+payload verbatim
+
+		io.ReadFull(conn, make([]byte, 1)) // block until client closes control conn
+	}()
+	return tcpln.Addr().String(), gotDst
+}
+
+func TestSocks5UDPRoundTrip(t *testing.T) {
+	addr, gotDst := fakeSocks5UDP(t)
+	d := &socks5Dialer{proxy: addr, timeout: 2 * time.Second}
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+
+	payload := []byte("stun-binding-request")
+	resp, err := d.UDPRoundTrip(ctx, "stun.test:3478", payload)
+	if err != nil {
+		t.Fatalf("UDPRoundTrip: %v", err)
+	}
+	if string(resp) != string(payload) {
+		t.Fatalf("echoed payload = %q, want %q (header must be stripped)", resp, payload)
+	}
+	if got := <-gotDst; got != "stun.test" {
+		t.Fatalf("relay got dst %q, want stun.test (hostname passed unresolved)", got)
+	}
+}

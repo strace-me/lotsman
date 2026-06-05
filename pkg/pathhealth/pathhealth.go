@@ -80,8 +80,10 @@ type Detector struct {
 	Direct      dataplane.Prober // BOX-DIRECT prober (no socks proxy) for zapret/direct steps
 	Nodes       NodeDelayer      // for vpn/emergency steps
 	TestURL     string           // generic connectivity URL for the vpn-tier probe of non-HTTP services
-	Timeout     time.Duration
-	MaxParallel int // cap on concurrent step probes per service (<=0 => 4)
+	Timeout     time.Duration    // probe timeout for direct/zapret steps (<=0 => 4s)
+	VPNTimeout  time.Duration    // probe timeout for vpn/emergency steps — longer for cold hysteria QUIC handshake (<=0 => 8s)
+	VPNAttempts int              // warm-up: retry a vpn/emergency probe up to N times, healthy if ANY succeeds (<=0 => 2)
+	MaxParallel int              // cap on concurrent step probes per service (<=0 => 4)
 	Log         *slog.Logger
 
 	mu     sync.Mutex
@@ -168,12 +170,23 @@ func (d *Detector) probeStep(ctx context.Context, svc registry.Service, pos int,
 			h.Err = "no pool id for vpn/emergency step"
 			return h
 		}
-		ms, err := d.Nodes.NodeDelay(ctx, st.StrategyID, d.vpnTestURL(svc), d.timeout())
-		if err != nil {
-			h.Err = err.Error()
-			return h
+		// Warm-up tolerance: hysteria (QUIC) does not come up instantly, so retry
+		// up to N times with a generous timeout — healthy if ANY attempt responds.
+		// This stops a cold pool from being a false "down" (and E-2 is fail-safe
+		// either way: an unconfirmed tier just isn't a jump target).
+		var ms int
+		var err error
+		for attempt := 0; attempt < d.vpnAttempts(); attempt++ {
+			ms, err = d.Nodes.NodeDelay(ctx, st.StrategyID, d.vpnTestURL(svc), d.vpnTimeout())
+			if err == nil {
+				h.OK, h.RTTms = true, ms
+				return h
+			}
+			if ctx.Err() != nil {
+				break
+			}
 		}
-		h.OK, h.RTTms = true, ms
+		h.Err = err.Error()
 	case strategy.ClassZapret, strategy.ClassByeDPI, strategy.ClassDirect:
 		v := d.Direct.Probe(ctx, svc.Name, pos) // box-direct: egress→nfqws on the direct path
 		h.OK, h.RTTms, h.Err = v.OK, v.RTTms, v.Err
@@ -193,11 +206,18 @@ func (d *Detector) vpnTestURL(svc registry.Service) string {
 	return d.TestURL
 }
 
-func (d *Detector) timeout() time.Duration {
-	if d.Timeout > 0 {
-		return d.Timeout
+func (d *Detector) vpnTimeout() time.Duration {
+	if d.VPNTimeout > 0 {
+		return d.VPNTimeout
 	}
-	return 4 * time.Second
+	return 8 * time.Second
+}
+
+func (d *Detector) vpnAttempts() int {
+	if d.VPNAttempts > 0 {
+		return d.VPNAttempts
+	}
+	return 2
 }
 
 func (d *Detector) logPath(p PathHealth) {

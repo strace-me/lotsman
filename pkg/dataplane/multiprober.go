@@ -127,6 +127,29 @@ func (m *MultiProber) probeSTUN(ctx context.Context, service string, position in
 	v := events.ProductionVerdict{Service: service, Position: position}
 	start := time.Now()
 
+	var txID [12]byte
+	rand.Read(txID[:])
+	req := stunprobe.BuildBindingRequest(txID)
+
+	// Through the proxy (representative): the STUN datagram traverses sing-box's
+	// UDP routing — the service's actual tunnel/VPN pool — via SOCKS5 UDP
+	// ASSOCIATE, the same path real voice/QUIC UDP takes. Direct only when no
+	// proxy is configured (then it measures the box's own egress, not the tunnel).
+	if m.dialer != nil {
+		resp, err := m.dialer.UDPRoundTrip(ctx, target, req)
+		v.RTTms = int(time.Since(start).Milliseconds())
+		if err != nil {
+			v.Err = "stun via proxy: " + err.Error()
+			return v
+		}
+		if !stunprobe.IsBindingResponse(resp, txID) {
+			v.Err = "malformed STUN response (via proxy)"
+			return v
+		}
+		v.OK = true
+		return v
+	}
+
 	d := net.Dialer{Timeout: m.timeout}
 	conn, err := d.DialContext(ctx, "udp", target)
 	if err != nil {
@@ -137,9 +160,7 @@ func (m *MultiProber) probeSTUN(ctx context.Context, service string, position in
 	defer conn.Close()
 	conn.SetDeadline(time.Now().Add(m.timeout))
 
-	var txID [12]byte
-	rand.Read(txID[:])
-	if _, err := conn.Write(stunprobe.BuildBindingRequest(txID)); err != nil {
+	if _, err := conn.Write(req); err != nil {
 		v.RTTms = int(time.Since(start).Milliseconds())
 		v.Err = "write: " + err.Error()
 		return v
