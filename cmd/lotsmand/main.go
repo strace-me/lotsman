@@ -448,6 +448,16 @@ func main() {
 			// strategies compete in composition alongside the curated ones.
 			recipePool := append(strategycat.Load(), zaptune.RecipesFromDefinitions(discoveredDefs)...)
 			zr := zapretgen.New(zsvcs, br.Position, recipePool, kbPick, "", log)
+			// TM-1b coherence resolver: rule_set(.srs) -> plaintext domains, so a
+			// service's FULL domain set (inline + rule_set-derived) feeds the nfqws
+			// hostlist. Without it the gate keeps rule_set services uncomposed
+			// (arming regressed discord because discord.com lives in geosite-discord).
+			zr.SetResolver((&rulesets.Resolver{
+				LiveDir:    *rulesetsDir,
+				PathFor:    singbox.RuleSetRelPath,
+				Decompiler: rulesets.SingboxDecompiler{Bin: *singboxBin},
+				Log:        log,
+			}).Resolve)
 			armed := false
 			switch {
 			case *zapretArm && *dryRun:
