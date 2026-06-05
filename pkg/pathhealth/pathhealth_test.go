@@ -62,7 +62,42 @@ func svcWithChain() registry.Service {
 func newDetector(t *testing.T, direct fakeDirect, nodes *fakeNodes, current int) *Detector {
 	t.Helper()
 	reg := &registry.Registry{Services: map[string]registry.Service{"discord": svcWithChain()}}
-	return &Detector{Reg: reg, Pos: fixedPos(current), Direct: direct, Nodes: nodes, TestURL: "http://gen204", Log: quietLog()}
+	return &Detector{Reg: reg, Pos: fixedPos(current), Direct: direct, Nodes: nodes, TestURL: "http://gen204", VPNAttempts: 1, Log: quietLog()}
+}
+
+// flakyNodes fails the first failUntil calls for a pool, then succeeds — models a
+// hysteria node that needs a moment to come up (warm-up).
+type flakyNodes struct {
+	mu        sync.Mutex
+	failUntil int
+	calls     map[string]int
+}
+
+func (f *flakyNodes) NodeDelay(_ context.Context, name, _ string, _ time.Duration) (int, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.calls == nil {
+		f.calls = map[string]int{}
+	}
+	f.calls[name]++
+	if f.calls[name] <= f.failUntil {
+		return 0, errors.New("cold (warming up)")
+	}
+	return 88, nil
+}
+
+func TestWarmupRetrySucceedsOnSecondAttempt(t *testing.T) {
+	reg := &registry.Registry{Services: map[string]registry.Service{"discord": svcWithChain()}}
+	nodes := &flakyNodes{failUntil: 1} // first attempt fails, second succeeds
+	d := &Detector{Reg: reg, Pos: fixedPos(0), Direct: fakeDirect{ok: map[int]bool{0: false, 1: false}},
+		Nodes: nodes, TestURL: "http://gen204", VPNAttempts: 2, Log: quietLog()}
+	ph := d.probeService(context.Background(), "discord", svcWithChain())
+	if !ph.Steps[2].OK { // vpn pool vpnA: cold first, up on retry
+		t.Errorf("warm-up: vpn step should be OK on 2nd attempt, got %+v", ph.Steps[2])
+	}
+	if nodes.calls["vpnA"] != 2 {
+		t.Errorf("vpnA attempts = %d, want 2 (retry after cold fail)", nodes.calls["vpnA"])
+	}
 }
 
 func TestProbeRoutesByClass(t *testing.T) {
