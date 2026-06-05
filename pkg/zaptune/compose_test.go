@@ -91,6 +91,39 @@ func TestComposeServiceWithoutDomainsUncovered(t *testing.T) {
 	}
 }
 
+func TestKBPickerRanksBySuccessColdFallsToFirst(t *testing.T) {
+	cands := []strategycat.Recipe{
+		recipe("a", strategycat.ClassGeneralTLS, "--hostlist-domains={{DOMAINS}}"),
+		recipe("b", strategycat.ClassGeneralTLS, "--hostlist-domains={{DOMAINS}}"),
+		recipe("c", strategycat.ClassGeneralTLS, "--hostlist-domains={{DOMAINS}}"),
+	}
+	svc := svcWithDomains("web", "general", "x.com")
+
+	// Cold KB: all equal -> first candidate (catalog order), like FirstPicker.
+	cold := KBPicker(func(string, string) float64 { return 0.5 })
+	if r, _ := cold(svc, cands); r.ID != "a" {
+		t.Errorf("cold picker should take first candidate, got %q", r.ID)
+	}
+
+	// b has the best learned success -> picked despite not being first.
+	scores := map[string]float64{"a": 0.4, "b": 0.9, "c": 0.7}
+	warm := KBPicker(func(_, id string) float64 { return scores[id] })
+	if r, _ := warm(svc, cands); r.ID != "b" {
+		t.Errorf("warm picker should take best-success b, got %q", r.ID)
+	}
+
+	// Tie at the top -> earliest candidate wins (stable).
+	tie := KBPicker(func(_, id string) float64 {
+		if id == "a" || id == "b" {
+			return 0.9
+		}
+		return 0.1
+	})
+	if r, _ := tie(svc, cands); r.ID != "a" {
+		t.Errorf("tie should keep earliest (a), got %q", r.ID)
+	}
+}
+
 func TestComposeEmptyServicesNotCovered(t *testing.T) {
 	p := Compose(nil, []strategycat.Recipe{recipe("tls-1", strategycat.ClassGeneralTLS, "--hostlist-domains={{DOMAINS}}")}, FirstPicker)
 	if p.Covered || p.Args != nil {

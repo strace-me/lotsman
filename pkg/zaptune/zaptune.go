@@ -142,3 +142,27 @@ func FirstPicker(_ registry.Service, candidates []strategycat.Recipe) (strategyc
 	}
 	return candidates[0], true
 }
+
+// KBPicker (LOT-10c) ranks candidates by a learned success score (higher first),
+// keeping catalog order as the tiebreak — so a COLD KB (all scores equal to the
+// prior) picks the first candidate exactly like FirstPicker, and as recipes prove
+// or fail in production the picker exploits that. score(service, recipeID) is the
+// learned success rate in [0,1] (wire to kb.KB.Stats(...).Success); taking a plain
+// func keeps zaptune free of a kb dependency. NOTE: the score only becomes
+// meaningful once recipes are actually APPLIED and their probe outcomes recorded
+// (kb.RecordOutcome) — i.e. once the composer is armed; in propose-only the KB has
+// no recipe data and this behaves as the seed picker. Pure given score.
+func KBPicker(score func(service, recipeID string) float64) Picker {
+	return func(svc registry.Service, candidates []strategycat.Recipe) (strategycat.Recipe, bool) {
+		if len(candidates) == 0 {
+			return strategycat.Recipe{}, false
+		}
+		best, bestRate := 0, score(svc.Name, candidates[0].ID)
+		for i := 1; i < len(candidates); i++ {
+			if r := score(svc.Name, candidates[i].ID); r > bestRate {
+				best, bestRate = i, r
+			}
+		}
+		return candidates[best], true
+	}
+}
