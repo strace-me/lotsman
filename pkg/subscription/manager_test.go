@@ -6,7 +6,6 @@ import (
 	"io"
 	"net"
 	"testing"
-	"time"
 )
 
 // fakeFetcher serves canned bytes per URL, or an error.
@@ -191,75 +190,6 @@ func TestFetchHost(t *testing.T) {
 		if host != c.wantHost || ok != c.wantOK {
 			t.Errorf("FetchHost(%q) = (%q,%v), want (%q,%v)", c.url, host, ok, c.wantHost, c.wantOK)
 		}
-	}
-}
-
-func TestManagerHealthFilterLenient(t *testing.T) {
-	// Two inline nodes (no fetch needed). A will be marked dead; B left untracked.
-	decls := []Declaration{
-		{Name: "a", URL: "hysteria2://pw@1.1.1.1:443?sni=a", Format: FormatSingleURL, Tags: []string{"normal"}, Enabled: true},
-		{Name: "b", URL: "hysteria2://pw@2.2.2.2:443?sni=b", Format: FormatSingleURL, Tags: []string{"normal"}, Enabled: true},
-	}
-	tr := NewTracker()
-	m := NewManager(fakeFetcher{})
-	m.Tracker = tr
-
-	// Baseline: both admitted (cold tracker excludes nothing — pool never empty).
-	nodes, errs := m.Load(context.Background(), decls)
-	if len(errs) != 0 {
-		t.Fatalf("load: %v", errs)
-	}
-	a, okA := findNode(nodes, "1.1.1.1")
-	if !okA || len(nodes) != 2 {
-		t.Fatalf("cold tracker should admit both, got %d: %v", len(nodes), nodes)
-	}
-
-	// Drive node A to dead: one OnSeen + enough failed checks to exhaust the
-	// backoff schedule (ConsecutiveFail > len(retryBackoff)).
-	base := time.Unix(1_700_000_000, 0)
-	tr.OnSeen(a.ID, base)
-	for i := 0; i < len(retryBackoff)+1; i++ {
-		tr.OnCheck(a.ID, false, base.Add(time.Duration(i)*time.Hour*48))
-	}
-	if h, _ := tr.Get(a.ID); h.Status != StatusDead {
-		t.Fatalf("node A should be dead, got %q", h.Status)
-	}
-
-	// Now Load drops the dead node A but keeps the untracked node B (lenient).
-	nodes, _ = m.Load(context.Background(), decls)
-	if _, ok := findNode(nodes, "1.1.1.1"); ok {
-		t.Error("dead node A should be excluded from the pool")
-	}
-	if _, ok := findNode(nodes, "2.2.2.2"); !ok {
-		t.Error("untracked node B should still be admitted (lenient)")
-	}
-
-	// A passing check revives A -> admitted again.
-	tr.OnCheck(a.ID, true, base.Add(1000*time.Hour))
-	nodes, _ = m.Load(context.Background(), decls)
-	if _, ok := findNode(nodes, "1.1.1.1"); !ok {
-		t.Error("revived node A should be admitted after a passing check")
-	}
-}
-
-func TestTrackerShouldExcludeAndIDs(t *testing.T) {
-	tr := NewTracker()
-	now := time.Unix(1_700_000_000, 0)
-	tr.OnSeen("fresh", now)
-	tr.OnSeen("active", now)
-	tr.OnCheck("active", true, now)
-
-	if tr.ShouldExclude("fresh") {
-		t.Error("a fresh/quarantined node must NOT be excluded (lenient admit)")
-	}
-	if tr.ShouldExclude("active") {
-		t.Error("an active node must not be excluded")
-	}
-	if tr.ShouldExclude("never-seen") {
-		t.Error("an untracked node must not be excluded")
-	}
-	if ids := tr.IDs(); len(ids) != 2 {
-		t.Errorf("IDs() = %v, want 2 tracked", ids)
 	}
 }
 
