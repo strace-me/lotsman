@@ -19,6 +19,7 @@ import (
 	"flag"
 	"fmt"
 	"log/slog"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
@@ -39,6 +40,7 @@ import (
 	"github.com/strace-me/lotsman/pkg/correlate"
 	"github.com/strace-me/lotsman/pkg/damper"
 	"github.com/strace-me/lotsman/pkg/dataplane"
+	"github.com/strace-me/lotsman/pkg/enginehealth"
 	"github.com/strace-me/lotsman/pkg/events"
 	"github.com/strace-me/lotsman/pkg/executor"
 	"github.com/strace-me/lotsman/pkg/faillog"
@@ -95,6 +97,9 @@ func main() {
 		strategyCatalog = flag.String("strategy-catalog-file", "", "load blockcheck-discovered zapret strategies (LOT-10a) from this JSON file, written by `lotsmanctl harvest -out`; they join the catalog the KB ranks over (empty = builtin+config only)")
 		zapretCompose   = flag.Bool("zapret-compose", false, "PROPOSE-ONLY (LOT-10b): on -check-interval, compose a per-rule nfqws config from the services currently on a zapret rung and LOG what it would switch to (semantic-diff, only on change). Does NOT touch the live nfqws strategy. Needs a config.")
 		zapretArm       = flag.Bool("zapret-arm", false, "ARM the per-rule nfqws composer (LOT-10b-arm): it becomes the SINGLE WRITER of the nfqws strategy (symlink+restart) with a canary + rollback-to-last-good and KB feedback; the zapret executor yields strategy-switching to it. DEFAULT OFF. Requires -zapret-compose; ignored under -dry-run (stays propose-only).")
+		engineHealth    = flag.Bool("engine-health", false, "engine watchdog (LOT-33): when the WAN is up but a data-plane engine is WEDGED (sing-box can't route / nfqws not desyncing), restart it. Self-heals the cold-boot race (engines up before WAN) regardless of boot order. DEFAULT OFF.")
+		engineHealthInt = flag.Duration("engine-health-interval", time.Minute, "engine-health watchdog check period")
+		engineHealthCan = flag.String("engine-health-nfqws-canary", "", "a DPI'd URL probed via -probe-proxy to verify nfqws is desyncing (empty = nfqws check off; sing-box check is always on with -engine-health). e.g. https://discord.com/api/v9/gateway")
 		smart           = flag.Bool("smart", true, "enable the intelligence layer (policy/correlate/damper/adaptive/anomaly) in escalation decisions")
 		checkInterval   = flag.Duration("check-interval", 0, "run background maintenance (Flowseal update, subscription refresh) every interval (0 = disabled)")
 		observeInterval = flag.Duration("observe-interval", 30*time.Second, "run the passive-observation eye (observe/detect/propose, PROPOSE-ONLY) every interval, independent of -check-interval (0 = disabled)")
@@ -622,6 +627,49 @@ func main() {
 		log.Info("observe eye enabled (passive, propose-only)", "interval", observeInterval.String())
 	}
 
+	// Engine-health watchdog (LOT-33): restart a wedged data-plane engine when the
+	// WAN is up. Self-heals the cold-boot race (engines started before the uplink
+	// and latched a broken state). WAN-gated so a genuinely-down uplink never
+	// triggers a restart storm. Probes/restarts are real here; the policy is in
+	// pkg/enginehealth. Runs on its own short interval, independent of -check-interval.
+	if *engineHealth {
+		ehp := periodic.New(log)
+		const healthURL = "http://www.gstatic.com/generate_204"
+		checks := []*enginehealth.Check{{
+			Name: "sing-box",
+			// sing-box can route iff its `direct` outbound reaches a generic target.
+			Healthy: func(c context.Context) bool {
+				_, err := clash.NodeDelay(c, "direct", healthURL, 4*time.Second)
+				return err == nil
+			},
+			Restart: func(c context.Context) error {
+				cmd := strings.Fields(*singboxRestart)
+				return executor.ExecRunner{}.Run(c, cmd[0], cmd[1:]...)
+			},
+			Threshold: 3, Cooldown: 5 * time.Minute,
+		}}
+		// nfqws check (opt-in): a DPI'd target via the socks path must still connect;
+		// if it stops, nfqws likely wedged (cold-boot) -> restart it.
+		if *engineHealthCan != "" && *probeProxy != "" {
+			canary := subscription.NewHTTPFetcherProxy(*probeProxy)
+			checks = append(checks, &enginehealth.Check{
+				Name: "nfqws",
+				Healthy: func(c context.Context) bool {
+					_, err := canary.Fetch(c, *engineHealthCan)
+					return err == nil
+				},
+				Restart: func(c context.Context) error {
+					return executor.ExecRunner{}.Run(c, *zapretInit, "restart")
+				},
+				Threshold: 3, Cooldown: 5 * time.Minute,
+			})
+		}
+		wd := &enginehealth.Watchdog{WANUp: wanReachable, Checks: checks, Log: log}
+		ehp.Add(periodic.Task{Name: "engine-health", Interval: *engineHealthInt, Fn: wd.Run})
+		runners = append(runners, ehp.Run)
+		log.Info("engine-health watchdog enabled (LOT-33)", "interval", engineHealthInt.String(), "nfqws_check", *engineHealthCan != "")
+	}
+
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 	if *duration > 0 {
@@ -871,6 +919,21 @@ func newReconciler(conf *config.Config, reg *registry.Registry, clash *dataplane
 		}
 	}
 	return rc
+}
+
+// wanReachable reports whether the BOX itself has internet — a TCP connect to a
+// public DNS resolver on port 53 (which nfqws does not capture and sing-box does
+// not tproxy, so it reflects the raw kernel uplink, independent of either engine).
+// It is the watchdog's gate: only restart an engine when the WAN is actually up.
+func wanReachable(ctx context.Context) bool {
+	d := net.Dialer{Timeout: 2 * time.Second}
+	for _, hp := range []string{"1.1.1.1:53", "8.8.8.8:53"} {
+		if c, err := d.DialContext(ctx, "tcp", hp); err == nil {
+			c.Close()
+			return true
+		}
+	}
+	return false
 }
 
 // httpReachable reports whether target answers an HTTP GET (status < 500) within
