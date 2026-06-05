@@ -57,11 +57,52 @@ func CandidateRecipes(svc registry.Service, catalog []strategycat.Recipe) []stra
 	return out
 }
 
-// BlockFor builds the single nfqws --new block for a service from the recipe the
-// tester chose: the WHOLE service (all its inline domains) under one recipe. This
-// is what keeps the service coherent — it is never split across blocks here. Pure.
-func BlockFor(svc registry.Service, recipe strategycat.Recipe) nfqwsgen.Block {
-	return nfqwsgen.Block{Service: svc.Name, Domains: svc.Domains, Recipe: recipe}
+// BlockFor builds the single nfqws --new block for a service: the WHOLE service
+// (all its domains — inline + resolved rule_sets) under one recipe. domains is
+// the full set computed by serviceDomains. Keeping it one block keeps the service
+// coherent (never split across blocks). Pure.
+func BlockFor(svc registry.Service, recipe strategycat.Recipe, domains []string) nfqwsgen.Block {
+	return nfqwsgen.Block{Service: svc.Name, Domains: domains, Recipe: recipe}
+}
+
+// Resolver resolves a rule_set tag (e.g. "geosite-discord") to its plaintext
+// domains, so nfqws desyncs the SAME domains sing-box ROUTES (coherence — LOT-32
+// TM-1). ok=false means the tag could not be resolved. nil resolver = no rule_set
+// resolution at all. Wire the live impl to `sing-box rule-set decompile`.
+type Resolver func(ruleSetTag string) ([]string, bool)
+
+// serviceDomains returns the FULL plaintext domain set nfqws must cover for a
+// service: its inline domains PLUS the domains of every rule_set it routes
+// (resolved via resolve). coherent is false when a rule_set cannot be resolved —
+// composing then would silently miss those domains (the discord.com regression,
+// where discord's gateway lives in geosite-discord), so such a service must NOT
+// be composed; the caller keeps the existing whole-config instead. Pure.
+func serviceDomains(svc registry.Service, resolve Resolver) (domains []string, coherent bool) {
+	out := append([]string(nil), svc.Domains...)
+	for _, rs := range svc.RuleSets {
+		if resolve == nil {
+			return nil, false
+		}
+		d, ok := resolve(rs)
+		if !ok {
+			return nil, false
+		}
+		out = append(out, d...)
+	}
+	return dedup(out), true
+}
+
+func dedup(in []string) []string {
+	seen := make(map[string]bool, len(in))
+	out := make([]string, 0, len(in))
+	for _, s := range in {
+		if s == "" || seen[s] {
+			continue
+		}
+		seen[s] = true
+		out = append(out, s)
+	}
+	return out
 }
 
 // Picker chooses ONE recipe for a service from its eligible candidates (already
@@ -86,15 +127,24 @@ type Plan struct {
 // the existing whole-config (e.g. Flowseal alt12). This is because a whole-script
 // strategy and composed recipe blocks are different nfqws-config forms that do
 // not mix per-service (see docs/DESIGN-strategy-generator.md). Pure — no I/O.
-func Compose(services []registry.Service, recipes []strategycat.Recipe, pick Picker) Plan {
+func Compose(services []registry.Service, recipes []strategycat.Recipe, pick Picker, resolve Resolver) Plan {
 	plan := Plan{Chosen: map[string]string{}}
 	var blocks []nfqwsgen.Block
 	for _, svc := range services {
-		// Candidates: target-class-narrowed AND domain-renderable (10b only fills
-		// {{DOMAINS}} — recipes needing {{IPSET}}/{{GAME_PORTS}}/… are not yet usable).
+		// Full domain set nfqws must cover (inline + resolved rule_sets). If a
+		// rule_set can't be resolved, the service is NOT coherently composable —
+		// skip it (caller keeps the existing config) rather than desync an
+		// incomplete set and regress the missing domains (TM-1).
+		domains, coherent := serviceDomains(svc, resolve)
+		if !coherent || len(domains) == 0 {
+			plan.Uncovered = append(plan.Uncovered, svc.Name)
+			continue
+		}
+		// Candidates: target-class-narrowed AND domain-renderable (fills {{DOMAINS}};
+		// recipes needing {{IPSET}}/{{GAME_PORTS}}/… or with no {{DOMAINS}} are not usable).
 		var cands []strategycat.Recipe
 		for _, r := range CandidateRecipes(svc, recipes) {
-			if usableForDomains(svc, r) {
+			if recipeRenderable(r) {
 				cands = append(cands, r)
 			}
 		}
@@ -107,7 +157,7 @@ func Compose(services []registry.Service, recipes []strategycat.Recipe, pick Pic
 			plan.Uncovered = append(plan.Uncovered, svc.Name)
 			continue
 		}
-		blocks = append(blocks, BlockFor(svc, r))
+		blocks = append(blocks, BlockFor(svc, r, domains))
 		plan.Chosen[svc.Name] = r.ID
 	}
 	plan.Covered = len(plan.Uncovered) == 0 && len(blocks) > 0
@@ -117,21 +167,13 @@ func Compose(services []registry.Service, recipes []strategycat.Recipe, pick Pic
 	return plan
 }
 
-// usableForDomains reports whether a recipe can be rendered for a service scoped
-// to ONLY the service's domains. Three conditions: the service has inline domains;
-// the recipe is actually DOMAIN-SCOPED (it contains the {{DOMAINS}} placeholder,
-// i.e. an --hostlist-domains that pins it to those domains); and it carries no
-// OTHER placeholder ({{IPSET}}/{{GAME_PORTS}}/…) we cannot fill.
-//
-// The {{DOMAINS}} requirement matters: a recipe without it (e.g. a games-class
-// UDP STUN profile, --filter-udp=1024-65535 with no hostlist) would compose into
-// a GLOBAL desync block — it would NOT scope to the service's domains and would
-// touch unrelated traffic. Such a recipe is not a valid per-service block here,
-// even though it has nothing to substitute. Pure.
-func usableForDomains(svc registry.Service, r strategycat.Recipe) bool {
-	if len(svc.Domains) == 0 {
-		return false
-	}
+// recipeRenderable reports whether a recipe is a valid per-service DOMAIN-SCOPED
+// block: it contains the {{DOMAINS}} placeholder (so it is pinned to the service's
+// domains via --hostlist-domains, not a global block) and carries no OTHER
+// placeholder ({{IPSET}}/{{GAME_PORTS}}/…) we cannot fill. A recipe without
+// {{DOMAINS}} (e.g. a games-class global UDP STUN profile, --filter-udp=1024-65535
+// with no hostlist) would desync unrelated traffic and is rejected. Pure.
+func recipeRenderable(r strategycat.Recipe) bool {
 	hasDomains := false
 	for _, a := range r.NfqwsArgs {
 		if strings.Contains(a, "{{DOMAINS}}") {
