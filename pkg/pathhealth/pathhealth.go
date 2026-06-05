@@ -75,19 +75,21 @@ func (p PathHealth) BestWorking() int {
 // also caches the latest health vector per service so Brain can consult it via
 // NextWorking (the E-2 PathOracle) to jump straight to the best working tier.
 type Detector struct {
-	Reg         *registry.Registry
-	Pos         Positioner
-	Direct      dataplane.Prober // BOX-DIRECT prober (no socks proxy) for zapret/direct steps
-	Nodes       NodeDelayer      // for vpn/emergency steps
-	TestURL     string           // generic connectivity URL for the vpn-tier probe of non-HTTP services
-	Timeout     time.Duration    // probe timeout for direct/zapret steps (<=0 => 4s)
-	VPNTimeout  time.Duration    // probe timeout for vpn/emergency steps — longer for cold hysteria QUIC handshake (<=0 => 8s)
-	VPNAttempts int              // warm-up: retry a vpn/emergency probe up to N times, healthy if ANY succeeds (<=0 => 2)
-	MaxParallel int              // cap on concurrent step probes per service (<=0 => 4)
-	Log         *slog.Logger
+	Reg           *registry.Registry
+	Pos           Positioner
+	Direct        dataplane.Prober // BOX-DIRECT prober (no socks proxy) for zapret/direct steps
+	Nodes         NodeDelayer      // for vpn/emergency steps
+	TestURL       string           // generic connectivity URL for the vpn-tier probe of non-HTTP services
+	Timeout       time.Duration    // probe timeout for direct/zapret steps (<=0 => 4s)
+	VPNTimeout    time.Duration    // probe timeout for vpn/emergency steps — longer for cold hysteria QUIC handshake (<=0 => 8s)
+	VPNAttempts   int              // warm-up: retry a vpn/emergency probe up to N times, healthy if ANY succeeds (<=0 => 2)
+	RecoverStreak int              // E-4: a lower tier must be healthy this many consecutive scans before recovery (return slow) (<=0 => 3)
+	MaxParallel   int              // cap on concurrent step probes per service (<=0 => 4)
+	Log           *slog.Logger
 
 	mu     sync.Mutex
-	latest map[string]PathHealth // service -> most recent scan (for NextWorking)
+	latest map[string]PathHealth  // service -> most recent scan (for NextWorking)
+	up     map[string]map[int]int // service -> position -> consecutive healthy scans (for RecoverTarget)
 }
 
 // Scan probes every probeable service's chain and logs the best working tier vs
@@ -109,11 +111,27 @@ func (d *Detector) Scan(ctx context.Context) error {
 // never around a probe or a Brain call, so it cannot deadlock with Brain's lock.
 func (d *Detector) store(ph PathHealth) {
 	d.mu.Lock()
+	defer d.mu.Unlock()
 	if d.latest == nil {
 		d.latest = map[string]PathHealth{}
 	}
 	d.latest[ph.Service] = ph
-	d.mu.Unlock()
+	// Per-position consecutive-healthy-scan streak, for recovery hysteresis (E-4).
+	if d.up == nil {
+		d.up = map[string]map[int]int{}
+	}
+	s := d.up[ph.Service]
+	if s == nil {
+		s = map[int]int{}
+		d.up[ph.Service] = s
+	}
+	for _, st := range ph.Steps {
+		if st.OK {
+			s[st.Position]++
+		} else {
+			s[st.Position] = 0
+		}
+	}
 }
 
 // NextWorking is the E-2 PathOracle: the lowest position STRICTLY ABOVE `above`
@@ -130,6 +148,34 @@ func (d *Detector) NextWorking(service string, above int) int {
 	for i := range ph.Steps {
 		if ph.Steps[i].Position > above && ph.Steps[i].OK {
 			return ph.Steps[i].Position
+		}
+	}
+	return -1
+}
+
+// RecoverTarget is the E-4 recovery oracle: the lowest position STRICTLY BELOW
+// `below` that has been healthy for RecoverStreak consecutive scans (return
+// slow — asymmetric vs NextWorking's leave-fast), or -1. Lets Brain recover
+// straight to the best available lower tier instead of one rung at a time.
+func (d *Detector) RecoverTarget(service string, below int) int {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	ph, ok := d.latest[service]
+	if !ok {
+		return -1
+	}
+	need := d.RecoverStreak
+	if need <= 0 {
+		need = 3
+	}
+	s := d.up[service]
+	for i := range ph.Steps {
+		p := ph.Steps[i].Position
+		if p >= below {
+			break // ordered ascending; only positions below current matter
+		}
+		if ph.Steps[i].OK && s[p] >= need {
+			return p
 		}
 	}
 	return -1

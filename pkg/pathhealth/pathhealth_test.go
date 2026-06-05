@@ -191,3 +191,54 @@ func TestNextWorkingOracle(t *testing.T) {
 		t.Errorf("NextWorking(unknown) = %d, want -1", got)
 	}
 }
+
+func TestRecoverTargetRequiresStreak(t *testing.T) {
+	// pos0 zapret healthy every scan; recovery must wait RecoverStreak scans.
+	reg := &registry.Registry{Services: map[string]registry.Service{"discord": svcWithChain()}}
+	nodes := &fakeNodes{up: map[string]int{"vpnA": 90}}
+	d := &Detector{Reg: reg, Pos: fixedPos(2), Direct: fakeDirect{ok: map[int]bool{0: true, 1: false}},
+		Nodes: nodes, TestURL: "x", VPNAttempts: 1, RecoverStreak: 3, Log: quietLog()}
+	ctx := context.Background()
+
+	d.Scan(ctx)
+	if got := d.RecoverTarget("discord", 2); got != -1 {
+		t.Fatalf("after 1 scan RecoverTarget=%d, want -1 (streak not met)", got)
+	}
+	d.Scan(ctx)
+	if got := d.RecoverTarget("discord", 2); got != -1 {
+		t.Fatalf("after 2 scans RecoverTarget=%d, want -1", got)
+	}
+	d.Scan(ctx)
+	if got := d.RecoverTarget("discord", 2); got != 0 {
+		t.Fatalf("after 3 scans RecoverTarget=%d, want 0 (best stably-healthy lower tier)", got)
+	}
+}
+
+func TestRecoverTargetStreakResetsOnFlap(t *testing.T) {
+	reg := &registry.Registry{Services: map[string]registry.Service{"discord": svcWithChain()}}
+	nodes := &fakeNodes{up: map[string]int{"vpnA": 90}}
+	dir := &flappyDirect{}
+	d := &Detector{Reg: reg, Pos: fixedPos(2), Direct: dir,
+		Nodes: nodes, TestURL: "x", VPNAttempts: 1, RecoverStreak: 2, Log: quietLog()}
+	ctx := context.Background()
+	dir.ok0 = true
+	d.Scan(ctx) // streak 1
+	dir.ok0 = false
+	d.Scan(ctx) // reset to 0
+	dir.ok0 = true
+	d.Scan(ctx) // streak 1 again
+	if got := d.RecoverTarget("discord", 2); got != -1 {
+		t.Fatalf("a flap must reset the streak; RecoverTarget=%d, want -1", got)
+	}
+}
+
+// flappyDirect lets a test toggle pos0 health between scans.
+type flappyDirect struct{ ok0 bool }
+
+func (f *flappyDirect) Probe(_ context.Context, service string, position int) events.ProductionVerdict {
+	ok := false
+	if position == 0 {
+		ok = f.ok0
+	}
+	return events.ProductionVerdict{Service: service, Position: position, OK: ok, RTTms: 50}
+}
