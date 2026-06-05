@@ -444,14 +444,24 @@ func main() {
 			recipePool := append(strategycat.Load(), zaptune.RecipesFromDefinitions(discoveredDefs)...)
 			zr := zapretgen.New(zsvcs, br.Position, recipePool, kbPick, "", log)
 			armed := false
-			if *zapretArm && !*dryRun {
+			switch {
+			case *zapretArm && *dryRun:
+				log.Warn("zapret-arm requested but -dry-run set; staying PROPOSE-ONLY")
+			case *zapretArm:
+				// The rollback floor is the CURRENT active.sh target (e.g. alt12.sh).
+				// We must resolve it via readlink: without a real target, a rollback
+				// would `ln -sfn <link> <link>` (a self-referential symlink) and brick
+				// nfqws. If active.sh is not a symlink we can't establish a safe floor,
+				// so refuse to arm (stay propose-only) rather than risk that.
+				lkg, err := os.Readlink(*zapretActive)
+				if err != nil || lkg == "" {
+					log.Error("zapret-arm: cannot resolve a rollback floor (active link is not a symlink); staying PROPOSE-ONLY",
+						"active_link", *zapretActive, "err", err)
+					break
+				}
 				// Arm: the composer becomes the single writer of the nfqws strategy.
 				// The zapret executor yields strategy-switching (keeps routing-to-direct).
 				zapretEx.YieldStrategy()
-				lkg := *zapretActive
-				if t, err := os.Readlink(*zapretActive); err == nil && t != "" {
-					lkg = t // current active.sh target = the rollback floor (e.g. alt12.sh)
-				}
 				zr.Arm(zapretgen.ArmConfig{
 					Runner:       executor.ExecRunner{},
 					ComposedPath: *zapretDir + "/lotsman-composed.sh",
@@ -464,8 +474,6 @@ func main() {
 					CanaryProbes: 3,
 				})
 				armed = true
-			} else if *zapretArm && *dryRun {
-				log.Warn("zapret-arm requested but -dry-run set; staying PROPOSE-ONLY")
 			}
 			pr.Add(periodic.Task{Name: "zapret-compose", Interval: *checkInterval, RunAtStart: true, Fn: zr.Reconcile})
 			log.Info("zapret per-rule composer enabled (LOT-10b)", "armed", armed)
@@ -869,6 +877,13 @@ func newReconciler(conf *config.Config, reg *registry.Registry, clash *dataplane
 // a short timeout — the canary signal for the armed zapret composer (LOT-10b-arm).
 // A transport error or a 5xx means the path is broken. Probed from the box, so it
 // traverses the box's own egress (through nfqws where OUTPUT is queued).
+//
+// LIMITATION (LOT-3 class): this is a COARSE signal. The box's own request does
+// not go through a LAN client's per-service sing-box selector, and the box's
+// OUTPUT desync may differ from forwarded (br-lan) traffic — so a recipe that
+// breaks real clients but not the box probe can pass the canary and be learned as
+// good. Acceptable as a first gate (a recipe that breaks even the box is clearly
+// bad), but a faithful client-path probe is future work (tracked under LOT-10).
 func httpReachable(ctx context.Context, target string) bool {
 	ctx, cancel := context.WithTimeout(ctx, 6*time.Second)
 	defer cancel()
