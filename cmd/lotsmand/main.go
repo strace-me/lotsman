@@ -159,6 +159,7 @@ func main() {
 	// wrote. They carry NFQWSArgs (the raw desync profile) so the per-service
 	// composer can render launchers for them; here they just join the catalog the
 	// KB ranks over. Missing file = none; a corrupt file is fatal (operator typo).
+	var discoveredDefs []strategy.Definition // discovered strategies (for per-rule composition, LOT-10b)
 	if *strategyCatalog != "" {
 		discovered, err := strategy.LoadDefinitions(*strategyCatalog)
 		if err != nil {
@@ -168,6 +169,7 @@ func main() {
 		for _, d := range discovered {
 			catalog.Add(d)
 		}
+		discoveredDefs = discovered
 		log.Info("discovered strategies loaded", "path", *strategyCatalog, "count", len(discovered))
 	}
 	knowledge.SetZapretSeed(catalog.ZapretIDs())
@@ -436,7 +438,11 @@ func main() {
 			kbPick := zaptune.KBPicker(func(service, recipeID string) float64 {
 				return knowledge.Stats(service, recipeID).Success
 			})
-			zr := zapretgen.New(zsvcs, br.Position, strategycat.Load(), kbPick, "", log)
+			// Recipe pool = curated strategycat catalog + operator-classified
+			// discovered strategies (LOT-10a harvest -target-class), so harvested
+			// strategies compete in composition alongside the curated ones.
+			recipePool := append(strategycat.Load(), zaptune.RecipesFromDefinitions(discoveredDefs)...)
+			zr := zapretgen.New(zsvcs, br.Position, recipePool, kbPick, "", log)
 			armed := false
 			if *zapretArm && !*dryRun {
 				// Arm: the composer becomes the single writer of the nfqws strategy.

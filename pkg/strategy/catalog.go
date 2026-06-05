@@ -15,6 +15,13 @@ type Definition struct {
 	NFQWSArgs  []string // raw nfqws args for a discovered single-profile strategy (empty for script-backed)
 	BlockTypes []string // tspu block types this strategy is known to beat (e.g. "tcp_reset"); best-effort metadata
 	Notes      string
+	// TargetClass is the strategycat target-class a DISCOVERED strategy applies to
+	// (e.g. "general_tls", "quic", "discord_tcp"), asserted by the operator at
+	// harvest time (`lotsmanctl harvest -target-class`). It is how a technique-only
+	// discovered strategy (NFQWSArgs without a filter/domains) becomes a composable
+	// per-service recipe — pkg/zaptune scopes it with that class's filter. Empty
+	// for builtin/script strategies and un-asserted discoveries (then not composed).
+	TargetClass string
 }
 
 // Catalog is the set of known strategies in cold-start preference order. It is
