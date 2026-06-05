@@ -81,6 +81,22 @@ func TestComposeSkipsUnfillablePlaceholders(t *testing.T) {
 	}
 }
 
+func TestComposeRejectsGlobalRecipeWithoutDomains(t *testing.T) {
+	// A games-class UDP recipe with NO {{DOMAINS}} (global STUN desync, like the
+	// real zms-gv-stun) must NOT be usable for a domain-based service: composing it
+	// would emit an unscoped global block. The service has no other candidate -> not
+	// covered -> keep the existing config (don't apply a useless global desync).
+	global := recipe("zms-gv-stun", strategycat.ClassGames, "--filter-udp=1024-65535", "--dpi-desync=fake", "--dpi-desync-fake-unknown-udp=stun.bin")
+	gaming := svcWithDomains("gaming-epic", "gaming", "epicgames.com")
+	if usableForDomains(gaming, global) {
+		t.Fatal("a recipe without {{DOMAINS}} must not be usable (would be a global, unscoped block)")
+	}
+	p := Compose([]registry.Service{gaming}, []strategycat.Recipe{global}, FirstPicker)
+	if p.Covered {
+		t.Errorf("gaming with only a global recipe must be uncovered, got %v", p)
+	}
+}
+
 func TestComposeServiceWithoutDomainsUncovered(t *testing.T) {
 	cat := []strategycat.Recipe{recipe("tls-1", strategycat.ClassGeneralTLS, "--hostlist-domains={{DOMAINS}}", "--dpi-desync=split2")}
 	// rule_set-only service (no inline domains) — nfqws can't read .srs, so it is

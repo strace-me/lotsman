@@ -117,22 +117,31 @@ func Compose(services []registry.Service, recipes []strategycat.Recipe, pick Pic
 	return plan
 }
 
-// usableForDomains reports whether a recipe can be rendered for a service using
-// ONLY the service's domains: the service must have inline domains, and the
-// recipe must carry no placeholder other than {{DOMAINS}}. Recipes needing
-// {{IPSET}} (CIDR file), {{GAME_PORTS}}, etc. require IP/port templating not done
-// in 10b, so they are not yet candidates (the service then stays on the existing
-// whole-config until that lands). Pure.
+// usableForDomains reports whether a recipe can be rendered for a service scoped
+// to ONLY the service's domains. Three conditions: the service has inline domains;
+// the recipe is actually DOMAIN-SCOPED (it contains the {{DOMAINS}} placeholder,
+// i.e. an --hostlist-domains that pins it to those domains); and it carries no
+// OTHER placeholder ({{IPSET}}/{{GAME_PORTS}}/…) we cannot fill.
+//
+// The {{DOMAINS}} requirement matters: a recipe without it (e.g. a games-class
+// UDP STUN profile, --filter-udp=1024-65535 with no hostlist) would compose into
+// a GLOBAL desync block — it would NOT scope to the service's domains and would
+// touch unrelated traffic. Such a recipe is not a valid per-service block here,
+// even though it has nothing to substitute. Pure.
 func usableForDomains(svc registry.Service, r strategycat.Recipe) bool {
 	if len(svc.Domains) == 0 {
 		return false
 	}
+	hasDomains := false
 	for _, a := range r.NfqwsArgs {
+		if strings.Contains(a, "{{DOMAINS}}") {
+			hasDomains = true
+		}
 		if strings.Contains(strings.ReplaceAll(a, "{{DOMAINS}}", ""), "{{") {
 			return false // an unfillable placeholder remains
 		}
 	}
-	return true
+	return hasDomains
 }
 
 // FirstPicker is the 10b seed picker: take the first eligible candidate (catalog
