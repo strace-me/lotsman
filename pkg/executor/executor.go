@@ -50,6 +50,7 @@ type ScriptSwitcher struct {
 	dryRun      bool
 	log         *slog.Logger
 	route       SelectorSetter // non-nil => also point the service selector at "direct"
+	external    bool           // true => strategy owned externally (zapretgen reconciler); Enable does routing only
 
 	mu      sync.Mutex
 	current string // currently active strategy id (idempotency)
@@ -61,6 +62,12 @@ type ScriptSwitcher struct {
 // config (the sel-<service> selectors exist); without it the switcher just swaps
 // the global engine strategy and leaves routing alone.
 func (s *ScriptSwitcher) RouteToDirect(sel SelectorSetter) { s.route = sel }
+
+// YieldStrategy makes Enable do ONLY its routing-to-direct job and stop switching
+// the engine strategy (no symlink, no restart). Set this when the zapretgen
+// reconciler is armed and owns the nfqws strategy as the single writer (LOT-10b-arm)
+// — otherwise the switcher and the reconciler would fight over the active symlink.
+func (s *ScriptSwitcher) YieldStrategy() { s.external = true }
 
 func newSwitcher(class string, run Runner, scriptDir, activeLink, initService string, dryRun bool, log *slog.Logger) *ScriptSwitcher {
 	return &ScriptSwitcher{
@@ -96,6 +103,13 @@ func (s *ScriptSwitcher) Enable(ctx context.Context, service, strategyID string)
 		} else if err := s.route.SetSelector(ctx, selector, "direct"); err != nil {
 			return err
 		}
+	}
+
+	// Strategy owned externally (armed zapretgen reconciler is the single writer):
+	// we have done the routing-to-direct above; the nfqws strategy itself is the
+	// reconciler's job, so do not symlink/restart here.
+	if s.external {
+		return nil
 	}
 
 	if s.current == strategyID {

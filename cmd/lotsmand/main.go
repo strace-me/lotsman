@@ -19,6 +19,7 @@ import (
 	"flag"
 	"fmt"
 	"log/slog"
+	"net/http"
 	"os"
 	"os/signal"
 	"sort"
@@ -93,6 +94,7 @@ func main() {
 		kbFile          = flag.String("kb-file", "", "persist/restore learned strategy success (KB) to this JSON file so experience survives restart (empty = disabled)")
 		strategyCatalog = flag.String("strategy-catalog-file", "", "load blockcheck-discovered zapret strategies (LOT-10a) from this JSON file, written by `lotsmanctl harvest -out`; they join the catalog the KB ranks over (empty = builtin+config only)")
 		zapretCompose   = flag.Bool("zapret-compose", false, "PROPOSE-ONLY (LOT-10b): on -check-interval, compose a per-rule nfqws config from the services currently on a zapret rung and LOG what it would switch to (semantic-diff, only on change). Does NOT touch the live nfqws strategy. Needs a config.")
+		zapretArm       = flag.Bool("zapret-arm", false, "ARM the per-rule nfqws composer (LOT-10b-arm): it becomes the SINGLE WRITER of the nfqws strategy (symlink+restart) with a canary + rollback-to-last-good and KB feedback; the zapret executor yields strategy-switching to it. DEFAULT OFF. Requires -zapret-compose; ignored under -dry-run (stays propose-only).")
 		smart           = flag.Bool("smart", true, "enable the intelligence layer (policy/correlate/damper/adaptive/anomaly) in escalation decisions")
 		checkInterval   = flag.Duration("check-interval", 0, "run background maintenance (Flowseal update, subscription refresh) every interval (0 = disabled)")
 		observeInterval = flag.Duration("observe-interval", 30*time.Second, "run the passive-observation eye (observe/detect/propose, PROPOSE-ONLY) every interval, independent of -check-interval (0 = disabled)")
@@ -435,8 +437,32 @@ func main() {
 				return knowledge.Stats(service, recipeID).Success
 			})
 			zr := zapretgen.New(zsvcs, br.Position, strategycat.Load(), kbPick, "", log)
+			armed := false
+			if *zapretArm && !*dryRun {
+				// Arm: the composer becomes the single writer of the nfqws strategy.
+				// The zapret executor yields strategy-switching (keeps routing-to-direct).
+				zapretEx.YieldStrategy()
+				lkg := *zapretActive
+				if t, err := os.Readlink(*zapretActive); err == nil && t != "" {
+					lkg = t // current active.sh target = the rollback floor (e.g. alt12.sh)
+				}
+				zr.Arm(zapretgen.ArmConfig{
+					Runner:       executor.ExecRunner{},
+					ComposedPath: *zapretDir + "/lotsman-composed.sh",
+					ActiveLink:   *zapretActive,
+					RestartCmd:   []string{*zapretInit, "restart"},
+					LKGTarget:    lkg,
+					Probe:        func(c context.Context, target string) bool { return httpReachable(c, target) },
+					Record:       func(svc, id string, ok bool) { knowledge.RecordOutcome(svc, id, ok, 0) },
+					Settle:       5 * time.Second,
+					CanaryProbes: 3,
+				})
+				armed = true
+			} else if *zapretArm && *dryRun {
+				log.Warn("zapret-arm requested but -dry-run set; staying PROPOSE-ONLY")
+			}
 			pr.Add(periodic.Task{Name: "zapret-compose", Interval: *checkInterval, RunAtStart: true, Fn: zr.Reconcile})
-			log.Info("zapret per-rule composer enabled (LOT-10b, PROPOSE-ONLY)")
+			log.Info("zapret per-rule composer enabled (LOT-10b)", "armed", armed)
 		}
 		if *rulesetsUpdate {
 			up := newRulesetsUpdater(reg, rc, *rulesetsRepo, *rulesetsPin, *rulesetsDir, *singboxBin, *rulesetsBump, *rulesetsRatio, *dryRun, log)
@@ -831,6 +857,25 @@ func newReconciler(conf *config.Config, reg *registry.Registry, clash *dataplane
 		}
 	}
 	return rc
+}
+
+// httpReachable reports whether target answers an HTTP GET (status < 500) within
+// a short timeout — the canary signal for the armed zapret composer (LOT-10b-arm).
+// A transport error or a 5xx means the path is broken. Probed from the box, so it
+// traverses the box's own egress (through nfqws where OUTPUT is queued).
+func httpReachable(ctx context.Context, target string) bool {
+	ctx, cancel := context.WithTimeout(ctx, 6*time.Second)
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, target, nil)
+	if err != nil {
+		return false
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return false
+	}
+	resp.Body.Close()
+	return resp.StatusCode < 500
 }
 
 // subViaHosts returns the deduplicated endpoint hostnames of the FETCHED

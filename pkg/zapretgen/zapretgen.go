@@ -13,10 +13,11 @@
 // contribute nothing). nfqws is one process, so the whole config is composed from
 // the full active set at once — hence a reconciler, not a per-service action.
 //
-// This slice is PROPOSE-ONLY: it composes, semantic-diffs, and logs what it WOULD
-// switch to. It does not touch the live nfqws strategy (the existing executor
-// still owns that) — arming it is a later, gated step once the executor-authority
-// question is settled.
+// Without Arm it is PROPOSE-ONLY: composes, semantic-diffs, logs what it WOULD
+// switch to, never touching the live nfqws strategy. Arm (gated behind a flag)
+// makes it the SINGLE WRITER of the strategy — it writes/symlinks/restarts and
+// canaries the switch, rolling back to the last-known-good config (and demoting
+// the failed recipes in the KB) if an affected service degrades.
 package zapretgen
 
 import (
@@ -24,6 +25,7 @@ import (
 	"fmt"
 	"log/slog"
 	"sort"
+	"time"
 
 	"github.com/strace-me/lotsman/pkg/registry"
 	"github.com/strace-me/lotsman/pkg/strategy"
@@ -32,8 +34,33 @@ import (
 	"github.com/strace-me/lotsman/pkg/zaptune"
 )
 
-// Reconciler composes the nfqws config from the zapret-active services. In this
-// propose-only slice it only logs what it would apply; construct via New.
+// Runner runs a command (executor.ExecRunner satisfies it); injected so the armed
+// apply path is testable without touching the real nfqws engine.
+type Runner interface {
+	Run(ctx context.Context, name string, args ...string) error
+}
+
+// ArmConfig turns the reconciler from propose-only into the SINGLE WRITER of the
+// nfqws strategy (LOT-10b-arm). Pass it to Arm. Probe verifies a service is
+// reachable (the canary signal); Record folds a recipe's canary outcome into the
+// KB (so a failed recipe is demoted and the next compose differs). LKGTarget is
+// the active-symlink target at startup (the current working config, e.g. alt12.sh)
+// — the floor we roll back to before any composed config has passed a canary.
+type ArmConfig struct {
+	Runner       Runner
+	ComposedPath string                                        // where the composed <id>.sh is written
+	ActiveLink   string                                        // symlink the nfqws init runs
+	RestartCmd   []string                                      // e.g. ["/etc/init.d/nfqws","restart"]
+	LKGTarget    string                                        // current active.sh target (rollback floor)
+	Probe        func(ctx context.Context, target string) bool // service reachability probe
+	Record       func(service, recipeID string, ok bool)       // kb outcome hook (nil = no learning)
+	Settle       time.Duration                                 // wait after restart before the canary probes
+	CanaryProbes int                                           // probe attempts per service (>=1)
+}
+
+// Reconciler composes the nfqws config from the zapret-active services and, when
+// armed, applies it as the single writer with a canary + rollback-to-last-good.
+// Construct via New (propose-only); call Arm to enable applying.
 type Reconciler struct {
 	services  []registry.Service
 	position  func(service string) int // brain.Position: a service's current chain index
@@ -42,7 +69,21 @@ type Reconciler struct {
 	nfqwsPath string
 	log       *slog.Logger
 
-	last string // last composed launcher text (semantic-diff: log only on change)
+	armed     bool
+	arm       ArmConfig
+	lkgTarget string // symlink target of the last-known-good config (init = arm.LKGTarget)
+
+	last string // last composed launcher text (semantic-diff: act only on change)
+}
+
+// Arm makes the reconciler the single writer of the nfqws strategy: a covered,
+// changed composition is written, symlinked active, and the engine restarted,
+// then canaried — a degraded affected service rolls back to the last-known-good
+// (see ArmConfig). Without Arm the reconciler stays propose-only.
+func (r *Reconciler) Arm(c ArmConfig) {
+	r.armed = true
+	r.arm = c
+	r.lkgTarget = c.LKGTarget
 }
 
 // New builds a propose-only zapret reconciler. position is brain.Position (which
@@ -57,7 +98,7 @@ func New(services []registry.Service, position func(string) int, recipes []strat
 // composed config CHANGED since the last pass (churn-guard), so a steady state is
 // silent. Safe to call on a ticker and on Brain transitions. Never touches the
 // data plane in this slice.
-func (r *Reconciler) Reconcile(_ context.Context) error {
+func (r *Reconciler) Reconcile(ctx context.Context) error {
 	active := r.zapretActive()
 	plan := zaptune.Compose(active, r.recipes, r.pick)
 
@@ -79,10 +120,17 @@ func (r *Reconciler) Reconcile(_ context.Context) error {
 	if launcher == r.last {
 		return nil // unchanged since last pass: no-op (churn-guard)
 	}
+	// Record the attempt BEFORE applying so a canary-failed config is not re-applied
+	// next tick — the KB demotion below changes the next compose, which changes the
+	// launcher text, which is what re-arms evaluation (anti-oscillation).
 	r.last = launcher
-	r.log.Info("zapret-compose: composed nfqws config CHANGED (PROPOSE-ONLY, not applied)",
-		"services", serviceNames(active), "chosen", plan.Chosen, "blocks", len(active), "nfqws_args", len(plan.Args))
-	return nil
+
+	if !r.armed {
+		r.log.Info("zapret-compose: composed nfqws config CHANGED (PROPOSE-ONLY, not applied)",
+			"services", serviceNames(active), "chosen", plan.Chosen, "blocks", len(active), "nfqws_args", len(plan.Args))
+		return nil
+	}
+	return r.applyArmed(ctx, active, plan, launcher)
 }
 
 // zapretActive returns the services Brain currently holds on a zapret rung, in
