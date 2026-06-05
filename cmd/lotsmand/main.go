@@ -52,6 +52,7 @@ import (
 	"github.com/strace-me/lotsman/pkg/misroute"
 	"github.com/strace-me/lotsman/pkg/noderank"
 	"github.com/strace-me/lotsman/pkg/observe"
+	"github.com/strace-me/lotsman/pkg/pathhealth"
 	"github.com/strace-me/lotsman/pkg/periodic"
 	"github.com/strace-me/lotsman/pkg/probing"
 	"github.com/strace-me/lotsman/pkg/reconcile"
@@ -100,6 +101,9 @@ func main() {
 		engineHealth    = flag.Bool("engine-health", false, "engine watchdog (LOT-33): when the WAN is up but a data-plane engine is WEDGED (sing-box can't route / nfqws not desyncing), restart it. Self-heals the cold-boot race (engines up before WAN) regardless of boot order. DEFAULT OFF.")
 		engineHealthInt = flag.Duration("engine-health-interval", time.Minute, "engine-health watchdog check period")
 		engineHealthCan = flag.String("engine-health-nfqws-canary", "", "a DPI'd URL probed via -probe-proxy to verify nfqws is desyncing (empty = nfqws check off; sing-box check is always on with -engine-health). e.g. https://discord.com/api/v9/gateway")
+		pathHealth      = flag.Bool("path-health", false, "escalation-v2 DETECT (LOT-33-design E-1, PROPOSE-ONLY): fan-out probe of EVERY chain step out-of-band (box-direct for zapret/direct, clash NodeDelay for vpn/emergency) and LOG the best working tier vs current position. Changes nothing. DEFAULT OFF.")
+		pathHealthInt   = flag.Duration("path-health-interval", time.Minute, "path-health detect period (escalation-v2 E-1)")
+		pathHealthURL   = flag.String("path-health-test-url", "http://www.gstatic.com/generate_204", "generic connectivity URL for the vpn-tier NodeDelay probe of non-HTTP (tcp/stun) services")
 		smart           = flag.Bool("smart", true, "enable the intelligence layer (policy/correlate/damper/adaptive/anomaly) in escalation decisions")
 		checkInterval   = flag.Duration("check-interval", 0, "run background maintenance (Flowseal update, subscription refresh) every interval (0 = disabled)")
 		observeInterval = flag.Duration("observe-interval", 30*time.Second, "run the passive-observation eye (observe/detect/propose, PROPOSE-ONLY) every interval, independent of -check-interval (0 = disabled)")
@@ -344,6 +348,7 @@ func main() {
 	}
 
 	var prober dataplane.Prober
+	var directProber dataplane.Prober // box-direct (no socks): used by the path-health detector for zapret/direct steps
 	if *simulate {
 		prober = dataplane.NewFuncProber(demoTimeline)
 	} else {
@@ -352,6 +357,7 @@ func main() {
 			specs[name] = dataplane.ServiceProbe{Type: svc.ProbeType, Target: svc.ProbeTarget}
 		}
 		prober = dataplane.NewMultiProberProxy(specs, *probeProxy)
+		directProber = dataplane.NewMultiProber(specs)
 		if *probeProxy != "" {
 			log.Info("probing through sing-box socks inbound", "proxy", *probeProxy)
 		}
@@ -675,6 +681,20 @@ func main() {
 		ehp.Add(periodic.Task{Name: "engine-health", Interval: *engineHealthInt, Fn: wd.Run})
 		runners = append(runners, ehp.Run)
 		log.Info("engine-health watchdog enabled (LOT-33)", "interval", engineHealthInt.String(), "nfqws_check", *engineHealthCan != "")
+	}
+
+	// escalation-v2 DETECT (E-1, propose-only): parallel out-of-band fan-out of every
+	// chain step; logs the best working tier vs current. Needs the box-direct prober
+	// (zapret/direct steps) and clash (vpn/emergency steps), so it is off under -simulate.
+	if *pathHealth && directProber != nil {
+		php := periodic.New(log)
+		det := &pathhealth.Detector{
+			Reg: reg, Pos: br, Direct: directProber, Nodes: clash,
+			TestURL: *pathHealthURL, Timeout: 4 * time.Second, Log: log,
+		}
+		php.Add(periodic.Task{Name: "path-health", Interval: *pathHealthInt, RunAtStart: true, Fn: det.Scan})
+		runners = append(runners, php.Run)
+		log.Info("path-health detect enabled (escalation-v2 E-1, propose-only)", "interval", pathHealthInt.String())
 	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
