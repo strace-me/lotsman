@@ -42,6 +42,18 @@ type Smarts struct {
 // SetSmarts enables the intelligence layer. Call before Run.
 func (b *Brain) SetSmarts(s *Smarts) { b.smarts = s }
 
+// PathOracle gives Brain the empirical health of a service's chain (escalation-v2
+// E-2). NextWorking returns the lowest position STRICTLY ABOVE `above` that the
+// out-of-band path-health detector last saw HEALTHY, or -1 if none/unknown. Brain
+// uses it to jump straight to the best working tier instead of one rung at a time.
+type PathOracle interface {
+	NextWorking(service string, above int) int
+}
+
+// SetPathOracle enables empirical escalation jumps (E-2). Independent of Smarts;
+// nil = original one-rung-at-a-time escalation. Call before Run.
+func (b *Brain) SetPathOracle(o PathOracle) { b.pathOracle = o }
+
 // Config holds the state-machine tunables. Production defaults follow the spec
 // (asymmetric thresholds, 60s settling); tests and the demo shorten them.
 type Config struct {
@@ -78,13 +90,14 @@ type runtime struct {
 
 // Brain holds per-service runtime state and drives the state machine.
 type Brain struct {
-	bus     *events.Bus
-	kb      Recommender
-	cfg     Config
-	audit   audit.Recorder
-	smarts  *Smarts              // optional intelligence layer; nil = plain threshold
-	persist func(map[string]int) // called under mu after each transition; may be nil
-	log     *slog.Logger
+	bus        *events.Bus
+	kb         Recommender
+	cfg        Config
+	audit      audit.Recorder
+	smarts     *Smarts              // optional intelligence layer; nil = plain threshold
+	pathOracle PathOracle           // optional empirical path-health (E-2); nil = one-rung escalation
+	persist    func(map[string]int) // called under mu after each transition; may be nil
+	log        *slog.Logger
 
 	reassertEvery time.Duration // >0: periodically re-emit desired state so the applier re-converges the data plane
 
@@ -413,10 +426,28 @@ func (b *Brain) escalateLocked(rt *runtime) {
 	reason := "fails_threshold"
 	next := rt.position + 1
 
-	// Block-type-aware jump: if the detected block points at a mechanism (e.g.
-	// a timeout => VPN, an RST => zapret), skip ahead to the next chain step of
-	// that class — no point trying zapret strategies against an IP-level block.
-	if rt.suggestedClass != "" {
+	// E-2 empirical jump: the path-health detector probes every tier out-of-band,
+	// so escalate straight to the lowest WORKING position above current — skipping
+	// rungs it has already seen down. This is the parallel-failover fix for slow
+	// sequential escalation (zapret→wait→fail→VPN→…). Same-class rungs share the
+	// data path the detector probes, so a skipped zapret-alt was genuinely down; a
+	// recipe that needs a strategy swap to come back is the v7-tuner's job, not
+	// escalation's.
+	if b.pathOracle != nil {
+		if jump := b.pathOracle.NextWorking(rt.svc.Name, rt.position); jump > rt.position {
+			if jump != next {
+				b.log.Info("path-health jump to best working tier (skip known-down rungs)",
+					"service", rt.svc.Name, "from_pos", rt.position, "to_pos", jump)
+			}
+			next = jump
+			reason = "pathhealth_jump"
+		}
+	}
+
+	// Block-type-aware jump (heuristic) — only when path-health gave no empirical
+	// jump: if the detected block points at a mechanism (e.g. a timeout => VPN, an
+	// RST => zapret), skip ahead to the next chain step of that class.
+	if reason == "fails_threshold" && rt.suggestedClass != "" {
 		for i := rt.position + 1; i < len(rt.svc.Chain); i++ {
 			if rt.svc.Chain[i].StrategyClass == rt.suggestedClass {
 				if i != next {

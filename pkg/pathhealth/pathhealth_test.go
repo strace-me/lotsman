@@ -130,3 +130,29 @@ func TestScanSkipsUnprobeable(t *testing.T) {
 		t.Errorf("unprobeable services should be skipped, NodeDelay saw %v", nodes.seen)
 	}
 }
+
+func TestNextWorkingOracle(t *testing.T) {
+	// pos0 zapret down, pos1 zapret down, pos2 vpn up, pos3 emergency up.
+	direct := fakeDirect{ok: map[int]bool{0: false, 1: false}}
+	nodes := &fakeNodes{up: map[string]int{"vpnA": 90, "emg": 200}}
+	d := newDetector(t, direct, nodes, 0)
+	if err := d.Scan(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	// from pos0, lowest working above is 2 (vpn).
+	if got := d.NextWorking("discord", 0); got != 2 {
+		t.Errorf("NextWorking(0) = %d, want 2", got)
+	}
+	// from pos2, lowest working above is 3 (emergency).
+	if got := d.NextWorking("discord", 2); got != 3 {
+		t.Errorf("NextWorking(2) = %d, want 3", got)
+	}
+	// nothing above 3.
+	if got := d.NextWorking("discord", 3); got != -1 {
+		t.Errorf("NextWorking(3) = %d, want -1", got)
+	}
+	// unknown service (never scanned) -> -1.
+	if got := d.NextWorking("nope", 0); got != -1 {
+		t.Errorf("NextWorking(unknown) = %d, want -1", got)
+	}
+}

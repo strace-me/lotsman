@@ -104,6 +104,7 @@ func main() {
 		pathHealth      = flag.Bool("path-health", false, "escalation-v2 DETECT (LOT-33-design E-1, PROPOSE-ONLY): fan-out probe of EVERY chain step out-of-band (box-direct for zapret/direct, clash NodeDelay for vpn/emergency) and LOG the best working tier vs current position. Changes nothing. DEFAULT OFF.")
 		pathHealthInt   = flag.Duration("path-health-interval", time.Minute, "path-health detect period (escalation-v2 E-1)")
 		pathHealthURL   = flag.String("path-health-test-url", "http://www.gstatic.com/generate_204", "generic connectivity URL for the vpn-tier NodeDelay probe of non-HTTP (tcp/stun) services")
+		pathHealthAct   = flag.Bool("path-health-act", false, "escalation-v2 ACT (E-2): let Brain escalate straight to the best WORKING tier from the path-health detector (skip known-down rungs) instead of one rung at a time. Requires -path-health. DEFAULT OFF.")
 		smart           = flag.Bool("smart", true, "enable the intelligence layer (policy/correlate/damper/adaptive/anomaly) in escalation decisions")
 		checkInterval   = flag.Duration("check-interval", 0, "run background maintenance (Flowseal update, subscription refresh) every interval (0 = disabled)")
 		observeInterval = flag.Duration("observe-interval", 30*time.Second, "run the passive-observation eye (observe/detect/propose, PROPOSE-ONLY) every interval, independent of -check-interval (0 = disabled)")
@@ -694,7 +695,12 @@ func main() {
 		}
 		php.Add(periodic.Task{Name: "path-health", Interval: *pathHealthInt, RunAtStart: true, Fn: det.Scan})
 		runners = append(runners, php.Run)
-		log.Info("path-health detect enabled (escalation-v2 E-1, propose-only)", "interval", pathHealthInt.String())
+		if *pathHealthAct {
+			br.SetPathOracle(det)
+			log.Info("path-health ACT enabled (escalation-v2 E-2): Brain jumps to the best working tier", "interval", pathHealthInt.String())
+		} else {
+			log.Info("path-health detect enabled (escalation-v2 E-1, propose-only)", "interval", pathHealthInt.String())
+		}
 	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
