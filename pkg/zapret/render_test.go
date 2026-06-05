@@ -93,3 +93,27 @@ func TestRenderLauncherErrors(t *testing.T) {
 		t.Error("expected error for missing filter scope")
 	}
 }
+
+func TestRenderComposed(t *testing.T) {
+	args := []string{
+		"--new", "--filter-tcp=443", "--hostlist-domains=discord.media", "--dpi-desync=fake",
+		"--new", "--filter-tcp=443", "--hostlist-domains=epicgames.com", "--dpi-desync=split2",
+	}
+	out, err := RenderComposed(args, "")
+	if err != nil {
+		t.Fatalf("render composed: %v", err)
+	}
+	if !strings.HasPrefix(out, "#!/bin/sh\n") {
+		t.Error("missing shebang")
+	}
+	if !strings.Contains(out, DefaultNfqwsPath) {
+		t.Error("default nfqws path missing")
+	}
+	if !strings.Contains(out, `--qnum="$QNUM"`) || !strings.Contains(out, "--hostlist-domains=epicgames.com") {
+		t.Errorf("composed exec line wrong:\n%s", out)
+	}
+	// Empty args -> error (caller should keep the existing config).
+	if _, err := RenderComposed(nil, ""); err == nil {
+		t.Error("expected error for empty composed args")
+	}
+}

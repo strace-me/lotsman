@@ -1,0 +1,99 @@
+package zaptune
+
+import (
+	"strings"
+	"testing"
+
+	"github.com/strace-me/lotsman/pkg/registry"
+	"github.com/strace-me/lotsman/pkg/strategycat"
+)
+
+// recipe is a tiny domains-only recipe builder for tests.
+func recipe(id string, class strategycat.TargetClass, args ...string) strategycat.Recipe {
+	return strategycat.Recipe{ID: id, TargetClass: class, NfqwsArgs: args}
+}
+
+func svcWithDomains(name, profile string, domains ...string) registry.Service {
+	return registry.Service{Name: name, Profile: profile, Domains: domains}
+}
+
+func TestComposeCoversAllServices(t *testing.T) {
+	cat := []strategycat.Recipe{
+		recipe("disc-tcp-1", strategycat.ClassDiscordTCP, "--filter-tcp=443", "--hostlist-domains={{DOMAINS}}", "--dpi-desync=fake"),
+		recipe("tls-1", strategycat.ClassGeneralTLS, "--filter-tcp=443", "--hostlist-domains={{DOMAINS}}", "--dpi-desync=split2"),
+	}
+	services := []registry.Service{
+		svcWithDomains("discord", "voice", "discord.media", "dis.gd"),
+		svcWithDomains("gaming-epic", "gaming", "epicgames.com"),
+	}
+	p := Compose(services, cat, FirstPicker)
+	if !p.Covered {
+		t.Fatalf("expected covered, uncovered=%v", p.Uncovered)
+	}
+	// Two --new blocks, each with its service's domains.
+	if n := strings.Count(strings.Join(p.Args, " "), "--new"); n != 2 {
+		t.Errorf("want 2 --new blocks, got %d in %v", n, p.Args)
+	}
+	joined := strings.Join(p.Args, " ")
+	if !strings.Contains(joined, "discord.media,dis.gd") {
+		t.Errorf("discord domains not inlined: %v", p.Args)
+	}
+	if !strings.Contains(joined, "epicgames.com") {
+		t.Errorf("gaming domains not inlined: %v", p.Args)
+	}
+	if p.Chosen["discord"] != "disc-tcp-1" {
+		t.Errorf("discord recipe = %q, want disc-tcp-1", p.Chosen["discord"])
+	}
+}
+
+func TestComposeUncoveredKeepsExisting(t *testing.T) {
+	// Only a discord-class recipe exists; gaming has no usable candidate -> not
+	// covered -> caller keeps the existing whole-config (alt12).
+	cat := []strategycat.Recipe{
+		recipe("disc-tcp-1", strategycat.ClassDiscordTCP, "--hostlist-domains={{DOMAINS}}", "--dpi-desync=fake"),
+	}
+	services := []registry.Service{
+		svcWithDomains("discord", "voice", "discord.media"),
+		svcWithDomains("gaming-epic", "gaming", "epicgames.com"), // general_tls/games — none in cat
+	}
+	p := Compose(services, cat, FirstPicker)
+	if p.Covered {
+		t.Errorf("should NOT be covered when a service has no recipe: %v", p)
+	}
+	if len(p.Uncovered) != 1 || p.Uncovered[0] != "gaming-epic" {
+		t.Errorf("uncovered = %v, want [gaming-epic]", p.Uncovered)
+	}
+	if p.Args != nil {
+		t.Errorf("no args when not covered, got %v", p.Args)
+	}
+}
+
+func TestComposeSkipsUnfillablePlaceholders(t *testing.T) {
+	// A recipe needing {{IPSET}} is NOT usable in 10b (only {{DOMAINS}} filled),
+	// so it is not a candidate and the only-such-recipe service is uncovered.
+	cat := []strategycat.Recipe{
+		recipe("ipset-1", strategycat.ClassGeneralTLS, "--ipset={{IPSET}}", "--hostlist-domains={{DOMAINS}}", "--dpi-desync=fake"),
+	}
+	p := Compose([]registry.Service{svcWithDomains("dev", "general", "github.com")}, cat, FirstPicker)
+	if p.Covered {
+		t.Error("recipe with {{IPSET}} must not be usable in 10b")
+	}
+}
+
+func TestComposeServiceWithoutDomainsUncovered(t *testing.T) {
+	cat := []strategycat.Recipe{recipe("tls-1", strategycat.ClassGeneralTLS, "--hostlist-domains={{DOMAINS}}", "--dpi-desync=split2")}
+	// rule_set-only service (no inline domains) — nfqws can't read .srs, so it is
+	// not domain-renderable -> uncovered.
+	svc := registry.Service{Name: "web", Profile: "general", RuleSets: []string{"geosite-ru-blocked"}}
+	p := Compose([]registry.Service{svc}, cat, FirstPicker)
+	if p.Covered {
+		t.Error("service with no inline domains must be uncovered (nfqws can't read rule_sets)")
+	}
+}
+
+func TestComposeEmptyServicesNotCovered(t *testing.T) {
+	p := Compose(nil, []strategycat.Recipe{recipe("tls-1", strategycat.ClassGeneralTLS, "--hostlist-domains={{DOMAINS}}")}, FirstPicker)
+	if p.Covered || p.Args != nil {
+		t.Errorf("no zapret-active services -> not covered, got %v", p)
+	}
+}
