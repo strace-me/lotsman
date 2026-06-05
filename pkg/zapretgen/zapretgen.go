@@ -73,8 +73,16 @@ type Reconciler struct {
 	arm       ArmConfig
 	lkgTarget string // symlink target of the last-known-good config (init = arm.LKGTarget)
 
+	resolve zaptune.Resolver // rule_set -> domains, for coherent nfqws hostlists (TM-1); nil = none
+
 	last string // last composed launcher text (semantic-diff: act only on change)
 }
+
+// SetResolver wires the rule_set -> plaintext-domains resolver (TM-1) so the
+// composed nfqws hostlist covers the SAME domains sing-box routes (e.g. discord's
+// gateway in geosite-discord). Without it, a service that routes rule_sets is not
+// coherently composable and is left on the existing config (no silent regression).
+func (r *Reconciler) SetResolver(resolve zaptune.Resolver) { r.resolve = resolve }
 
 // Arm makes the reconciler the single writer of the nfqws strategy: a covered,
 // changed composition is written, symlinked active, and the engine restarted,
@@ -100,7 +108,7 @@ func New(services []registry.Service, position func(string) int, recipes []strat
 // data plane in this slice.
 func (r *Reconciler) Reconcile(ctx context.Context) error {
 	active := r.zapretActive()
-	plan := zaptune.Compose(active, r.recipes, r.pick)
+	plan := zaptune.Compose(active, r.recipes, r.pick, r.resolve)
 
 	if !plan.Covered {
 		// Nothing to compose, or recipes don't cover every active service -> keep the
