@@ -294,3 +294,60 @@ func TestFailuresDuringSettlingIgnored(t *testing.T) {
 	case <-time.After(100 * time.Millisecond):
 	}
 }
+
+// fakeOracle is a canned PathOracle: next[above] = lowest working position above,
+// missing => -1 (no data / nothing works above).
+type fakeOracle struct{ next map[int]int }
+
+func (f fakeOracle) NextWorking(_ string, above int) int {
+	if n, ok := f.next[above]; ok {
+		return n
+	}
+	return -1
+}
+
+// TestPathOracleJumpsToBestWorkingTier: escalation-v2 E-2 — Brain escalates
+// straight to the empirically-working tier (VPN, pos 2), skipping ALT_ZAPRET.
+func TestPathOracleJumpsToBestWorkingTier(t *testing.T) {
+	bus := events.NewBus()
+	reg := registry.Builtin() // youtube: 0 zapret, 1 zapret(alt), 2 vpn
+	cfg := Config{EscalateFails: 3, RecoverSuccess: 5, SettlingWindow: 0}
+	b := New(bus, reg, fakeKB{alt: "alt10"}, cfg, nil, discardLogger())
+	b.SetPathOracle(fakeOracle{next: map[int]int{0: 2}}) // from pos0 only VPN(2) works
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go b.Run(ctx)
+	readDesired(t, bus) // init pos 0
+
+	for i := 0; i < 3; i++ {
+		sendVerdict(bus, 0, false)
+	}
+	d := readDesired(t, bus)
+	if d.Position != 2 || d.State != registry.StateVPN {
+		t.Fatalf("path-health jump: got pos=%d state=%s, want 2/VPN (skip ALT_ZAPRET)", d.Position, d.State)
+	}
+}
+
+// TestPathOracleNoDataFallsBackToOneRung: with no oracle data (-1), escalation
+// is the original one-rung step (pos 0 -> 1).
+func TestPathOracleNoDataFallsBackToOneRung(t *testing.T) {
+	bus := events.NewBus()
+	reg := registry.Builtin()
+	cfg := Config{EscalateFails: 3, RecoverSuccess: 5, SettlingWindow: 0}
+	b := New(bus, reg, fakeKB{alt: "alt10"}, cfg, nil, discardLogger())
+	b.SetPathOracle(fakeOracle{next: map[int]int{}}) // always -1
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go b.Run(ctx)
+	readDesired(t, bus) // init pos 0
+
+	for i := 0; i < 3; i++ {
+		sendVerdict(bus, 0, false)
+	}
+	d := readDesired(t, bus)
+	if d.Position != 1 {
+		t.Fatalf("no oracle data: got pos=%d, want 1 (one-rung fallback)", d.Position)
+	}
+}

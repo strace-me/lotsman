@@ -71,7 +71,9 @@ func (p PathHealth) BestWorking() int {
 }
 
 // Detector fans out per-step probes for every service and logs the result.
-// All probes are out-of-band; nothing is applied (E-1 propose-only).
+// All probes are out-of-band; nothing is applied (E-1 propose-only). Each Scan
+// also caches the latest health vector per service so Brain can consult it via
+// NextWorking (the E-2 PathOracle) to jump straight to the best working tier.
 type Detector struct {
 	Reg         *registry.Registry
 	Pos         Positioner
@@ -81,6 +83,9 @@ type Detector struct {
 	Timeout     time.Duration
 	MaxParallel int // cap on concurrent step probes per service (<=0 => 4)
 	Log         *slog.Logger
+
+	mu     sync.Mutex
+	latest map[string]PathHealth // service -> most recent scan (for NextWorking)
 }
 
 // Scan probes every probeable service's chain and logs the best working tier vs
@@ -91,9 +96,41 @@ func (d *Detector) Scan(ctx context.Context) error {
 		if !probeable(svc) {
 			continue
 		}
-		d.logPath(d.probeService(ctx, name, svc))
+		ph := d.probeService(ctx, name, svc)
+		d.store(ph)
+		d.logPath(ph)
 	}
 	return nil
+}
+
+// store caches the latest scan for a service (for NextWorking). Held briefly,
+// never around a probe or a Brain call, so it cannot deadlock with Brain's lock.
+func (d *Detector) store(ph PathHealth) {
+	d.mu.Lock()
+	if d.latest == nil {
+		d.latest = map[string]PathHealth{}
+	}
+	d.latest[ph.Service] = ph
+	d.mu.Unlock()
+}
+
+// NextWorking is the E-2 PathOracle: the lowest position STRICTLY ABOVE `above`
+// that the most recent scan saw healthy, or -1 if none/unknown (no scan yet).
+// Brain uses it to escalate straight to the best working tier instead of walking
+// the chain one rung at a time. Safe for concurrent use.
+func (d *Detector) NextWorking(service string, above int) int {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	ph, ok := d.latest[service]
+	if !ok {
+		return -1
+	}
+	for i := range ph.Steps {
+		if ph.Steps[i].Position > above && ph.Steps[i].OK {
+			return ph.Steps[i].Position
+		}
+	}
+	return -1
 }
 
 // probeable skips services we can't meaningfully fan out over: no probe target
