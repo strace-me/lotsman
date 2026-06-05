@@ -648,19 +648,16 @@ func main() {
 			},
 			Threshold: 3, Cooldown: 5 * time.Minute,
 		}}
-		// nfqws check (opt-in): a DPI'd target via the socks path must still connect;
-		// if it stops, nfqws likely wedged (cold-boot) -> restart it.
-		if *engineHealthCan != "" && *probeProxy != "" {
-			canary := subscription.NewHTTPFetcherProxy(*probeProxy)
+		// nfqws check (opt-in): a BOX-DIRECT probe to a DPI'd target. The box's own
+		// egress to tcp/443 is desync'd by nfqws (oifname eth0 queue 200) on the SAME
+		// strategy LAN clients get, but it does NOT go through sing-box routing — so
+		// it tests nfqws independent of whether the matching service has escalated to
+		// VPN. If it stops connecting while the WAN is up, nfqws is wedged -> restart.
+		if *engineHealthCan != "" {
 			checks = append(checks, &enginehealth.Check{
-				Name: "nfqws",
-				Healthy: func(c context.Context) bool {
-					_, err := canary.Fetch(c, *engineHealthCan)
-					return err == nil
-				},
-				Restart: func(c context.Context) error {
-					return executor.ExecRunner{}.Run(c, *zapretInit, "restart")
-				},
+				Name:      "nfqws",
+				Healthy:   func(c context.Context) bool { return httpReachable(c, *engineHealthCan) },
+				Restart:   func(c context.Context) error { return executor.ExecRunner{}.Run(c, *zapretInit, "restart") },
 				Threshold: 3, Cooldown: 5 * time.Minute,
 			})
 		}
