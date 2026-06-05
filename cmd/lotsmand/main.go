@@ -827,10 +827,17 @@ const nodeHealthTimeout = 5 * time.Second
 // probes each present node through its own outbound via clash, folds the result
 // into the tracker (OnCheck), and prunes long-dead/removed entries. It is the
 // SOLE tracker mutator — reconcile's Load only READS it (ShouldExclude) — so the
-// two run concurrently without a shared-state race beyond the tracker's own lock.
-// mgr is tracker-less on purpose, so a node already marked dead still appears here
-// and can recover (a passing probe reactivates it). Quarantined nodes are skipped
-// until their backoff retry is due, honoring the 1h/4h/24h schedule.
+// two run concurrently without a shared-state race beyond the tracker's own lock
+// (and the periodic runner never overlaps a task with itself).
+//
+// A node already proven dead/removed is EXCLUDED from the generated config by
+// reconcile, so it is not a clash proxy and a /delay probe could never succeed —
+// we skip it rather than waste a guaranteed-failing probe. Its revival path is
+// therefore deliberate and churn-free: after deadRetention it is pruned and
+// reappears in the next pull as a fresh (untracked) node, re-admitted and probed
+// again. Re-admitting a dead node sooner would flap it in/out of the config and
+// restart sing-box every cycle — worse than benching it. Quarantined nodes are
+// skipped until their backoff retry is due, honoring the 1h/4h/24h schedule.
 func checkNodeHealth(ctx context.Context, mgr *subscription.Manager, subs []subscription.Declaration, tracker *subscription.Tracker, clash *dataplane.ClashClient, probeURL string, log *slog.Logger) error {
 	nodes, errs := mgr.Load(ctx, subs)
 	for _, e := range errs {
@@ -853,8 +860,17 @@ func checkNodeHealth(ctx context.Context, mgr *subscription.Manager, subs []subs
 		if !ok {
 			continue
 		}
-		if h, tracked := tracker.Get(n.ID); tracked && h.Status == subscription.StatusQuarantine && !tracker.DueForRetry(n.ID, now) {
-			continue // honor the quarantine backoff schedule
+		h, tracked := tracker.Get(n.ID)
+		if tracked {
+			// Dead/removed nodes are not in the live config (excluded by Load), so a
+			// probe can't reach them — skip; they revive via prune -> re-add.
+			if h.Status == subscription.StatusDead || h.Status == subscription.StatusRemoved {
+				continue
+			}
+			// Quarantined-but-not-yet-due: honor the backoff schedule.
+			if h.Status == subscription.StatusQuarantine && !tracker.DueForRetry(n.ID, now) {
+				continue
+			}
 		}
 		_, err := clash.NodeDelay(ctx, tag, probeURL, nodeHealthTimeout)
 		tracker.OnCheck(n.ID, err == nil, now)

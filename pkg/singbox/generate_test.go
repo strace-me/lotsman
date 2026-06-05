@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/base64"
 	"encoding/json"
+	"strings"
 	"testing"
 
 	"github.com/strace-me/lotsman/pkg/pools"
@@ -837,6 +838,16 @@ func TestSubscriptionViaPoolFailsafe(t *testing.T) {
 	}
 	if _, ok := subViaRule(t, res.JSON, "panel.example"); ok {
 		t.Error("empty via-pool should emit no sub-route rule (fail-safe to direct)")
+	}
+	// ...but it must NOT do so silently — the operator gets a SkippedKnobs warning.
+	var warned bool
+	for _, k := range res.SkippedKnobs {
+		if strings.Contains(k, "subscription_via_pool") {
+			warned = true
+		}
+	}
+	if !warned {
+		t.Errorf("empty via-pool should warn via SkippedKnobs, got %v", res.SkippedKnobs)
 	}
 
 	// No via-pool configured -> byte-identical to plain generation (opt-in).

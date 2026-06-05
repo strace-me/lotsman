@@ -579,8 +579,18 @@ func Generate(services []registry.Service, devices []registry.Device, nodes []su
 	// only when a pool is named, that pool is non-empty, and hosts are present —
 	// otherwise nothing is added and the fetch falls back to direct (final:direct).
 	var subRules []any
-	if opts.SubViaPool != "" && nonEmptyPool[opts.SubViaPool] {
-		if hosts := dedupNonEmpty(opts.SubViaHosts); len(hosts) > 0 {
+	if opts.SubViaPool != "" {
+		hosts := dedupNonEmpty(opts.SubViaHosts)
+		switch {
+		case !nonEmptyPool[opts.SubViaPool]:
+			// Configured but the pool is empty -> no rule -> the fetch falls back to
+			// direct. Surface it (don't silently route the subscription direct while
+			// the operator believes it goes via VPN).
+			res.SkippedKnobs = append(res.SkippedKnobs,
+				fmt.Sprintf("subscription_via_pool %q (pool empty; subscription fetch falls back to direct)", opts.SubViaPool))
+		case len(hosts) == 0:
+			// No fetched hosts (all inline) — nothing to route, not an error.
+		default:
 			subRules = append(subRules, map[string]any{
 				"domain_suffix": hosts,
 				"outbound":      opts.SubViaPool,
