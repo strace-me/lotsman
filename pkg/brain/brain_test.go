@@ -295,15 +295,42 @@ func TestFailuresDuringSettlingIgnored(t *testing.T) {
 	}
 }
 
-// fakeOracle is a canned PathOracle: next[above] = lowest working position above,
-// missing => -1 (no data / nothing works above).
-type fakeOracle struct{ next map[int]int }
+// fakeOracle is a canned PathOracle: next[above] = lowest working position above
+// (E-2 escalation), rec[below] = lowest stably-healthy position below (E-4
+// recovery); missing => -1.
+type fakeOracle struct {
+	next map[int]int
+	rec  map[int]int
+}
 
 func (f fakeOracle) NextWorking(_ string, above int) int {
 	if n, ok := f.next[above]; ok {
 		return n
 	}
 	return -1
+}
+
+func (f fakeOracle) RecoverTarget(_ string, below int) int {
+	if r, ok := f.rec[below]; ok {
+		return r
+	}
+	return -1
+}
+
+// TestPathOracleParallelRecovery: escalation-v2 E-4 — Brain recovers straight to
+// the best lower tier (PREFERRED, pos 0) from VPN (pos 2), not one rung at a time.
+func TestPathOracleParallelRecovery(t *testing.T) {
+	bus := events.NewBus()
+	reg := registry.Builtin() // youtube: 0 zapret, 1 zapret, 2 vpn
+	b := New(bus, reg, fakeKB{alt: "alt10"}, DefaultConfig(), nil, discardLogger())
+	b.Restore(map[string]int{"youtube": 2})             // escalated to VPN
+	b.SetPathOracle(fakeOracle{rec: map[int]int{2: 0}}) // from pos2, pos0 is stably healthy
+
+	b.recoverViaOracle()
+	d := readDesired(t, bus)
+	if d.Position != 0 || d.State != registry.StatePreferred {
+		t.Fatalf("E-4 recovery: got pos=%d state=%s, want 0/PREFERRED (best lower tier)", d.Position, d.State)
+	}
 }
 
 // TestPathOracleJumpsToBestWorkingTier: escalation-v2 E-2 — Brain escalates

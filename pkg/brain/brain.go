@@ -42,12 +42,15 @@ type Smarts struct {
 // SetSmarts enables the intelligence layer. Call before Run.
 func (b *Brain) SetSmarts(s *Smarts) { b.smarts = s }
 
-// PathOracle gives Brain the empirical health of a service's chain (escalation-v2
-// E-2). NextWorking returns the lowest position STRICTLY ABOVE `above` that the
-// out-of-band path-health detector last saw HEALTHY, or -1 if none/unknown. Brain
-// uses it to jump straight to the best working tier instead of one rung at a time.
+// PathOracle gives Brain the empirical health of a service's chain (escalation-v2).
+// NextWorking returns the lowest position STRICTLY ABOVE `above` last seen HEALTHY
+// (E-2, leave-fast escalation). RecoverTarget returns the lowest position STRICTLY
+// BELOW `below` that has been STABLY healthy (E-4, return-slow recovery). Both
+// return -1 if none/unknown. Brain uses them to jump straight to the best working
+// tier instead of walking the chain one rung at a time.
 type PathOracle interface {
 	NextWorking(service string, above int) int
+	RecoverTarget(service string, below int) int
 }
 
 // SetPathOracle enables empirical escalation jumps (E-2). Independent of Smarts;
@@ -223,8 +226,33 @@ func (b *Brain) Run(ctx context.Context) {
 		case a := <-b.bus.ActualState:
 			b.onActual(a)
 		case <-tick:
+			b.recoverViaOracle()
 			b.reassert()
 		}
+	}
+}
+
+// recoverViaOracle is escalation-v2 E-4: parallel recovery. Instead of climbing
+// back one silent rung at a time, it asks the path-health detector (which probes
+// every tier each scan) for the lowest STABLY-healthy position below current and
+// recovers straight to it. No-op unless a PathOracle is wired (-path-health-act).
+func (b *Brain) recoverViaOracle() {
+	if b.pathOracle == nil {
+		return
+	}
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	for _, rt := range b.runtimes {
+		if rt.position == 0 || rt.svc.Static {
+			continue
+		}
+		target := b.pathOracle.RecoverTarget(rt.svc.Name, rt.position)
+		if target < 0 || target >= rt.position {
+			continue
+		}
+		b.log.Info("path-health recovery to best lower tier (parallel, skip one-rung climb)",
+			"service", rt.svc.Name, "from_pos", rt.position, "to_pos", target)
+		b.recoverToLocked(rt, target)
 	}
 }
 
