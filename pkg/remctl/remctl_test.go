@@ -407,3 +407,47 @@ func TestRemediationFor(t *testing.T) {
 		t.Errorf("ip-fallback mapping wrong: %+v", ipf)
 	}
 }
+
+// LOT-19: with a memory recommending reject-quic for the leak class, a fresh
+// confirmed leak (whose planner default WITH CIDRs would be rung-1 ip-fallback)
+// jumps straight to rung 2 (reject-quic) instead.
+func TestMemoryJumpsToKnownRung(t *testing.T) {
+	fa := &fakeActions{}
+	mem := remediate.NewMemory()
+	mem.Record("youtube", misroute.KindLeak, remediate.ActionRejectQUIC, true)
+	mem.Record("youtube", misroute.KindLeak, remediate.ActionRejectQUIC, true)
+	c := New(DefaultConfig(), fa.actions(), nil)
+	c.SetMemory(mem)
+
+	_, n, _ := net.ParseCIDR("142.251.0.0/16")
+	in := Inputs{CIDRs: map[string][]*net.IPNet{"youtube": {n}}} // default would be rung 1
+
+	for i := 0; i < 3; i++ { // N=3 hysteresis
+		c.Pass([]misroute.Verdict{leak("youtube")}, in)
+	}
+	if len(fa.applies) != 1 {
+		t.Fatalf("applies=%d, want 1", len(fa.applies))
+	}
+	if fa.applies[0].rung != 2 {
+		t.Errorf("memory recommending reject-quic must jump to rung 2, got rung %d", fa.applies[0].rung)
+	}
+}
+
+// LOT-19: a remediation whose canary resolves is recorded as working for that
+// (service, failure-class), so a later Best() recommends it.
+func TestMemoryRecordsResolvedOutcome(t *testing.T) {
+	fa := &fakeActions{}
+	mem := remediate.NewMemory()
+	c := New(DefaultConfig(), fa.actions(), nil)
+	c.SetMemory(mem)
+	in := noCIDRs() // dead -> reject-quic (rung 2)
+
+	for i := 0; i < 3; i++ { // apply after hysteresis
+		c.Pass([]misroute.Verdict{dead("youtube")}, in)
+	}
+	c.Pass([]misroute.Verdict{healthy("youtube")}, in) // canary resolves
+
+	if a, ok := mem.Best("youtube", misroute.KindDead); !ok || a != remediate.ActionRejectQUIC {
+		t.Errorf("resolved reject-quic must be remembered, Best=(%q,%v)", a, ok)
+	}
+}
