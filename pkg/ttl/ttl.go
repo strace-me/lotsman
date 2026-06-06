@@ -7,6 +7,9 @@
 // The math here is pure. Capturing the TTL of the DPI's injected RST (the most
 // reliable signal) needs a raw socket on the router and is done elsewhere; the
 // traceroute parser is a portable fallback.
+//
+// Deferred (LOT-10): build-ahead, no callers yet. Wire it when desync strategies
+// gain a TTL parameter (--dpi-desync-ttl / autottl) — see LOT-11 mapping.
 package ttl
 
 import (
