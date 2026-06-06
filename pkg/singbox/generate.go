@@ -257,6 +257,51 @@ func svcRule(match map[string]any, target string, fragment bool) map[string]any 
 	return match
 }
 
+// RemRuleSetSource renders a sing-box LOCAL rule_set in source format (version 2)
+// holding the given domain suffixes + ip_cidrs. It is the TOGGLE FILE the armed
+// remediation controller writes to arm/disarm a reject-QUIC or ip-fallback rule
+// WITHOUT restarting sing-box: a permanent route rule matches this rule_set, and
+// sing-box hot-reloads the local rule_set file on change (since 1.10.0) — so apply/
+// revert is a file write, not a config rebuild + restart that drops all connections
+// (LOT-34). Empty inputs render an empty rule set (matches nothing = disarmed/inert).
+func RemRuleSetSource(domainSuffixes, ipCIDRs []string) []byte {
+	type srcRule struct {
+		DomainSuffix []string `json:"domain_suffix,omitempty"`
+		IPCIDR       []string `json:"ip_cidr,omitempty"`
+	}
+	doc := struct {
+		Version int       `json:"version"`
+		Rules   []srcRule `json:"rules"`
+	}{Version: 2, Rules: []srcRule{}}
+	r := srcRule{DomainSuffix: sortedUniqueLower(domainSuffixes), IPCIDR: sortedUnique(ipCIDRs)}
+	if len(r.DomainSuffix) > 0 || len(r.IPCIDR) > 0 {
+		doc.Rules = append(doc.Rules, r)
+	}
+	b, _ := json.MarshalIndent(doc, "", "  ")
+	return append(b, '\n')
+}
+
+func sortedUnique(in []string) []string {
+	seen := map[string]bool{}
+	var out []string
+	for _, s := range in {
+		if s = strings.TrimSpace(s); s != "" && !seen[s] {
+			seen[s] = true
+			out = append(out, s)
+		}
+	}
+	sort.Strings(out)
+	return out
+}
+
+func sortedUniqueLower(in []string) []string {
+	low := make([]string, len(in))
+	for i, s := range in {
+		low[i] = strings.ToLower(s)
+	}
+	return sortedUnique(low)
+}
+
 // rejectQUICRules builds the reject-QUIC route rules for a service (LOT-18): one
 // rule per match kind (rule_set / domain_suffix / ip_cidr), each constrained to
 // network:["udp"], port:[443] with action:"reject". One rule per match kind
