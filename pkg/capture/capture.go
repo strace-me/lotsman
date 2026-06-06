@@ -40,6 +40,20 @@ type Model struct {
 	// traffic CLASS — IP-set/port — never by device. Empty = no bypass (DefaultModel
 	// stays byte-identical to the legacy capture).
 	BypassSets []Bypass
+
+	// DeviceBypass (TM-6) is the device-level OVERRIDE: traffic from these source
+	// addresses skips tproxy (kernel-direct) regardless of class — the explicit
+	// opt-in exception ("this TV is direct-only"), an override ON TOP of the
+	// class-based default, never the default mechanism. Empty = none.
+	DeviceBypass []Device
+}
+
+// Device is a device-level capture override (TM-6): its source addresses return
+// before tproxy (kernel-direct). Use sparingly — it is the per-device escape
+// hatch, not how treatment is normally decided (that is by traffic class).
+type Device struct {
+	Name     string   // label (parental control / "TV direct-only"), not emitted
+	SrcCIDRs []string // device source IP/subnet (saddr)
 }
 
 // Bypass is one treatment=bypass matcher: traffic matching it returns before the
@@ -84,6 +98,12 @@ func GenerateNft(m Model) []byte {
 	}
 	if len(m.BypassUDPPorts) > 0 {
 		fmt.Fprintf(&b, "\t\tudp dport %s return\n", portSet(m.BypassUDPPorts))
+	}
+	// TM-6 device override: per-device kernel-direct, BEFORE class bypass and tproxy.
+	for _, d := range m.DeviceBypass {
+		if len(d.SrcCIDRs) > 0 {
+			fmt.Fprintf(&b, "\t\tip saddr %s return\n", daddrSet(d.SrcCIDRs))
+		}
 	}
 	// TM-3 bypass: kernel-direct returns for NAT-sensitive classes, BEFORE tproxy.
 	for _, bp := range m.BypassSets {

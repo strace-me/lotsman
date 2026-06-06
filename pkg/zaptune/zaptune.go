@@ -233,6 +233,34 @@ func RecipesFromDefinitions(defs []strategy.Definition) []strategycat.Recipe {
 	return out
 }
 
+// PromoteToRecipe turns a v7-tuner WINNER (a strategy already rendered to its
+// engine's nfqws desync args, e.g. ["--dpi-desync=multisplit","--dpi-desync-split-pos=2"])
+// into a composable Recipe for svc — the generated-side analogue of
+// RecipesFromDefinitions. It scopes the technique with the service's primary
+// target-class default filter and {{DOMAINS}}, so the new winner can immediately
+// compete in composition and be persisted to the catalog. id is the stable
+// strategy id (desynctune.StrategyID(args)). ok=false when the service's class has
+// no safe blanket filter (e.g. games) — promote nothing rather than an unscoped block.
+func PromoteToRecipe(svc registry.Service, id string, renderedArgs []string) (strategycat.Recipe, bool) {
+	if id == "" || len(renderedArgs) == 0 {
+		return strategycat.Recipe{}, false
+	}
+	classes := classesFor(svc)
+	if len(classes) == 0 {
+		return strategycat.Recipe{}, false
+	}
+	class := classes[0] // the service's primary class
+	filter, ok := discoveredClassFilter[class]
+	if !ok {
+		return strategycat.Recipe{}, false // unscopable (games): no blanket default
+	}
+	args := make([]string, 0, len(filter)+1+len(renderedArgs))
+	args = append(args, filter...)
+	args = append(args, "--hostlist-domains={{DOMAINS}}")
+	args = append(args, renderedArgs...)
+	return strategycat.Recipe{ID: id, Provenance: "generated", TargetClass: class, NfqwsArgs: args}, true
+}
+
 // KBPicker (LOT-10c) ranks candidates by a learned success score (higher first),
 // keeping catalog order as the tiebreak — so a COLD KB (all scores equal to the
 // prior) picks the first candidate exactly like FirstPicker, and as recipes prove
