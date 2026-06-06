@@ -394,3 +394,109 @@ func TestPathOracleNoDataFallsBackToOneRung(t *testing.T) {
 		t.Fatalf("no oracle data: got pos=%d, want 1 (one-rung fallback)", d.Position)
 	}
 }
+
+// threeStepReg builds a youtube service with the canonical 3-rung chain
+// (PREFERRED zapret -> ALT_ZAPRET zapret -> VPN), so escalation from pos 1 to
+// pos 2 is observable — distinguishing "settling gated it" from "end of chain".
+func threeStepReg() *registry.Registry {
+	return &registry.Registry{Services: map[string]registry.Service{
+		"youtube": {
+			Name: "youtube",
+			Chain: []registry.ChainStep{
+				{Position: 0, State: registry.StatePreferred, StrategyClass: strategy.ClassZapret, StrategyID: "alt12"},
+				{Position: 1, State: registry.StateAltZapret, StrategyClass: strategy.ClassZapret},
+				{Position: 2, State: registry.StateVPN, StrategyClass: strategy.ClassVPN, StrategyID: "vpn_url_test"},
+			},
+		},
+	}}
+}
+
+// LOT-13 (audit §4): a freshly-switched strategy gets a settling window during
+// which active-position failures are IGNORED (don't immediately re-escalate the
+// rung we just moved to). EscalateFails:1 makes an un-gated fail escalate at once,
+// so the absence of a climb to pos 2 proves the gate. Positive control:
+// TestEscalateThenRecover runs the same climb with SettlingWindow:0 and DOES climb.
+func TestSettlingWindowIgnoresActiveFailures(t *testing.T) {
+	bus := events.NewBus()
+	cfg := Config{EscalateFails: 1, RecoverSuccess: 5, SettlingWindow: time.Minute}
+	b := New(bus, threeStepReg(), fakeKB{alt: "alt10"}, cfg, nil, discardLogger())
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go b.Run(ctx)
+
+	readDesired(t, bus) // init pos 0 (settlingUntil zero -> not gated)
+	sendVerdict(bus, 0, false)
+	if d := readDesired(t, bus); d.Position != 1 {
+		t.Fatalf("first fail must escalate pos0->1, got %d", d.Position)
+	}
+	// At pos 1 the settling window is open. Active-position fails are ignored.
+	for i := 0; i < 3; i++ {
+		sendVerdict(bus, 1, false)
+	}
+	expectNoDesired(t, bus, 200*time.Millisecond)
+}
+
+// LOT-13 (audit §4): the settling window gates ONLY the active position. Silent
+// recovery probes a LOWER (preferred) position, so they are NOT gated — recovery
+// proceeds even while the just-switched rung is still settling.
+func TestSettlingDoesNotGateSilentRecovery(t *testing.T) {
+	bus := events.NewBus()
+	cfg := Config{EscalateFails: 1, RecoverSuccess: 2, SettlingWindow: time.Minute}
+	b := New(bus, threeStepReg(), fakeKB{alt: "alt10"}, cfg, nil, discardLogger())
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go b.Run(ctx)
+
+	readDesired(t, bus) // init pos 0
+	sendVerdict(bus, 0, false)
+	if d := readDesired(t, bus); d.Position != 1 {
+		t.Fatalf("escalate pos0->1: got %d", d.Position)
+	}
+	// Settling open at pos 1; silent successes at the lower pos 0 still accumulate.
+	sendVerdict(bus, 0, true)
+	sendVerdict(bus, 0, true) // == RecoverSuccess
+	if d := readDesired(t, bus); d.Position != 0 {
+		t.Fatalf("silent recovery must proceed during settling: got pos=%d, want 0", d.Position)
+	}
+}
+
+// LOT-13 (audit §4): reassert is a non-blocking re-converge nudge. When the
+// applier is busy (DesiredState saturated) the nudge is DROPPED and retried next
+// tick — it must never block the Brain's Run loop.
+func TestReassertDropsUnderBackpressure(t *testing.T) {
+	bus := events.NewBus()
+	b := New(bus, twoStepReg(false, 3), fakeKB{alt: "alt10"}, Config{EscalateFails: 3}, nil, discardLogger())
+
+	// Saturate DesiredState so the applier looks busy.
+	filled := 0
+	for {
+		select {
+		case bus.DesiredState <- events.DesiredStateChanged{Service: "filler"}:
+			filled++
+			continue
+		default:
+		}
+		break
+	}
+	if filled == 0 {
+		t.Fatal("DesiredState has no buffer to saturate")
+	}
+
+	done := make(chan struct{})
+	go func() { b.Reassert(); close(done) }()
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("reassert blocked under backpressure (must drop, not block)")
+	}
+
+	// Nothing new was enqueued — the youtube reassert was dropped, all slots fillers.
+	if got := len(bus.DesiredState); got != filled {
+		t.Errorf("reassert enqueued under backpressure (len=%d, want %d): drop not honored", got, filled)
+	}
+	for i := 0; i < filled; i++ {
+		if d := <-bus.DesiredState; d.Service != "filler" {
+			t.Errorf("found %q in queue — reassert was not dropped", d.Service)
+		}
+	}
+}
