@@ -378,8 +378,21 @@ func main() {
 		for name, svc := range reg.Services {
 			specs[name] = dataplane.ServiceProbe{Type: svc.ProbeType, Target: svc.ProbeTarget}
 		}
-		prober = dataplane.NewMultiProberProxy(specs, *probeProxy)
-		directProber = dataplane.NewMultiProber(specs)
+		mp := dataplane.NewMultiProberProxy(specs, *probeProxy)
+		dp := dataplane.NewMultiProber(specs)
+		// Per-rung probe overrides (LOT-3): a chain step may pin its own probe type/
+		// target (e.g. QUIC on the direct/zapret rungs, HTTP on the VPN rung).
+		for name, svc := range reg.Services {
+			for _, step := range svc.Chain {
+				if step.ProbeType != "" {
+					sp := dataplane.ServiceProbe{Type: step.ProbeType, Target: step.ProbeTarget}
+					mp.OverrideRung(name, step.Position, sp)
+					dp.OverrideRung(name, step.Position, sp)
+				}
+			}
+		}
+		prober = mp
+		directProber = dp
 		if *probeProxy != "" {
 			log.Info("probing through sing-box socks inbound", "proxy", *probeProxy)
 		}
