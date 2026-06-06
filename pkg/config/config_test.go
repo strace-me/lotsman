@@ -287,6 +287,25 @@ services:
 	}
 }
 
+func TestServiceExcludeDomains(t *testing.T) {
+	in := `
+services:
+  - name: gaming-epic
+    category: gaming
+    probe_target: https://x
+    domains: [fortnite.com]
+    exclude_domains: [epicgames-download1.akamaized.net, download.eac-cdn.com]
+`
+	cfg, err := Parse([]byte(in))
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	svc := cfg.Registry.Services["gaming-epic"]
+	if len(svc.ExcludeDomains) != 2 || svc.ExcludeDomains[0] != "epicgames-download1.akamaized.net" {
+		t.Errorf("exclude_domains = %v, want the two raw-pass CDNs", svc.ExcludeDomains)
+	}
+}
+
 func TestServiceIPsFileMerge(t *testing.T) {
 	dir := t.TempDir()
 	path := dir + "/voice.cidr"

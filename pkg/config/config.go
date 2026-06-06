@@ -149,22 +149,23 @@ type captureYAML struct {
 }
 
 type serviceYAML struct {
-	Name          string          `yaml:"name"`
-	Category      string          `yaml:"category"`
-	ProbeType     string          `yaml:"probe_type"`
-	ProbeTarget   string          `yaml:"probe_target"`
-	RuleSets      []string        `yaml:"rule_sets"`
-	Domains       []string        `yaml:"domains"`
-	IPs           []string        `yaml:"ips"`
-	IPsFile       string          `yaml:"ips_file"` // optional file of extra CIDRs (one per line, # comments); merged into IPs. Home for runtime-learned sets (e.g. Discord voice).
-	Sticky        bool            `yaml:"sticky"`
-	Profile       string          `yaml:"profile"`
-	Static        bool            `yaml:"static"`
-	EscalateAfter int             `yaml:"escalate_after"`
-	RecoverAfter  int             `yaml:"recover_after"`
-	Priority      int             `yaml:"priority"`
-	TLSFragment   bool            `yaml:"tls_fragment"`
-	Chain         []chainStepYAML `yaml:"chain"`
+	Name           string          `yaml:"name"`
+	Category       string          `yaml:"category"`
+	ProbeType      string          `yaml:"probe_type"`
+	ProbeTarget    string          `yaml:"probe_target"`
+	RuleSets       []string        `yaml:"rule_sets"`
+	Domains        []string        `yaml:"domains"`
+	ExcludeDomains []string        `yaml:"exclude_domains"` // raw-pass through nfqws desync (composer --hostlist-exclude; LOT-36 CDNs)
+	IPs            []string        `yaml:"ips"`
+	IPsFile        string          `yaml:"ips_file"` // optional file of extra CIDRs (one per line, # comments); merged into IPs. Home for runtime-learned sets (e.g. Discord voice).
+	Sticky         bool            `yaml:"sticky"`
+	Profile        string          `yaml:"profile"`
+	Static         bool            `yaml:"static"`
+	EscalateAfter  int             `yaml:"escalate_after"`
+	RecoverAfter   int             `yaml:"recover_after"`
+	Priority       int             `yaml:"priority"`
+	TLSFragment    bool            `yaml:"tls_fragment"`
+	Chain          []chainStepYAML `yaml:"chain"`
 }
 
 type chainStepYAML struct {
@@ -395,21 +396,22 @@ func buildRegistry(svcs []serviceYAML, cats map[string]registry.Category) (*regi
 			return nil, fmt.Errorf("config: service %q: unknown profile %q (want general/voice/streaming/gaming)", s.Name, s.Profile)
 		}
 		reg.Services[s.Name] = registry.Service{
-			Name:          s.Name,
-			Category:      s.Category,
-			ProbeType:     s.ProbeType,
-			ProbeTarget:   s.ProbeTarget,
-			RuleSets:      s.RuleSets,
-			Domains:       s.Domains,
-			IPs:           ips,
-			Sticky:        s.Sticky,
-			Profile:       s.Profile,
-			Static:        s.Static,
-			EscalateAfter: s.EscalateAfter,
-			RecoverAfter:  s.RecoverAfter,
-			Priority:      s.Priority,
-			TLSFragment:   s.TLSFragment,
-			Chain:         chain,
+			Name:           s.Name,
+			Category:       s.Category,
+			ProbeType:      s.ProbeType,
+			ProbeTarget:    s.ProbeTarget,
+			RuleSets:       s.RuleSets,
+			Domains:        s.Domains,
+			ExcludeDomains: s.ExcludeDomains,
+			IPs:            ips,
+			Sticky:         s.Sticky,
+			Profile:        s.Profile,
+			Static:         s.Static,
+			EscalateAfter:  s.EscalateAfter,
+			RecoverAfter:   s.RecoverAfter,
+			Priority:       s.Priority,
+			TLSFragment:    s.TLSFragment,
+			Chain:          chain,
 		}
 	}
 	return reg, nil
