@@ -49,3 +49,23 @@ func TestComposeEmpty(t *testing.T) {
 		t.Errorf("Compose(nil) = %v, want empty", got)
 	}
 }
+
+// LOT-14/LOT-36: a block's Exclude domains are emitted as --hostlist-exclude-domains
+// after its recipe args (raw-pass CDNs); a block without Exclude is unchanged.
+func TestComposeEmitsExclude(t *testing.T) {
+	blocks := []Block{
+		{Service: "gaming-epic", Domains: []string{"fortnite.com"},
+			Recipe:  recipe("--filter-tcp=443", "--hostlist-domains={{DOMAINS}}", "--dpi-desync=fake"),
+			Exclude: []string{"epicgames-download1.akamaized.net", "modules-cdn.eac-prod.on.epicgames.com"}},
+	}
+	got := strings.Join(Compose(blocks), " ")
+	want := "--hostlist-exclude-domains=epicgames-download1.akamaized.net,modules-cdn.eac-prod.on.epicgames.com"
+	if !strings.Contains(got, want) {
+		t.Errorf("Compose missing exclude:\n  %s", got)
+	}
+	// no Exclude -> no exclude arg (byte-identical to before).
+	plain := Compose([]Block{{Service: "x", Domains: []string{"y.com"}, Recipe: recipe("--hostlist-domains={{DOMAINS}}")}})
+	if strings.Contains(strings.Join(plain, " "), "exclude") {
+		t.Errorf("block without Exclude must emit no exclude arg, got %v", plain)
+	}
+}

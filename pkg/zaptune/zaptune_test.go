@@ -44,7 +44,7 @@ func TestCandidateRecipesByClass(t *testing.T) {
 
 func TestBlockForKeepsServiceWhole(t *testing.T) {
 	svc := registry.Service{Name: "gaming-battlenet", Domains: []string{"battle.net", "blizzard.com", "bnetcdn.com"}}
-	block := BlockFor(svc, rec("gen1", strategycat.ClassGeneralTLS), svc.Domains)
+	block := BlockFor(svc, rec("gen1", strategycat.ClassGeneralTLS), svc.Domains, nil)
 	// the ONE block must carry ALL the service's domains — never a per-domain split.
 	if block.Service != "gaming-battlenet" {
 		t.Errorf("block service = %q", block.Service)
