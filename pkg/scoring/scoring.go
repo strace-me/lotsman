@@ -8,9 +8,16 @@
 // Deferred (LOT-11/LOT-10): build-ahead, no callers yet. On review this is NOT a
 // strict duplicate of pkg/balancer: it ranks STRATEGIES from learned KB history
 // (kb.Stats), whereas balancer ranks NODES from fresh probe quality (different
-// ranked entity, different data source). Kept (not folded into balancer) — wire
-// it when LOT-10 needs multi-axis (latency/jitter/loss) strategy scoring beyond
-// the KB's success-only TopNZapret. Delete only if that path is abandoned.
+// ranked entity, different data source, and deliberately different math — hard-
+// ceiling weighted-sum here vs inverse weighted-average in balancer). Kept (not
+// folded) — wire it when LOT-10 needs multi-axis (latency/jitter/loss) strategy
+// scoring beyond the KB's success-only TopNZapret.
+//
+// Unification path (do at wiring time, not before — avoids touching live
+// balancer for no current benefit): adapt kb.Stats into a balancer.Candidate
+// (success/loss/rtt/jitter -> quality.Quality) and reuse balancer.Score, then
+// delete this package. That folds the two into one scorer without changing
+// balancer's live node-ranking behavior today.
 package scoring
 
 import "github.com/strace-me/lotsman/pkg/kb"
