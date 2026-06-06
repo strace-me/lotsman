@@ -52,3 +52,36 @@ func TestSingleElementSetsHaveNoBraces(t *testing.T) {
 		t.Error("a single UDP port must render without braces")
 	}
 }
+
+func TestBypassRulesRenderBeforeTproxy(t *testing.T) {
+	m := DefaultModel()
+	m.BypassSets = []Bypass{
+		{Name: "discord-voice", Proto: "udp", DstCIDRs: []string{"66.22.192.0/18"}, DstPorts: []string{"50000-65535"}},
+		{Name: "xbox-game", Proto: "udp", DstPorts: []string{"3074", "30000-45000"}},
+		{Name: "valve", DstCIDRs: []string{"155.133.248.0/24"}}, // ip-only, any proto
+	}
+	out := string(GenerateNft(m))
+
+	wantVoice := "ip daddr 66.22.192.0/18 udp dport 50000-65535 return"
+	wantXbox := "udp dport { 3074, 30000-45000 } return"
+	wantValve := "ip daddr 155.133.248.0/24 return"
+	for _, w := range []string{wantVoice, wantXbox, wantValve} {
+		if !strings.Contains(out, w) {
+			t.Errorf("missing bypass rule %q in:\n%s", w, out)
+		}
+	}
+	// Each bypass return must come BEFORE the tproxy rule (kernel-direct wins).
+	tproxyIdx := strings.Index(out, "tproxy to")
+	for _, w := range []string{wantVoice, wantXbox, wantValve} {
+		if strings.Index(out, w) > tproxyIdx {
+			t.Errorf("bypass %q must precede tproxy rule", w)
+		}
+	}
+}
+
+func TestDefaultModelHasNoBypass(t *testing.T) {
+	// TM-3 must not change the byte-identical default (no BypassSets => legacy table).
+	if string(GenerateNft(DefaultModel())) != liveSingboxTable {
+		t.Error("DefaultModel (no bypass) must stay byte-identical to live")
+	}
+}
