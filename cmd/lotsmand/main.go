@@ -109,6 +109,7 @@ func main() {
 		pathHealthURL   = flag.String("path-health-test-url", "http://www.gstatic.com/generate_204", "generic connectivity URL for the vpn-tier NodeDelay probe of non-HTTP (tcp/stun) services")
 		captureLearn    = flag.Bool("capture-learn", false, "TM-5 PROPOSE-ONLY: learn NAT-sensitive flows (game/voice UDP) from clash connections and reconcile the capture nft table (Lotsman-owned tproxy) with bypass `return` rules for them. Logs what it would change; does NOT apply (no -capture-arm yet). DEFAULT OFF.")
 		captureRuleset  = flag.String("capture-ruleset-file", "/etc/nftables.d/10-lotsman-capture.nft", "path the capture reconciler writes the generated nft table to (only when armed)")
+		captureArm      = flag.Bool("capture-arm", false, "ARM the capture reconciler (TM-2c): it becomes the single writer of the tproxy nft table — validate (nft -c) → backup → atomic add+delete+recreate (nft -f) → rollback on failure. Requires -capture-learn; DEFAULT OFF (propose-only).")
 		pathHealthAct   = flag.Bool("path-health-act", false, "escalation-v2 ACT (E-2): let Brain escalate straight to the best WORKING tier from the path-health detector (skip known-down rungs) instead of one rung at a time. Requires -path-health. DEFAULT OFF.")
 		smart           = flag.Bool("smart", true, "enable the intelligence layer (policy/correlate/damper/adaptive/anomaly) in escalation decisions")
 		checkInterval   = flag.Duration("check-interval", 0, "run background maintenance (Flowseal update, subscription refresh) every interval (0 = disabled)")
@@ -747,6 +748,13 @@ func main() {
 			},
 			Log: log,
 		}
+		captureArmed := false
+		if *captureArm && !*dryRun {
+			capRec.Arm()
+			captureArmed = true
+		} else if *captureArm && *dryRun {
+			log.Warn("capture-arm requested but -dry-run set; staying PROPOSE-ONLY")
+		}
 		clp := periodic.New(log)
 		clp.Add(periodic.Task{Name: "capture-learn", Interval: *observeInterval, RunAtStart: true, Fn: func(c context.Context) error {
 			conns, err := clash.Connections(c)
@@ -766,7 +774,7 @@ func main() {
 			return capRec.Reconcile(c)
 		}})
 		runners = append(runners, clp.Run)
-		log.Info("capture-learn enabled (TM-5, propose-only)", "interval", observeInterval.String(), "ruleset", *captureRuleset)
+		log.Info("capture-learn enabled (TM-5)", "interval", observeInterval.String(), "ruleset", *captureRuleset, "armed", captureArmed)
 	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
