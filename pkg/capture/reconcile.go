@@ -30,9 +30,22 @@ type Reconciler struct {
 	LiveTable   func(ctx context.Context) ([]byte, error) // returns `nft list table ip <name>` output
 	NftBin      string                                    // nft binary ("" => "nft")
 	Now         func() time.Time                          // injectable clock (nil = time.Now)
+	DynBypass   func() []Bypass                           // TM-5: learned bypass sets, appended to Model.BypassSets each pass (nil = none)
 	Log         *slog.Logger
 
 	armed bool
+}
+
+// effectiveModel folds the learned (dynamic) bypass sets into the base model, so
+// the generated table reflects what the Eye learned this pass.
+func (r *Reconciler) effectiveModel() Model {
+	m := r.Model
+	if r.DynBypass != nil {
+		if dyn := r.DynBypass(); len(dyn) > 0 {
+			m.BypassSets = append(append([]Bypass{}, m.BypassSets...), dyn...)
+		}
+	}
+	return m
 }
 
 // Arm makes the reconciler the single writer of the capture table (validate +
@@ -43,7 +56,8 @@ func (r *Reconciler) Arm() { r.armed = true }
 // one, and (propose-only) log a needed change or (armed) atomically apply it.
 // No-op when desired == live (churn-guard). Shaped as periodic.Task.Fn.
 func (r *Reconciler) Reconcile(ctx context.Context) error {
-	desired := GenerateNft(r.Model)
+	model := r.effectiveModel()
+	desired := GenerateNft(model)
 	live, err := r.LiveTable(ctx)
 	if err != nil {
 		// Can't read live (table missing on a fresh boot, or nft hiccup): treat as
@@ -55,17 +69,17 @@ func (r *Reconciler) Reconcile(ctx context.Context) error {
 		return nil // parity: nothing to do (no eMMC write, no nft churn)
 	}
 
-	apply := applyScript(r.Model)
+	apply := applyScript(model)
 	if err := r.validate(ctx, apply); err != nil {
 		return fmt.Errorf("capture: nft validation failed (not applied): %w", err)
 	}
 
 	if !r.armed {
 		r.log().Info("capture: table differs and passes nft -c (PROPOSE-ONLY, not applied)",
-			"path", r.RulesetPath, "desired_bytes", len(desired), "live_bytes", len(live))
+			"path", r.RulesetPath, "bypass_sets", len(model.BypassSets), "desired_bytes", len(desired), "live_bytes", len(live))
 		return nil
 	}
-	return r.apply(ctx, apply, live)
+	return r.apply(ctx, model, apply, live)
 }
 
 // applyScript wraps the desired table in an atomic delete-and-recreate so a single
@@ -96,7 +110,7 @@ func (r *Reconciler) validate(ctx context.Context, script []byte) error {
 // apply backs up the live table, writes the desired ruleset, loads it atomically,
 // and verifies the table now matches desired — rolling back to the previous live
 // table if the load or verify fails.
-func (r *Reconciler) apply(ctx context.Context, script, live []byte) error {
+func (r *Reconciler) apply(ctx context.Context, model Model, script, live []byte) error {
 	if r.BackupDir != "" && len(live) > 0 {
 		bak := filepath.Join(r.BackupDir, "capture-"+r.now().Format("20060102-150405")+".nft")
 		if err := os.WriteFile(bak, live, 0o644); err != nil {
@@ -112,7 +126,7 @@ func (r *Reconciler) apply(ctx context.Context, script, live []byte) error {
 	}
 	// Verify the live table now matches desired; if not, roll back.
 	if now, err := r.LiveTable(ctx); err == nil {
-		if !bytes.Equal(bytes.TrimSpace(GenerateNft(r.Model)), bytes.TrimSpace(now)) {
+		if !bytes.Equal(bytes.TrimSpace(GenerateNft(model)), bytes.TrimSpace(now)) {
 			r.rollback(ctx, live)
 			return fmt.Errorf("capture: post-apply table mismatch, rolled back")
 		}
