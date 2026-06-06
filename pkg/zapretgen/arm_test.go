@@ -38,7 +38,7 @@ func (f *fakeRunner) symlinkTargets() []string {
 	return out
 }
 
-func discordArmed(t *testing.T, probe func(context.Context, string) bool, rec func(string, string, bool)) (*Reconciler, *fakeRunner) {
+func discordArmed(t *testing.T, probe func(context.Context, registry.Service) bool, rec func(string, string, bool)) (*Reconciler, *fakeRunner) {
 	t.Helper()
 	svc := registry.Service{
 		Name: "discord", Profile: "voice", ProbeTarget: "https://discord.com/api/v9/gateway",
@@ -58,7 +58,7 @@ func discordArmed(t *testing.T, probe func(context.Context, string) bool, rec fu
 
 func TestArmCanaryPassCommitsLKG(t *testing.T) {
 	var recorded []string
-	r, run := discordArmed(t, func(context.Context, string) bool { return true }, func(svc, id string, ok bool) {
+	r, run := discordArmed(t, func(context.Context, registry.Service) bool { return true }, func(svc, id string, ok bool) {
 		recorded = append(recorded, svc+"/"+id+"/"+boolStr(ok))
 	})
 	if err := r.Reconcile(context.Background()); err != nil {
@@ -79,7 +79,7 @@ func TestArmCanaryPassCommitsLKG(t *testing.T) {
 func TestArmCanaryFailRollsBackToLKGAndDemotes(t *testing.T) {
 	// Reachable in baseline, unreachable after switch -> degraded -> rollback + fail-record.
 	var calls int
-	probe := func(context.Context, string) bool {
+	probe := func(context.Context, registry.Service) bool {
 		calls++
 		return calls == 1 // first (baseline) ok, all canary probes fail
 	}
@@ -104,7 +104,7 @@ func TestArmCanaryFailRollsBackToLKGAndDemotes(t *testing.T) {
 
 func TestArmRestartFailureRollsBack(t *testing.T) {
 	// The apply restart fails -> rollback to LKG (a second restart, which succeeds).
-	r, run := discordArmed(t, func(context.Context, string) bool { return true }, nil)
+	r, run := discordArmed(t, func(context.Context, registry.Service) bool { return true }, nil)
 	run.failOn, run.failCount = "restart", 1 // only the first restart fails
 	err := r.Reconcile(context.Background())
 	if err == nil {

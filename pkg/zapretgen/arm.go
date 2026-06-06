@@ -30,7 +30,7 @@ func (r *Reconciler) applyArmed(ctx context.Context, active []registry.Service, 
 	baseline := make(map[string]bool, len(active))
 	for _, svc := range active {
 		if svc.ProbeTarget != "" {
-			baseline[svc.Name] = a.Probe(ctx, svc.ProbeTarget)
+			baseline[svc.Name] = a.Probe(ctx, svc)
 		}
 	}
 
@@ -56,7 +56,7 @@ func (r *Reconciler) applyArmed(ctx context.Context, active []registry.Service, 
 		if svc.ProbeTarget == "" || !baseline[svc.Name] {
 			continue
 		}
-		if !r.canaryProbe(ctx, svc.ProbeTarget) {
+		if !r.canaryProbe(ctx, svc) {
 			degraded = append(degraded, svc.Name)
 		}
 	}
@@ -114,13 +114,13 @@ func (r *Reconciler) restart(ctx context.Context) error {
 
 // canaryProbe probes target up to CanaryProbes times; ok if ANY attempt succeeds
 // (a single reachable probe means the path works).
-func (r *Reconciler) canaryProbe(ctx context.Context, target string) bool {
+func (r *Reconciler) canaryProbe(ctx context.Context, svc registry.Service) bool {
 	n := r.arm.CanaryProbes
 	if n < 1 {
 		n = 1
 	}
 	for i := 0; i < n; i++ {
-		if r.arm.Probe(ctx, target) {
+		if r.arm.Probe(ctx, svc) {
 			return true
 		}
 	}
