@@ -79,7 +79,7 @@ func (r *Reconciler) Reconcile(ctx context.Context) error {
 			"path", r.RulesetPath, "bypass_sets", len(model.BypassSets), "desired_bytes", len(desired), "live_bytes", len(live))
 		return nil
 	}
-	return r.apply(ctx, model, apply, live)
+	return r.apply(ctx, apply, live)
 }
 
 // applyScript wraps the desired table in an atomic delete-and-recreate so a single
@@ -110,7 +110,7 @@ func (r *Reconciler) validate(ctx context.Context, script []byte) error {
 // apply backs up the live table, writes the desired ruleset, loads it atomically,
 // and verifies the table now matches desired — rolling back to the previous live
 // table if the load or verify fails.
-func (r *Reconciler) apply(ctx context.Context, model Model, script, live []byte) error {
+func (r *Reconciler) apply(ctx context.Context, script, live []byte) error {
 	if r.BackupDir != "" && len(live) > 0 {
 		bak := filepath.Join(r.BackupDir, "capture-"+r.now().Format("20060102-150405")+".nft")
 		if err := os.WriteFile(bak, live, 0o644); err != nil {
@@ -124,12 +124,14 @@ func (r *Reconciler) apply(ctx context.Context, model Model, script, live []byte
 		r.rollback(ctx, live)
 		return fmt.Errorf("capture: nft -f failed, rolled back: %w", err)
 	}
-	// Verify the live table now matches desired; if not, roll back.
-	if now, err := r.LiveTable(ctx); err == nil {
-		if !bytes.Equal(bytes.TrimSpace(GenerateNft(model)), bytes.TrimSpace(now)) {
-			r.rollback(ctx, live)
-			return fmt.Errorf("capture: post-apply table mismatch, rolled back")
-		}
+	// Sanity (not byte-exact): the script was nft -c validated and nft -f is an
+	// atomic transaction, so a clean load means the table IS what we wrote. We do
+	// NOT byte-compare against `nft list` here — nft re-canonicalises output (set
+	// ordering/merging), so an exact compare could false-trip a rollback even on a
+	// correct load. We only catch a catastrophic load (empty/absent table).
+	if now, err := r.LiveTable(ctx); err == nil && len(bytes.TrimSpace(now)) == 0 {
+		r.rollback(ctx, live)
+		return fmt.Errorf("capture: post-apply table empty, rolled back")
 	}
 	r.log().Info("capture: table reconciled (applied)", "path", r.RulesetPath)
 	return nil

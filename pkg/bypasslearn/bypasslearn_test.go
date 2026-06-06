@@ -37,6 +37,9 @@ func TestClassifierRejects(t *testing.T) {
 		{"private dst", "udp", "10.1.2.3", "30041", 100, 100},
 		{"loopback", "udp", "127.0.0.1", "30041", 100, 100},
 		{"bad ip", "udp", "not-an-ip", "30041", 100, 100},
+		{"ipv6 dst (ip-family table)", "udp", "2606:4700::1111", "30041", 100, 100},
+		{"ipv6 ULA private", "udp", "fd00::1", "30041", 100, 100},
+		{"port over 65535", "udp", "20.190.140.10", "70000", 100, 100},
 	}
 	for _, tc := range cases {
 		if _, ok := c.Candidate(tc.network, tc.ip, tc.port, tc.up, tc.down); ok {
