@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net"
+	"os"
 	"sort"
 	"strconv"
 	"strings"
@@ -82,6 +83,18 @@ type Options struct {
 	FakeIP           *FakeIPOptions         // emit a fakeip DNS section (nil = off)
 	Multiplex        *MultiplexOptions      // default outbound multiplex for TCP proxies (nil = off)
 	Remediations     map[string]Remediation // per-service self-heal remediation rules (nil/absent = no change; LOT-18). Keyed by service name.
+
+	// RemHotReload (LOT-34) emits PERMANENT reject-QUIC + ip-fallback rules that
+	// match LOCAL rule_sets (rem-rq-<svc> / rem-fb-<svc>) whose membership the armed
+	// controller toggles by rewriting the rule_set files (RemRuleSetSource) — which
+	// sing-box hot-reloads (since 1.10.0), so apply/revert never restarts sing-box
+	// (a restart drops ALL connections). When on, these PERMANENT rules replace the
+	// inline opts.Remediations path for RemServices. Off (default) => byte-identical
+	// to the inline behaviour. The toggle files MUST exist before sing-box loads
+	// this config (EnsureRemFiles); RemDir holds them ("" => RuleSetDir).
+	RemHotReload bool
+	RemServices  []string // services that get the permanent rem rule_set scaffold
+	RemDir       string   // dir for the toggle files ("" => RuleSetDir)
 
 	// SubViaHosts/SubViaPool route the subscription-endpoint hosts through a VPN
 	// pool instead of final:direct (LOT-28), so a subscription refresh egresses
@@ -300,6 +313,58 @@ func sortedUniqueLower(in []string) []string {
 		low[i] = strings.ToLower(s)
 	}
 	return sortedUnique(low)
+}
+
+// RemRejectTag / RemFallbackTag are the local rule_set tags for a service's
+// hot-reloadable reject-QUIC / ip-fallback remediation (LOT-34).
+func RemRejectTag(svc string) string   { return "rem-rq-" + svc }
+func RemFallbackTag(svc string) string { return "rem-fb-" + svc }
+
+// RemFilePath is the toggle file for a rem rule_set tag under dir.
+func RemFilePath(dir, tag string) string { return dir + "/" + tag + ".json" }
+
+// remLocalDefs returns the local rule_set definitions for the hot-reload scaffold
+// (LOT-34): a source-format local rule_set per eligible service for reject-QUIC and
+// ip-fallback, each pointing at its toggle file. Empty when RemHotReload is off.
+func remLocalDefs(opts Options) []any {
+	if !opts.RemHotReload {
+		return nil
+	}
+	dir := opts.RemDir
+	if dir == "" {
+		dir = opts.RuleSetDir
+	}
+	svcs := append([]string(nil), opts.RemServices...)
+	sort.Strings(svcs)
+	var out []any
+	for _, s := range svcs {
+		for _, tag := range []string{RemRejectTag(s), RemFallbackTag(s)} {
+			out = append(out, map[string]any{
+				"type": "local", "tag": tag, "format": "source", "path": RemFilePath(dir, tag),
+			})
+		}
+	}
+	return out
+}
+
+// EnsureRemFiles writes an empty (disarmed) toggle file for each service's rem
+// rule_sets if absent — the precondition for sing-box to load a config referencing
+// these local rule_sets (LOT-34). Existing files are preserved (keeps an armed
+// state across restarts). Idempotent.
+func EnsureRemFiles(dir string, services []string) error {
+	empty := RemRuleSetSource(nil, nil)
+	for _, s := range services {
+		for _, tag := range []string{RemRejectTag(s), RemFallbackTag(s)} {
+			p := RemFilePath(dir, tag)
+			if _, err := os.Stat(p); err == nil {
+				continue
+			}
+			if err := os.WriteFile(p, empty, 0o644); err != nil {
+				return fmt.Errorf("ensure rem file %s: %w", p, err)
+			}
+		}
+	}
+	return nil
 }
 
 // rejectQUICRules builds the reject-QUIC route rules for a service (LOT-18): one
@@ -543,6 +608,12 @@ func Generate(services []registry.Service, devices []registry.Device, nodes []su
 	// (voice UDP, ECH, dedicated blocks). Within each tier, service Priority order
 	// (set above) is preserved.
 	allRuleSets := map[string]bool{}
+	remEligible := make(map[string]bool, len(opts.RemServices))
+	if opts.RemHotReload {
+		for _, s := range opts.RemServices {
+			remEligible[s] = true
+		}
+	}
 	var rejectRules, domainRules, ipRules []any
 	for _, svc := range services {
 		if len(svc.RuleSets) == 0 && len(svc.Domains) == 0 && len(svc.IPs) == 0 {
@@ -608,7 +679,19 @@ func Generate(services []registry.Service, devices []registry.Device, nodes []su
 		// added => byte-identical to the no-remediation config. reject-QUIC rules
 		// are collected in their own (earlier) tier so they win over this service's
 		// normal domain/ip rules for udp/443; the IP-fallback rule joins the IP tier.
-		if rem, ok := opts.Remediations[svc.Name]; ok {
+		if opts.RemHotReload && remEligible[svc.Name] {
+			// LOT-34: PERMANENT rules matching toggleable LOCAL rule_sets. The armed
+			// controller arms/reverts by rewriting the rule_set FILES (hot-reload),
+			// never restarting sing-box. Reject-QUIC and ip-fallback live here instead
+			// of the inline (restart-on-change) path below.
+			rejectRules = append(rejectRules, map[string]any{
+				"rule_set": []string{RemRejectTag(svc.Name)},
+				"network":  []string{"udp"}, "port": []int{443}, "action": "reject",
+			})
+			if !svc.DirectOnly() {
+				ipRules = append(ipRules, svcRule(map[string]any{"rule_set": []string{RemFallbackTag(svc.Name)}}, target, frag))
+			}
+		} else if rem, ok := opts.Remediations[svc.Name]; ok {
 			if rem.RejectQUIC {
 				rejectRules = append(rejectRules, rejectQUICRules(svc)...)
 			}
@@ -671,7 +754,7 @@ func Generate(services []registry.Service, devices []registry.Device, nodes []su
 		"inbounds":  inbounds(opts),
 		"outbounds": outbounds,
 		"route": map[string]any{
-			"rule_set":              ruleSetDefs(ruleSetTags, opts.RuleSetDir),
+			"rule_set":              append(ruleSetDefs(ruleSetTags, opts.RuleSetDir), remLocalDefs(opts)...),
 			"rules":                 routeRules,
 			"final":                 "direct",
 			"auto_detect_interface": true,
