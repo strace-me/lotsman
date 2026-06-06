@@ -12,20 +12,23 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/strace-me/lotsman/pkg/brain"
 	"github.com/strace-me/lotsman/pkg/misroute"
 	"github.com/strace-me/lotsman/pkg/observe"
 	"github.com/strace-me/lotsman/pkg/remediate"
+	"github.com/strace-me/lotsman/pkg/subscription"
 )
 
 // Collector gathers metrics and serves them.
 type Collector struct {
-	brainSnap       func() []brain.ServiceState
-	kbSnap          func() map[string]float64
-	observeSnap     func() observe.Snapshot   // optional; nil = observe eye disabled
-	misrouteSnap    func() []misroute.Verdict // optional; nil = misroute detector disabled
-	remediationSnap func() []remediate.Plan   // optional; nil = remediation planner disabled (LOT-18a)
+	brainSnap        func() []brain.ServiceState
+	kbSnap           func() map[string]float64
+	observeSnap      func() observe.Snapshot                 // optional; nil = observe eye disabled
+	misrouteSnap     func() []misroute.Verdict               // optional; nil = misroute detector disabled
+	remediationSnap  func() []remediate.Plan                 // optional; nil = remediation planner disabled (LOT-18a)
+	subscriptionSnap func() map[string]subscription.Userinfo // optional; nil = no subscription userinfo (LOT-7)
 
 	mu        sync.Mutex
 	probeOK   map[string]int
@@ -55,6 +58,13 @@ func (c *Collector) SetMisrouteSnapshot(fn func() []misroute.Verdict) { c.misrou
 // non-none plans; metrics reads it at scrape time and publishes
 // lotsman_service_remediation_proposed. No-op effect until set.
 func (c *Collector) SetRemediationSnapshot(fn func() []remediate.Plan) { c.remediationSnap = fn }
+
+// SetSubscriptionSnapshot wires per-subscription quota/expiry (LOT-7). The
+// function returns the latest userinfo keyed by declaration name; metrics reads
+// it at scrape time and publishes lotsman_subscription_*. No-op until set.
+func (c *Collector) SetSubscriptionSnapshot(fn func() map[string]subscription.Userinfo) {
+	c.subscriptionSnap = fn
+}
 
 // ObserveProbe records a probe outcome. Implements probing.ProbeObserver.
 func (c *Collector) ObserveProbe(service string, ok bool, _ int) {
@@ -179,6 +189,34 @@ func (c *Collector) ServeHTTP(w http.ResponseWriter, _ *http.Request) {
 		b.WriteString("# TYPE lotsman_service_remediation_proposed gauge\n")
 		for _, p := range ps {
 			fmt.Fprintf(&b, "lotsman_service_remediation_proposed{service=%q,action=%q} %d\n", p.Service, p.Action, b2i(p.Action != remediate.ActionNone))
+		}
+	}
+
+	if c.subscriptionSnap != nil {
+		ui := c.subscriptionSnap()
+		subs := make([]string, 0, len(ui))
+		for s := range ui {
+			subs = append(subs, s)
+		}
+		sort.Strings(subs)
+		now := time.Now()
+
+		b.WriteString("# HELP lotsman_subscription_fraction_used Fraction of a subscription's quota consumed (-1 = total unknown/unlimited).\n")
+		b.WriteString("# TYPE lotsman_subscription_fraction_used gauge\n")
+		for _, s := range subs {
+			fmt.Fprintf(&b, "lotsman_subscription_fraction_used{subscription=%q} %s\n", s, strconv.FormatFloat(ui[s].FractionUsed(), 'f', 4, 64))
+		}
+
+		b.WriteString("# HELP lotsman_subscription_days_until_expire Days until a subscription expires (-1 = no expiry, negative = expired).\n")
+		b.WriteString("# TYPE lotsman_subscription_days_until_expire gauge\n")
+		for _, s := range subs {
+			fmt.Fprintf(&b, "lotsman_subscription_days_until_expire{subscription=%q} %s\n", s, strconv.FormatFloat(ui[s].DaysUntilExpire(now), 'f', 2, 64))
+		}
+
+		b.WriteString("# HELP lotsman_subscription_used_bytes Bytes consumed (upload+download) by a subscription.\n")
+		b.WriteString("# TYPE lotsman_subscription_used_bytes gauge\n")
+		for _, s := range subs {
+			fmt.Fprintf(&b, "lotsman_subscription_used_bytes{subscription=%q} %d\n", s, ui[s].Used())
 		}
 	}
 
