@@ -34,6 +34,22 @@ type Model struct {
 	LoopBypassIPs  []string // VPN server IPs returned to avoid a tproxy loop
 	SinkholeCIDRs  []string // ranges returned (e.g. TEST-NET-1 sinkhole)
 	BypassUDPPorts []int    // UDP dports returned before tproxy (e.g. DHCP 67,68)
+
+	// BypassSets (TM-3) are the treatment=bypass matchers: NAT-sensitive traffic
+	// (game-UDP, voice/RTC) that must go kernel-direct (return BEFORE tproxy), by
+	// traffic CLASS — IP-set/port — never by device. Empty = no bypass (DefaultModel
+	// stays byte-identical to the legacy capture).
+	BypassSets []Bypass
+}
+
+// Bypass is one treatment=bypass matcher: traffic matching it returns before the
+// tproxy rule, so it is never pulled into sing-box (kernel-direct, NAT-open via
+// TM-4). At least one of DstCIDRs / DstPorts must be set; Proto scopes the ports.
+type Bypass struct {
+	Name     string   // label (for logs/provenance), not emitted
+	Proto    string   // "udp" | "tcp" | "" (any; required if DstPorts set)
+	DstCIDRs []string // destination IP/CIDR set (game servers, voice endpoints)
+	DstPorts []string // dport values/ranges, e.g. "3478-3481", "30000-45000"
 }
 
 // DefaultModel is the live R5S capture configuration (the byte-identical target).
@@ -69,6 +85,12 @@ func GenerateNft(m Model) []byte {
 	if len(m.BypassUDPPorts) > 0 {
 		fmt.Fprintf(&b, "\t\tudp dport %s return\n", portSet(m.BypassUDPPorts))
 	}
+	// TM-3 bypass: kernel-direct returns for NAT-sensitive classes, BEFORE tproxy.
+	for _, bp := range m.BypassSets {
+		if rule := renderBypass(bp); rule != "" {
+			fmt.Fprintf(&b, "\t\t%s\n", rule)
+		}
+	}
 	for _, proto := range []string{"tcp", "udp"} {
 		fmt.Fprintf(&b, "\t\tiifname %q meta l4proto %s tproxy to %s:%d meta mark set 0x%08x accept\n",
 			m.LanIface, proto, m.TproxyIP, m.TproxyPort, m.Mark)
@@ -97,6 +119,31 @@ func ipOf(s string) net.IP {
 		return ip.To16()
 	}
 	return nil
+}
+
+// renderBypass builds one bypass `return` rule in canonical nft order
+// (ip daddr … then <proto> dport … then return). Returns "" if it has no matcher.
+func renderBypass(bp Bypass) string {
+	var parts []string
+	if len(bp.DstCIDRs) > 0 {
+		parts = append(parts, "ip daddr "+daddrSet(bp.DstCIDRs))
+	}
+	if len(bp.DstPorts) > 0 && bp.Proto != "" {
+		parts = append(parts, bp.Proto+" dport "+portStrSet(bp.DstPorts))
+	}
+	if len(parts) == 0 {
+		return ""
+	}
+	return strings.Join(parts, " ") + " return"
+}
+
+// portStrSet renders string ports/ranges (e.g. "3478-3481") as a bare value or a
+// brace-set, preserving input order (ranges have no single sort key).
+func portStrSet(ports []string) string {
+	if len(ports) == 1 {
+		return ports[0]
+	}
+	return "{ " + strings.Join(ports, ", ") + " }"
 }
 
 func portSet(ports []int) string {
