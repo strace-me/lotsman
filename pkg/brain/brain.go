@@ -242,8 +242,17 @@ func (b *Brain) recoverViaOracle() {
 	}
 	b.mu.Lock()
 	defer b.mu.Unlock()
+	now := time.Now()
 	for _, rt := range b.runtimes {
 		if rt.position == 0 || rt.svc.Static {
+			continue
+		}
+		// Anti-flap: a service in damper backoff (it switched recently) must NOT be
+		// recovered yet. The path-health zapret-tier signal is box-direct and can be
+		// over-optimistic vs the real LAN path (e.g. sing-box tls_fragment + nfqws):
+		// without this gate an optimistic recovery fights the honest active probe and
+		// oscillates. The damper bounds that to once per backoff window.
+		if b.smarts != nil && b.smarts.FlapBackoff != nil && b.smarts.FlapBackoff(rt.svc.Name, now) > 0 {
 			continue
 		}
 		target := b.pathOracle.RecoverTarget(rt.svc.Name, rt.position)
@@ -253,6 +262,9 @@ func (b *Brain) recoverViaOracle() {
 		b.log.Info("path-health recovery to best lower tier (parallel, skip one-rung climb)",
 			"service", rt.svc.Name, "from_pos", rt.position, "to_pos", target)
 		b.recoverToLocked(rt, target)
+		if b.smarts != nil && b.smarts.RecordSwitch != nil {
+			b.smarts.RecordSwitch(rt.svc.Name, now) // count recovery switches so the damper trips on a flap
+		}
 	}
 }
 
