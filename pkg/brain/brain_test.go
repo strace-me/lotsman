@@ -333,6 +333,22 @@ func TestPathOracleParallelRecovery(t *testing.T) {
 	}
 }
 
+// E-4 must not flap: a service in damper backoff is NOT recovered, even when the
+// (box-direct, possibly over-optimistic) oracle says a lower tier is healthy.
+func TestPathOracleRecoverySuppressedByDamper(t *testing.T) {
+	bus := events.NewBus()
+	reg := registry.Builtin()
+	b := New(bus, reg, fakeKB{alt: "alt10"}, DefaultConfig(), nil, discardLogger())
+	b.Restore(map[string]int{"youtube": 2})
+	b.SetPathOracle(fakeOracle{rec: map[int]int{2: 0}})
+	b.SetSmarts(&Smarts{FlapBackoff: func(string, time.Time) time.Duration { return time.Minute }})
+
+	b.recoverViaOracle()
+	if got := b.Position("youtube"); got != 2 {
+		t.Fatalf("recovery must be suppressed during damper backoff, position=%d want 2", got)
+	}
+}
+
 // TestPathOracleJumpsToBestWorkingTier: escalation-v2 E-2 — Brain escalates
 // straight to the empirically-working tier (VPN, pos 2), skipping ALT_ZAPRET.
 func TestPathOracleJumpsToBestWorkingTier(t *testing.T) {
