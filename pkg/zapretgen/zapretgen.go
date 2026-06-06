@@ -48,14 +48,14 @@ type Runner interface {
 // — the floor we roll back to before any composed config has passed a canary.
 type ArmConfig struct {
 	Runner       Runner
-	ComposedPath string                                        // where the composed <id>.sh is written
-	ActiveLink   string                                        // symlink the nfqws init runs
-	RestartCmd   []string                                      // e.g. ["/etc/init.d/nfqws","restart"]
-	LKGTarget    string                                        // current active.sh target (rollback floor)
-	Probe        func(ctx context.Context, target string) bool // service reachability probe
-	Record       func(service, recipeID string, ok bool)       // kb outcome hook (nil = no learning)
-	Settle       time.Duration                                 // wait after restart before the canary probes
-	CanaryProbes int                                           // probe attempts per service (>=1)
+	ComposedPath string                                               // where the composed <id>.sh is written
+	ActiveLink   string                                               // symlink the nfqws init runs
+	RestartCmd   []string                                             // e.g. ["/etc/init.d/nfqws","restart"]
+	LKGTarget    string                                               // current active.sh target (rollback floor)
+	Probe        func(ctx context.Context, svc registry.Service) bool // canary: probe the SERVICE via its REAL path (socks/LAN, right ProbeType), NOT box-direct — box-direct passed while the LAN path was broken, missing the discord regression
+	Record       func(service, recipeID string, ok bool)              // kb outcome hook (nil = no learning)
+	Settle       time.Duration                                        // wait after restart before the canary probes
+	CanaryProbes int                                                  // probe attempts per service (>=1)
 }
 
 // Reconciler composes the nfqws config from the zapret-active services and, when

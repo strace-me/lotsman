@@ -490,7 +490,11 @@ func main() {
 					ActiveLink:   *zapretActive,
 					RestartCmd:   []string{*zapretInit, "restart"},
 					LKGTarget:    lkg,
-					Probe:        func(c context.Context, target string) bool { return httpReachable(c, target) },
+					// Canary via the SOCKS prober = the SERVICE's real LAN path (sing-box
+					// route + its ProbeType + nfqws), not box-direct. Box-direct passed for
+					// discord.com while the LAN path was broken by a composed recipe — this
+					// catches that per-service regression so the arm rolls back.
+					Probe:        func(c context.Context, svc registry.Service) bool { return prober.Probe(c, svc.Name, 0).OK },
 					Record:       func(svc, id string, ok bool) { knowledge.RecordOutcome(svc, id, ok, 0) },
 					Settle:       5 * time.Second,
 					CanaryProbes: 3,
