@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"sync"
 	"testing"
 	"time"
 
@@ -292,6 +293,78 @@ func TestReconcileDefersRestartDuringActiveVoice(t *testing.T) {
 	}
 	if got, _ := os.ReadFile(cfgPath); string(got) == `{"old":true}` {
 		t.Error("config should have been replaced once the call ended")
+	}
+}
+
+// LOT-13: the maintenance ticker and the armed remediation commit both call
+// Reconcile from separate goroutines. Concurrent passes must be serialized — run
+// under -race to catch any unsynchronized last/lastNodes access, and assert that N
+// concurrent callers against the same diff produce exactly ONE apply+restart (the
+// first to grab the lock applies; the rest see the now-in-sync config and no-op),
+// never a double-swap / double-restart.
+func TestReconcileSerializesConcurrentCalls(t *testing.T) {
+	run := &fakeRunner{}
+	r, cfgPath := testReconciler(t, run, fakeLoader{nodes: []subscription.Node{node(t)}}, false)
+	os.WriteFile(cfgPath, []byte(`{"old":true}`), 0o644)
+
+	const callers = 8
+	errs := make([]error, callers)
+	var wg sync.WaitGroup
+	wg.Add(callers)
+	for i := 0; i < callers; i++ {
+		go func(i int) {
+			defer wg.Done()
+			errs[i] = r.Reconcile(context.Background())
+		}(i)
+	}
+	wg.Wait()
+
+	for i, err := range errs {
+		if err != nil {
+			t.Errorf("concurrent Reconcile[%d] errored: %v", i, err)
+		}
+	}
+	var restarts int
+	for _, c := range run.calls {
+		if len(c) > 0 && c[len(c)-1] == "restart" {
+			restarts++
+		}
+	}
+	if restarts != 1 {
+		t.Errorf("serialized concurrent reconcile must apply exactly once, got %d restarts (calls=%v)", restarts, run.calls)
+	}
+}
+
+// LOT-13: the daemon OWNS the live config. A hand-edit between passes is drift —
+// the next Reconcile regenerates desired, sees live differs, and re-applies,
+// reverting the manual change. This documents that self-healing (the audit noted
+// Alive() doesn't "see" edits; the desired-vs-live compare reverts them anyway).
+func TestReconcileRevertsManualEdit(t *testing.T) {
+	run := &fakeRunner{}
+	r, cfgPath := testReconciler(t, run, fakeLoader{nodes: []subscription.Node{node(t)}}, false)
+	os.WriteFile(cfgPath, []byte(`{"old":true}`), 0o644)
+
+	if err := r.Reconcile(context.Background()); err != nil {
+		t.Fatalf("first reconcile: %v", err)
+	}
+	desired, _ := os.ReadFile(cfgPath)
+	if len(desired) == 0 {
+		t.Fatal("first reconcile did not write the config")
+	}
+
+	// Someone hand-edits the live config out from under the daemon.
+	os.WriteFile(cfgPath, []byte(`{"hand":"edited"}`), 0o644)
+	run.calls = nil
+
+	if err := r.Reconcile(context.Background()); err != nil {
+		t.Fatalf("reconcile after manual edit: %v", err)
+	}
+	if !run.ran("restart") {
+		t.Errorf("manual edit (drift from desired) must trigger a re-apply, calls=%v", run.calls)
+	}
+	got, _ := os.ReadFile(cfgPath)
+	if string(got) != string(desired) {
+		t.Errorf("manual edit must be reverted to desired; got %q", got)
 	}
 }
 
