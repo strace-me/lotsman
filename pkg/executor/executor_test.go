@@ -2,10 +2,108 @@ package executor
 
 import (
 	"context"
+	"encoding/json"
 	"log/slog"
+	"net/http"
+	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
+
+	"github.com/strace-me/lotsman/pkg/dataplane"
 )
+
+// clashRec is a minimal Clash-API stand-in recording selector PUTs; a selector in
+// notFound 404s (a DirectOnly service with no per-service selector).
+type clashRec struct {
+	mu       sync.Mutex
+	puts     map[string]string
+	notFound map[string]bool
+}
+
+func newClashServer(t *testing.T, rec *clashRec) *dataplane.ClashClient {
+	t.Helper()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		name := strings.TrimPrefix(r.URL.Path, "/proxies/")
+		if r.Method == http.MethodPut {
+			if rec.notFound[name] {
+				w.WriteHeader(http.StatusNotFound)
+				return
+			}
+			var body struct {
+				Name string `json:"name"`
+			}
+			json.NewDecoder(r.Body).Decode(&body)
+			rec.mu.Lock()
+			rec.puts[name] = body.Name
+			rec.mu.Unlock()
+			w.WriteHeader(http.StatusNoContent)
+			return
+		}
+		w.WriteHeader(http.StatusOK) // GET = EnsurePool
+	}))
+	t.Cleanup(srv.Close)
+	return dataplane.NewClashClient(srv.URL, "")
+}
+
+func TestVPNEnableSetsSelectorToPool(t *testing.T) {
+	rec := &clashRec{puts: map[string]string{}}
+	v := NewVPN(newClashServer(t, rec), false, discardLog())
+	if err := v.Enable(context.Background(), "youtube", "vpn_url_test"); err != nil {
+		t.Fatalf("enable: %v", err)
+	}
+	if got := rec.puts["sel-youtube"]; got != "vpn_url_test" {
+		t.Errorf("selector sel-youtube = %q, want vpn_url_test", got)
+	}
+	if v.Class() != "vpn" {
+		t.Errorf("class=%q, want vpn", v.Class())
+	}
+}
+
+func TestVPNEnablePinsBestNode(t *testing.T) {
+	rec := &clashRec{puts: map[string]string{}}
+	v := NewVPN(newClashServer(t, rec), false, discardLog()).WithBestNode(func(string) string { return "de-node" })
+	if err := v.Enable(context.Background(), "youtube", "vpn_url_test"); err != nil {
+		t.Fatalf("enable: %v", err)
+	}
+	if got := rec.puts["sel-youtube"]; got != "de-node" {
+		t.Errorf("selector = %q, want de-node (pinned)", got)
+	}
+}
+
+func TestVPNEnableDryRunNoCall(t *testing.T) {
+	rec := &clashRec{puts: map[string]string{}}
+	v := NewVPN(newClashServer(t, rec), true, discardLog())
+	if err := v.Enable(context.Background(), "youtube", "vpn_url_test"); err != nil {
+		t.Fatal(err)
+	}
+	if len(rec.puts) != 0 {
+		t.Errorf("dry-run must not PUT, got %v", rec.puts)
+	}
+}
+
+func TestDirectEnableSetsSelectorDirect(t *testing.T) {
+	rec := &clashRec{puts: map[string]string{}}
+	d := NewDirect(newClashServer(t, rec), false, discardLog())
+	if err := d.Enable(context.Background(), "ru_mail", ""); err != nil {
+		t.Fatalf("enable: %v", err)
+	}
+	if got := rec.puts["sel-ru_mail"]; got != "direct" {
+		t.Errorf("selector = %q, want direct", got)
+	}
+	if d.Class() != "direct" {
+		t.Errorf("class=%q, want direct", d.Class())
+	}
+}
+
+func TestDirectEnableSwallowsMissingSelector(t *testing.T) {
+	rec := &clashRec{puts: map[string]string{}, notFound: map[string]bool{"sel-ru_direct": true}}
+	d := NewDirect(newClashServer(t, rec), false, discardLog())
+	// DirectOnly service: a 404 selector is success (route rule already sends direct).
+	if err := d.Enable(context.Background(), "ru_direct", ""); err != nil {
+		t.Errorf("missing selector (DirectOnly) must be success, got %v", err)
+	}
+}
 
 func discardLog() *slog.Logger { return slog.New(slog.DiscardHandler) }
 
