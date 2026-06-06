@@ -560,7 +560,14 @@ func outboundTag(n subscription.Node) string {
 	if len(slug) < 2 {
 		slug = n.Protocol // name was all emoji/non-latin (e.g. "🇭🇷 Загреб")
 	}
-	return slug + "-" + n.ID[:6]
+	// finalize() gives every subscription node a 16-hex ID, but NodeTag/Generate
+	// take arbitrary nodes (native-JSON passthrough, manual, tests, future sources);
+	// a short/empty ID must not panic the whole generation on n.ID[:6] (LOT-38).
+	id := n.ID
+	if len(id) > 6 {
+		id = id[:6]
+	}
+	return slug + "-" + id
 }
 
 // sanitizeTag produces a clash-api-safe outbound tag: ASCII letters/digits and
