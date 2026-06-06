@@ -61,8 +61,8 @@ func CandidateRecipes(svc registry.Service, catalog []strategycat.Recipe) []stra
 // (all its domains — inline + resolved rule_sets) under one recipe. domains is
 // the full set computed by serviceDomains. Keeping it one block keeps the service
 // coherent (never split across blocks). Pure.
-func BlockFor(svc registry.Service, recipe strategycat.Recipe, domains []string) nfqwsgen.Block {
-	return nfqwsgen.Block{Service: svc.Name, Domains: domains, Recipe: recipe}
+func BlockFor(svc registry.Service, recipe strategycat.Recipe, domains, exclude []string) nfqwsgen.Block {
+	return nfqwsgen.Block{Service: svc.Name, Domains: domains, Recipe: recipe, Exclude: exclude}
 }
 
 // Resolver resolves a rule_set tag (e.g. "geosite-discord") to its plaintext
@@ -157,7 +157,7 @@ func Compose(services []registry.Service, recipes []strategycat.Recipe, pick Pic
 			plan.Uncovered = append(plan.Uncovered, svc.Name)
 			continue
 		}
-		blocks = append(blocks, BlockFor(svc, r, domains))
+		blocks = append(blocks, BlockFor(svc, r, domains, dedup(svc.ExcludeDomains)))
 		plan.Chosen[svc.Name] = r.ID
 	}
 	plan.Covered = len(plan.Uncovered) == 0 && len(blocks) > 0

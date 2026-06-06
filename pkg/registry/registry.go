@@ -38,21 +38,26 @@ type ChainStep struct {
 // selector. IPs are the geoip replacement for UDP/voice paths that carry no SNI
 // (e.g. Discord voice servers).
 type Service struct {
-	Name          string
-	Category      string
-	ProbeType     string   // http | tcp | stun (empty = http)
-	ProbeTarget   string   // http: URL; tcp/stun: host:port
-	RuleSets      []string // sing-box rule-set tags (big curated .srs lists)
-	Domains       []string // inline domain_suffix matches (custom/small lists)
-	IPs           []string // inline ip_cidr matches (canonical CIDR; voice/geoip)
-	Sticky        bool     // keep this service pinned to one node; fail over only on real failure, never flap by latency
-	Profile       string   // node-quality weighting: "" | general | voice | streaming | gaming
-	Static        bool     // nailed: the daemon never escalates/recovers this service (use the configured chain[0] as-is)
-	EscalateAfter int      // per-service consecutive-fail threshold before escalating (0 = global default)
-	RecoverAfter  int      // per-service consecutive silent-success threshold before recovering (0 = global default)
-	Priority      int      // route-rule order: LOWER is emitted earlier (sing-box = first match wins). Negative for protective/specific rules (ru-direct), positive for broad catch-alls (ru-blocked). Default 0.
-	TLSFragment   bool     // emit sing-box route tls_fragment for this service: splits the TLS ClientHello across packets so DPI cannot read the SNI in one packet (a sing-box-native alternative to nfqws fragmentation). Off by default.
-	Chain         []ChainStep
+	Name        string
+	Category    string
+	ProbeType   string   // http | tcp | stun (empty = http)
+	ProbeTarget string   // http: URL; tcp/stun: host:port
+	RuleSets    []string // sing-box rule-set tags (big curated .srs lists)
+	Domains     []string // inline domain_suffix matches (custom/small lists)
+	IPs         []string // inline ip_cidr matches (canonical CIDR; voice/geoip)
+	// ExcludeDomains pass RAW through this service's nfqws desync profile (composer
+	// emits --hostlist-exclude-domains): CDNs/endpoints that work without desync but
+	// break under it (e.g. Epic download/EasyAntiCheat — LOT-36). Routing is
+	// unaffected; only the local DPI-desync is cancelled for them.
+	ExcludeDomains []string
+	Sticky         bool   // keep this service pinned to one node; fail over only on real failure, never flap by latency
+	Profile        string // node-quality weighting: "" | general | voice | streaming | gaming
+	Static         bool   // nailed: the daemon never escalates/recovers this service (use the configured chain[0] as-is)
+	EscalateAfter  int    // per-service consecutive-fail threshold before escalating (0 = global default)
+	RecoverAfter   int    // per-service consecutive silent-success threshold before recovering (0 = global default)
+	Priority       int    // route-rule order: LOWER is emitted earlier (sing-box = first match wins). Negative for protective/specific rules (ru-direct), positive for broad catch-alls (ru-blocked). Default 0.
+	TLSFragment    bool   // emit sing-box route tls_fragment for this service: splits the TLS ClientHello across packets so DPI cannot read the SNI in one packet (a sing-box-native alternative to nfqws fragmentation). Off by default.
+	Chain          []ChainStep
 }
 
 // DirectOnly reports whether the service is hard-pinned to direct (the ru_direct

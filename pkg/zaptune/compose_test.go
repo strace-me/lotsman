@@ -213,3 +213,21 @@ func TestComposeEmptyServicesNotCovered(t *testing.T) {
 		t.Errorf("no zapret-active services -> not covered, got %v", p)
 	}
 }
+
+// LOT-14/LOT-36: a service's ExcludeDomains thread into its composed block as a
+// --hostlist-exclude-domains arg (raw-pass CDNs that the desync would break).
+func TestComposeThreadsExcludeDomains(t *testing.T) {
+	cat := []strategycat.Recipe{
+		recipe("tls-1", strategycat.ClassGeneralTLS, "--filter-tcp=443", "--hostlist-domains={{DOMAINS}}", "--dpi-desync=split2"),
+	}
+	svc := svcWithDomains("gaming-epic", "gaming", "fortnite.com")
+	svc.ExcludeDomains = []string{"epicgames-download1.akamaized.net", "download.eac-cdn.com"}
+	p := Compose([]registry.Service{svc}, cat, FirstPicker, nil)
+	if !p.Covered {
+		t.Fatalf("expected covered, uncovered=%v", p.Uncovered)
+	}
+	joined := strings.Join(p.Args, " ")
+	if !strings.Contains(joined, "--hostlist-exclude-domains=epicgames-download1.akamaized.net,download.eac-cdn.com") {
+		t.Errorf("exclude domains not threaded into composed args:\n%v", p.Args)
+	}
+}
