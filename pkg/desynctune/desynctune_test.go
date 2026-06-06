@@ -14,6 +14,15 @@ import (
 func good() quality.Quality { return quality.FromRTTs([]float64{20, 20, 20, 20, 20}, 5) } // loss 0
 func bad() quality.Quality  { return quality.FromRTTs(nil, 5) }                           // loss 1
 
+func goodWhen(cur *string, want string) tester.Probe {
+	return func(_ context.Context) quality.Quality {
+		if *cur == want {
+			return good()
+		}
+		return bad()
+	}
+}
+
 func TestTunePicksTheWinningStrategy(t *testing.T) {
 	e := zapret.NfqwsEngine{}
 	// Two candidates that render differently.
@@ -95,5 +104,48 @@ func TestStrategyIDStable(t *testing.T) {
 	}
 	if !strings.HasPrefix(a, "gen-") {
 		t.Errorf("id should be gen-prefixed, got %q", a)
+	}
+}
+
+func TestCandidatesSeedMutatesElseGrids(t *testing.T) {
+	e := zapret.NfqwsEngine{}
+	// With a seed -> Mutate (neighbours of the seed; bounded, not the full grid).
+	seed := desyncgen.Strategy{"method": "multisplit", "split_pos": "2"}
+	mut := Candidates(e, seed, 1000)
+	grid := Candidates(e, nil, 1000)
+	if len(mut) == 0 {
+		t.Fatal("seed should produce mutation candidates")
+	}
+	if len(grid) == 0 {
+		t.Fatal("no seed should produce grid candidates")
+	}
+	if len(mut) >= len(grid) {
+		t.Errorf("mutation (%d) should be smaller than the cold grid (%d)", len(mut), len(grid))
+	}
+}
+
+func TestCandidatesGridRespectsCap(t *testing.T) {
+	e := zapret.NfqwsEngine{}
+	if got := Candidates(e, nil, 5); len(got) > 5 {
+		t.Errorf("grid cap not respected: %d > 5", len(got))
+	}
+}
+
+func TestTuneServiceReturnsWinnerArgs(t *testing.T) {
+	e := zapret.NfqwsEngine{}
+	winner := desyncgen.Strategy{"method": "multisplit", "split_pos": "2"}
+	winArgs := strings.Join(e.Render(winner), " ")
+	cur := ""
+	apply := func(_ context.Context, args []string) error { cur = strings.Join(args, " "); return nil }
+	probe := goodWhen(&cur, winArgs) // good only when the winner is applied
+	res, err := TuneService(context.Background(), e, winner, 1000, apply, probe, 0, tester.DefaultConfig())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !res.Viable() {
+		t.Fatalf("expected a viable winner, verdict=%v", res.Verdict.Outcome)
+	}
+	if strings.Join(res.Args, " ") != winArgs {
+		t.Errorf("winner args = %q, want %q", strings.Join(res.Args, " "), winArgs)
 	}
 }

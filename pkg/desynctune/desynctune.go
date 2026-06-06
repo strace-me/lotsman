@@ -30,6 +30,43 @@ func StrategyID(args []string) string {
 	return fmt.Sprintf("gen-%08x", h.Sum32())
 }
 
+// Candidates picks which strategies to try this run: hill-climb around a known
+// good seed (Mutate — cheap, targets the LIVE TSPU, finds neighbours not in the
+// catalog) when one is given, else a capped Grid (cold start / broad sweep).
+// gridCap bounds the cold grid's combinatorial blow-up.
+func Candidates(e desyncgen.Engine, seed desyncgen.Strategy, gridCap int) []desyncgen.Strategy {
+	if len(seed) > 0 {
+		return desyncgen.Mutate(e, seed)
+	}
+	return desyncgen.Grid(e, gridCap)
+}
+
+// Result is one tuner pass's outcome for a service.
+type Result struct {
+	Verdict tester.Verdict
+	Winner  desyncgen.Strategy // nil when no recipe is viable
+	Args    []string           // e.Render(Winner); nil when no winner (ready for PromoteToRecipe)
+}
+
+// Viable reports whether a recipe that beats the baseline was found.
+func (r Result) Viable() bool { return r.Winner != nil && r.Verdict.Outcome == tester.OutcomeRecipe }
+
+// TuneService runs one tuner pass for a service: generate candidates (seed→Mutate,
+// else Grid), A/B them via Tune, and return the winner with its rendered args —
+// ready for zaptune.PromoteToRecipe + KB record by the caller. apply/probe are
+// injected (the caller wires the ISOLATED apply on a router and the service probe).
+func TuneService(ctx context.Context, e desyncgen.Engine, seed desyncgen.Strategy, gridCap int, apply func(context.Context, []string) error, probe tester.Probe, settle time.Duration, cfg tester.Config) (Result, error) {
+	winner, v, err := Tune(ctx, e, Candidates(e, seed, gridCap), apply, probe, settle, cfg)
+	if err != nil {
+		return Result{Verdict: v}, err
+	}
+	res := Result{Verdict: v, Winner: winner}
+	if winner != nil {
+		res.Args = e.Render(winner)
+	}
+	return res, nil
+}
+
 // Tune A/B-tests the candidate strategies against the no-desync baseline for one
 // service and returns the winning strategy (or nil when no recipe is viable),
 // plus the tester verdict. apply(ctx, nil) must put the data plane into the clean
