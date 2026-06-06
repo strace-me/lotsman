@@ -43,6 +43,11 @@ type Conn struct {
 	Host     string
 	DestIP   string
 	Network  string // "tcp" | "udp"
+	// Rule is sing-box's matched routing rule string, e.g.
+	// "rule_set=geosite-youtube => route(sel-youtube)". It carries the ROUTE
+	// TARGET (the selector sing-box chose), which attributes rule_set-routed flows
+	// the host/IP matchers miss (LOT-20). Empty for direct/final flows.
+	Rule string
 }
 
 func (c Conn) finalOutbound() string {
@@ -95,17 +100,26 @@ type Snapshot struct {
 	Unmatched int
 }
 
-// matcher precompiles a service's match inputs: lowercased domain suffixes and
-// parsed IP CIDRs.
+// matcher precompiles a service's match inputs: its route-selector target, plus
+// lowercased domain suffixes and parsed IP CIDRs (the heuristic fallback).
 type matcher struct {
-	svc      registry.Service
-	suffixes []string
-	cidrs    []*net.IPNet
+	svc       registry.Service
+	routeFrag string // "route(sel-<svc>)" — sing-box's own decision (authoritative)
+	suffixes  []string
+	cidrs     []*net.IPNet
 }
 
-// matches reports whether a connection belongs to this service: host ends with
-// a domain suffix (at a label boundary), or destination IP is inside a CIDR.
-func (m matcher) matches(c Conn) bool {
+// matchesSelector reports whether sing-box ROUTED this connection to the service's
+// selector (parsed from the rule string). This is authoritative — it is sing-box's
+// own routing decision — and attributes rule_set-routed flows the host/IP heuristic
+// cannot see (e.g. www.youtube.com via geosite-youtube). LOT-20.
+func (m matcher) matchesSelector(c Conn) bool {
+	return c.Rule != "" && strings.Contains(c.Rule, m.routeFrag)
+}
+
+// matchesHeuristic is the fallback for flows with no selector route (direct/final):
+// host ends with a domain suffix (at a label boundary), or dest IP is in a CIDR.
+func (m matcher) matchesHeuristic(c Conn) bool {
 	host := strings.ToLower(strings.TrimSuffix(c.Host, "."))
 	for _, suf := range m.suffixes {
 		if host == suf || strings.HasSuffix(host, "."+suf) {
@@ -130,15 +144,16 @@ type Eye struct {
 	matchers []matcher
 }
 
-// New builds an Eye over a connection source and the service registry. Services
-// with no match inputs (no Domains and no IPs) are skipped: their flows cannot
-// be attributed. RuleSets are NOT usable for matching here — they are opaque
-// .srs tags resolved inside sing-box, not domain lists we can read — so matching
-// is by inline Domains (suffix) and IPs (CIDR) only.
+// New builds an Eye over a connection source and the service registry. Every
+// service gets a matcher: the PRIMARY signal is sing-box's own route decision —
+// the "route(sel-<svc>)" target in the connection's rule string — which attributes
+// rule_set-routed flows (e.g. www.youtube.com via geosite-youtube) that inline
+// Domains/IPs cannot see (LOT-20). Domains (suffix) and IPs (CIDR) remain as the
+// heuristic fallback for direct/final flows that carry no selector route.
 func New(src Source, reg *registry.Registry) *Eye {
 	e := &Eye{src: src}
 	for _, svc := range reg.Services {
-		m := matcher{svc: svc}
+		m := matcher{svc: svc, routeFrag: "route(" + registry.SelectorTag(svc.Name) + ")"}
 		for _, d := range svc.Domains {
 			if d = strings.ToLower(strings.TrimPrefix(strings.TrimSpace(d), ".")); d != "" {
 				m.suffixes = append(m.suffixes, d)
@@ -156,10 +171,7 @@ func New(src Source, reg *registry.Registry) *Eye {
 				m.cidrs = append(m.cidrs, &net.IPNet{IP: ip, Mask: net.CIDRMask(bits, bits)})
 			}
 		}
-		if len(m.suffixes) == 0 && len(m.cidrs) == 0 {
-			continue
-		}
-		e.matchers = append(e.matchers, m)
+		e.matchers = append(e.matchers, m) // selector matching works for every service
 	}
 	return e
 }
@@ -178,11 +190,21 @@ func (e *Eye) Observe(ctx context.Context) (Snapshot, error) {
 	// each distinct address once even when many flows share a CDN edge.
 	seenIP := map[string]map[string]bool{}
 	for _, c := range conns {
+		// Two-tier: sing-box's own route decision (selector) is authoritative; the
+		// host/IP heuristic is the fallback for direct/final flows with no route tag.
 		var hit *matcher
 		for i := range e.matchers {
-			if e.matchers[i].matches(c) {
+			if e.matchers[i].matchesSelector(c) {
 				hit = &e.matchers[i]
 				break
+			}
+		}
+		if hit == nil {
+			for i := range e.matchers {
+				if e.matchers[i].matchesHeuristic(c) {
+					hit = &e.matchers[i]
+					break
+				}
 			}
 		}
 		if hit == nil {

@@ -19,6 +19,7 @@ type Connection struct {
 	Chains   []string           `json:"chains"`
 	Upload   int64              `json:"upload"`
 	Download int64              `json:"download"`
+	Rule     string             `json:"rule"` // matched sing-box rule, e.g. "rule_set=geosite-youtube => route(sel-youtube)" — carries the route target (LOT-20)
 	Metadata ConnectionMetadata `json:"metadata"`
 }
 

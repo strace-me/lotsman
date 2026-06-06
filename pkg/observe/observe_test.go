@@ -240,7 +240,7 @@ func TestMatchByDomainSuffix(t *testing.T) {
 		{"github.com", false},
 	}
 	for _, tc := range cases {
-		if got := m.matches(Conn{Host: tc.host}); got != tc.want {
+		if got := m.matchesHeuristic(Conn{Host: tc.host}); got != tc.want {
 			t.Errorf("matches(host=%q)=%v, want %v", tc.host, got, tc.want)
 		}
 	}
@@ -257,10 +257,42 @@ func TestMatchByIPCIDR(t *testing.T) {
 	if ytm == nil {
 		t.Fatal("no youtube matcher")
 	}
-	if !ytm.matches(Conn{DestIP: "142.251.99.4"}) {
+	if !ytm.matchesHeuristic(Conn{DestIP: "142.251.99.4"}) {
 		t.Error("142.251.99.4 should match 142.251.99.0/24")
 	}
-	if ytm.matches(Conn{DestIP: "142.251.100.4"}) {
+	if ytm.matchesHeuristic(Conn{DestIP: "142.251.100.4"}) {
 		t.Error("142.251.100.4 should NOT match 142.251.99.0/24")
+	}
+}
+
+// LOT-20: a flow routed by a rule_set (no inline-domain/IP match) is attributed
+// via sing-box's own route(sel-<svc>) decision in the rule string.
+func TestMatchBySelectorRoute(t *testing.T) {
+	eye := New(fakeSource{}, testRegistry())
+	var ytm *matcher
+	for i := range eye.matchers {
+		if eye.matchers[i].svc.Name == "youtube" {
+			ytm = &eye.matchers[i]
+		}
+	}
+	if ytm == nil {
+		t.Fatal("no youtube matcher")
+	}
+	// www.youtube.com via geosite-youtube: host NOT in inline suffixes, no DestIP —
+	// the heuristic misses it, but the route target attributes it.
+	c := Conn{Host: "www.youtube.com", Rule: "rule_set=geosite-youtube => route(sel-youtube)"}
+	if ytm.matchesHeuristic(c) {
+		t.Error("heuristic should NOT match www.youtube.com (not an inline suffix)")
+	}
+	if !ytm.matchesSelector(c) {
+		t.Error("selector matcher must attribute the geosite-youtube flow to youtube")
+	}
+	// a flow routed elsewhere must not match youtube's selector.
+	if ytm.matchesSelector(Conn{Rule: "rule_set=geosite-discord => route(sel-discord)"}) {
+		t.Error("youtube matcher must not claim a sel-discord flow")
+	}
+	// empty rule (direct/final) -> no selector match.
+	if ytm.matchesSelector(Conn{Rule: ""}) {
+		t.Error("empty rule must not selector-match")
 	}
 }
