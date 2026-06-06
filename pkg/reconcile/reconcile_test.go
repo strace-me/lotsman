@@ -255,6 +255,46 @@ func TestReconcileAppliesOnRealChange(t *testing.T) {
 	}
 }
 
+// LOT-35: a restart tears active UDP conntrack and breaks a live voice/RTC call.
+// When ActiveRealtimeUDP reports a live flow, the forward apply is DEFERRED — the
+// config validates (check) but is NOT swapped or restarted, and the next tick still
+// sees the diff and retries. Once the call ends, the apply goes through.
+func TestReconcileDefersRestartDuringActiveVoice(t *testing.T) {
+	run := &fakeRunner{}
+	r, cfgPath := testReconciler(t, run, fakeLoader{nodes: []subscription.Node{node(t)}}, false)
+	os.WriteFile(cfgPath, []byte(`{"old":true}`), 0o644)
+
+	active := true
+	r.ActiveRealtimeUDP = func(context.Context) (string, bool) { return "discord", active }
+
+	// Pass 1: a live call is in progress → validate but defer the restart.
+	if err := r.Reconcile(context.Background()); err != nil {
+		t.Fatalf("reconcile (deferred): %v", err)
+	}
+	if !run.ran("check") {
+		t.Error("deferred apply should still validate with sing-box check")
+	}
+	if run.ran("restart") {
+		t.Error("must NOT restart while a live voice/RTC flow is in progress")
+	}
+	if got, _ := os.ReadFile(cfgPath); string(got) != `{"old":true}` {
+		t.Errorf("live config must be untouched while deferring, got %q", got)
+	}
+
+	// Pass 2: the call ended → the still-pending diff applies + restarts.
+	run.calls = nil
+	active = false
+	if err := r.Reconcile(context.Background()); err != nil {
+		t.Fatalf("reconcile (call ended): %v", err)
+	}
+	if !run.ran("check") || !run.ran("restart") {
+		t.Errorf("once the call ends the pending config must apply (check+restart), calls=%v", run.calls)
+	}
+	if got, _ := os.ReadFile(cfgPath); string(got) == `{"old":true}` {
+		t.Error("config should have been replaced once the call ended")
+	}
+}
+
 // Regression guard (LOT-18b): an empty/nil Remediations provider must leave the
 // generated config byte-identical to no provider at all, so an armed-but-idle
 // controller never causes a spurious apply/restart.

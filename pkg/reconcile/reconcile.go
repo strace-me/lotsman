@@ -62,6 +62,16 @@ type Reconciler struct {
 	// The controller updates the backing map and calls Reconcile to apply/revert.
 	Remediations func() map[string]singbox.Remediation
 
+	// ActiveRealtimeUDP, when set, reports whether a live voice/RTC UDP flow is
+	// currently in progress (and one such service name, for logging). A sing-box
+	// restart tears active UDP conntrack/NAT, breaking a live call until the client
+	// renegotiates (LOT-35). When this returns true, the forward apply is DEFERRED
+	// (the live config is left untouched and retried next tick) so the new config
+	// lands only once the call ends. It does NOT gate rollback (a bad config must
+	// revert) or engine-health restarts (a wedged engine's flows are dead anyway, so
+	// they would not report active). nil = never defer (preserves prior behavior).
+	ActiveRealtimeUDP func(context.Context) (string, bool)
+
 	// Baseline persists lastNodes across restarts so the anti-churn guard works on
 	// the very first reconcile after a restart (otherwise lastNodes resets to 0 and
 	// a degraded startup fetch is applied wholesale — LOT-29). nil = in-memory only.
@@ -167,6 +177,20 @@ func (r *Reconciler) Reconcile(ctx context.Context) error {
 		r.Log.Info("reconcile: config differs and passes check (dry-run, not applied)",
 			"nodes", len(nodes), "pools", len(memberships), "skipped", len(res.Skipped))
 		return nil
+	}
+
+	// LOT-35: a restart tears active UDP conntrack/NAT and breaks a live voice/RTC
+	// call until the client renegotiates. If one is in progress, leave the live config
+	// untouched and retry next tick — the new config lands once the call ends. The
+	// check is self-correcting (a wedged path has only dead UDP flows, so it never
+	// blocks a recovery restart), and r.last is left unchanged so this keeps retrying.
+	if r.ActiveRealtimeUDP != nil {
+		if svc, active := r.ActiveRealtimeUDP(ctx); active {
+			os.Remove(tmp)
+			r.Log.Info("reconcile: deferring sing-box restart, active voice/RTC flow in progress (retry next tick)",
+				"service", svc, "nodes", len(nodes))
+			return nil
+		}
 	}
 
 	if err := r.apply(ctx, tmp, live); err != nil {

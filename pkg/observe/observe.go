@@ -100,6 +100,23 @@ type Snapshot struct {
 	Unmatched int
 }
 
+// HasLiveRealtimeUDP reports whether any service currently has a LIVE (non-dead)
+// UDP/QUIC flow — at least one matched UDP connection still moving bytes — and the
+// name of one such service. This is the voice/RTC signal the reconciler uses to
+// defer a sing-box restart that would tear an active call's UDP conntrack/NAT
+// (LOT-35): a restart mid-call drops the voice session until the client renegotiates.
+// It is self-correcting — a wedged path carries only DEAD UDP flows (download ~0,
+// counted in DeadUDPFlows), so a genuinely broken service does NOT block the restart
+// that would recover it; only a healthy, in-progress flow does.
+func (s Snapshot) HasLiveRealtimeUDP() (string, bool) {
+	for name, m := range s.Services {
+		if m.UDPFlows-m.DeadUDPFlows > 0 {
+			return name, true
+		}
+	}
+	return "", false
+}
+
 // matcher precompiles a service's match inputs: its route-selector target, plus
 // lowercased domain suffixes and parsed IP CIDRs (the heuristic fallback).
 type matcher struct {

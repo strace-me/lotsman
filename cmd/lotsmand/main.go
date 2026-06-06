@@ -564,6 +564,18 @@ func main() {
 			defer eyeMu.Unlock()
 			return eyeSnap
 		})
+		// LOT-35: let the reconciler defer a sing-box restart while a live voice/RTC
+		// call is in progress (a restart tears active UDP conntrack → one-way audio
+		// until the client renegotiates). Reads the last cached observe snapshot
+		// (refreshed each pass, ~observe-interval old) — no extra clash GET, no
+		// concurrent Observe. nil-safe: only wired when a reconciler exists.
+		if rc != nil {
+			rc.ActiveRealtimeUDP = func(context.Context) (string, bool) {
+				eyeMu.Lock()
+				defer eyeMu.Unlock()
+				return eyeSnap.HasLiveRealtimeUDP()
+			}
+		}
 		// Misroute detector (LOT-16): turn the eye's snapshot into per-service
 		// verdicts. Phase 1 is detect-only — it logs and publishes a metric, no
 		// remediation, no Brain escalation (that is LOT-18).
