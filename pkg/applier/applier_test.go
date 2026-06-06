@@ -117,6 +117,44 @@ func TestEnableErrorSuppressesActual(t *testing.T) {
 	}
 }
 
+// TestApplierKeepsDrainingWhenActualStateFull is the LOT-37 deadlock regression
+// guard: a saturated ActualState channel must NOT stop the read loop from
+// draining DesiredState. Pre-fix the inline ActualState send blocked the read
+// loop, which (with Brain blocked sending DesiredState) deadlocked the control
+// loop. The forwarder goroutine now absorbs ActualState backpressure.
+func TestApplierKeepsDrainingWhenActualStateFull(t *testing.T) {
+	bus := events.NewBus()
+	vpn := newFakeExecutor("vpn", nil)
+	a := New(bus, []executor.StrategyExecutor{vpn}, discardLog())
+
+	// Saturate ActualState so the forwarder's send blocks (nobody is draining it).
+	for {
+		select {
+		case bus.ActualState <- events.ActualStateObserved{Service: "filler"}:
+			continue
+		default:
+		}
+		break
+	}
+
+	cancel, done := runApplier(a)
+	defer func() { cancel(); <-done }()
+
+	// Both desired events must be applied despite ActualState being full.
+	for i := 0; i < 2; i++ {
+		bus.DesiredState <- events.DesiredStateChanged{
+			Service: "youtube", Position: i, State: "VPN", StrategyClass: "vpn", StrategyID: "p",
+		}
+	}
+	for i := 0; i < 2; i++ {
+		select {
+		case <-vpn.calls:
+		case <-time.After(2 * time.Second):
+			t.Fatalf("Applier stalled under ActualState backpressure after %d/2 enables", i)
+		}
+	}
+}
+
 // TestUnknownStrategyClassNoPanic: a desired event for a class with no
 // registered executor is logged and dropped, never panics, never reports.
 func TestUnknownStrategyClassNoPanic(t *testing.T) {
