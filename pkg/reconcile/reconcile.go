@@ -20,6 +20,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"sync"
 	"time"
 
 	"github.com/strace-me/lotsman/pkg/executor"
@@ -86,6 +87,11 @@ type Reconciler struct {
 	FetchRetries int
 	FetchBackoff time.Duration
 
+	// mu serializes Reconcile so the periodic maintenance loop and the armed
+	// remediation controller's commit (both call rc.Reconcile from separate
+	// goroutines) never apply concurrently — that would race last/lastNodes and
+	// could double-swap the config + double-restart sing-box (LOT-13).
+	mu        sync.Mutex
 	last      []byte // last config bytes we wrote/observed (skip re-validation)
 	lastNodes int    // node count of the last clean apply (anti-churn baseline)
 }
@@ -96,8 +102,16 @@ const (
 )
 
 // Reconcile runs one pass. It is safe to call on a ticker; it is a no-op when
-// the desired config already matches the live file.
+// the desired config already matches the live file. Calls are serialized (LOT-13):
+// the maintenance ticker and the armed remediation commit both reach this from
+// separate goroutines, and overlapping passes would race last/lastNodes and could
+// double-swap the config + double-restart sing-box. The lock is held for the whole
+// pass (fetch/check/restart) — a concurrent caller waits its turn rather than
+// interleaving, which is exactly the desired behavior for config mutation.
 func (r *Reconciler) Reconcile(ctx context.Context) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
 	nodes, errs := r.Loader.Load(ctx, r.Subs)
 	for _, e := range errs {
 		r.Log.Warn("reconcile: subscription load issue", "err", e)
