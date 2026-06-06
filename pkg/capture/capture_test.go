@@ -85,3 +85,22 @@ func TestDefaultModelHasNoBypass(t *testing.T) {
 		t.Error("DefaultModel (no bypass) must stay byte-identical to live")
 	}
 }
+
+func TestDeviceOverrideBypassBeforeTproxy(t *testing.T) {
+	m := DefaultModel()
+	m.DeviceBypass = []Device{{Name: "living-room-tv", SrcCIDRs: []string{"192.168.1.50"}}}
+	out := string(GenerateNft(m))
+	want := "ip saddr 192.168.1.50 return"
+	if !strings.Contains(out, want) {
+		t.Fatalf("missing device-override rule %q in:\n%s", want, out)
+	}
+	if strings.Index(out, want) > strings.Index(out, "tproxy to") {
+		t.Error("device-override return must precede tproxy")
+	}
+}
+
+func TestDefaultModelHasNoDeviceOverride(t *testing.T) {
+	if string(GenerateNft(DefaultModel())) != liveSingboxTable {
+		t.Error("DefaultModel (no device override) must stay byte-identical to live")
+	}
+}

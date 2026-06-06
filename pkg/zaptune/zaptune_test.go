@@ -53,3 +53,32 @@ func TestBlockForKeepsServiceWhole(t *testing.T) {
 		t.Errorf("block domains = %v, want all %v (service stays whole)", block.Domains, svc.Domains)
 	}
 }
+
+func TestPromoteToRecipe(t *testing.T) {
+	svc := registry.Service{Name: "discord", Profile: "voice"}
+	args := []string{"--dpi-desync=multisplit", "--dpi-desync-split-pos=2"}
+	rec, ok := PromoteToRecipe(svc, "gen-abc123", args)
+	if !ok {
+		t.Fatal("voice service should promote (discord_tcp has a filter)")
+	}
+	if rec.ID != "gen-abc123" || rec.Provenance != "generated" || rec.TargetClass != strategycat.ClassDiscordTCP {
+		t.Errorf("recipe meta = %+v", rec)
+	}
+	// scoped: filter + {{DOMAINS}} + the rendered desync args, in order.
+	want := []string{"--filter-tcp=443", "--hostlist-domains={{DOMAINS}}", "--dpi-desync=multisplit", "--dpi-desync-split-pos=2"}
+	if !reflect.DeepEqual(rec.NfqwsArgs, want) {
+		t.Errorf("args = %v, want %v", rec.NfqwsArgs, want)
+	}
+}
+
+func TestPromoteToRecipeRejects(t *testing.T) {
+	// gaming -> primary class general_tls HAS a filter, so it promotes; an empty
+	// id or no args must not.
+	g := registry.Service{Name: "gaming-x", Profile: "gaming"}
+	if _, ok := PromoteToRecipe(g, "", []string{"--dpi-desync=fake"}); ok {
+		t.Error("empty id must not promote")
+	}
+	if _, ok := PromoteToRecipe(g, "gen-x", nil); ok {
+		t.Error("no args must not promote")
+	}
+}
