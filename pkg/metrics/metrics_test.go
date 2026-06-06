@@ -9,6 +9,7 @@ import (
 	"github.com/strace-me/lotsman/pkg/misroute"
 	"github.com/strace-me/lotsman/pkg/observe"
 	"github.com/strace-me/lotsman/pkg/remediate"
+	"github.com/strace-me/lotsman/pkg/subscription"
 )
 
 // scrape drives the collector's /metrics handler and returns the body.
@@ -64,6 +65,11 @@ func TestServeHTTPRendersAllSections(t *testing.T) {
 	c.SetRemediationSnapshot(func() []remediate.Plan {
 		return []remediate.Plan{{Service: "youtube", Action: remediate.ActionRejectQUIC}}
 	})
+	c.SetSubscriptionSnapshot(func() map[string]subscription.Userinfo {
+		return map[string]subscription.Userinfo{
+			"acme": {Upload: 30, Download: 70, Total: 1000}, // 10% used, no expiry
+		}
+	})
 	c.ObserveProbe("youtube", true, 12)
 	c.ObserveProbe("youtube", true, 14)
 	c.ObserveProbe("youtube", false, 0)
@@ -94,6 +100,11 @@ func TestServeHTTPRendersAllSections(t *testing.T) {
 	// Misroute + remediation gauges.
 	mustContain(t, body, `lotsman_service_misrouted{service="youtube",kind="dead"} 1`)
 	mustContain(t, body, `lotsman_service_remediation_proposed{service="youtube",action="reject-quic"} 1`)
+
+	// Subscription quota/expiry (LOT-7): 100/1000 used = 0.1; no expiry -> -1 sentinel.
+	mustContain(t, body, `lotsman_subscription_fraction_used{subscription="acme"} 0.1000`)
+	mustContain(t, body, `lotsman_subscription_days_until_expire{subscription="acme"} -1.00`)
+	mustContain(t, body, `lotsman_subscription_used_bytes{subscription="acme"} 100`)
 }
 
 // TestServeHTTPOmitsOptionalSectionsWhenUnset: with only the required Brain+KB
@@ -111,6 +122,7 @@ func TestServeHTTPOmitsOptionalSectionsWhenUnset(t *testing.T) {
 	mustNotContain(t, body, "lotsman_service_leak_ratio")
 	mustNotContain(t, body, "lotsman_service_misrouted")
 	mustNotContain(t, body, "lotsman_service_remediation_proposed")
+	mustNotContain(t, body, "lotsman_subscription_")
 }
 
 // TestRemediationProposedEncodesActionNoneAsZero: a Plan whose Action is

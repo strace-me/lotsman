@@ -349,6 +349,20 @@ func main() {
 	}
 
 	mc := metrics.New(br.Snapshot, knowledge.Snapshot)
+	// Shared subscription quota/expiry snapshot (LOT-7): the periodic refresh below
+	// writes it, the metrics scrape reads it. Declared here so the setter (and the
+	// periodic closure that follows) both close over the same guarded map.
+	var subMu sync.Mutex
+	subUserinfo := map[string]subscription.Userinfo{}
+	mc.SetSubscriptionSnapshot(func() map[string]subscription.Userinfo {
+		subMu.Lock()
+		defer subMu.Unlock()
+		out := make(map[string]subscription.Userinfo, len(subUserinfo))
+		for k, v := range subUserinfo {
+			out[k] = v
+		}
+		return out
+	})
 	if *metricsAddr != "" {
 		srv := mc.Serve(*metricsAddr)
 		defer srv.Close()
@@ -419,7 +433,10 @@ func main() {
 		}})
 		if conf != nil && len(conf.Subscriptions) > 0 {
 			pr.Add(periodic.Task{Name: "subscription-refresh", Interval: *checkInterval, Fn: func(c context.Context) error {
-				loadPools(c, conf, log)
+				ui := loadPools(c, conf, log)
+				subMu.Lock()
+				subUserinfo = ui
+				subMu.Unlock()
 				return nil
 			}})
 		}
@@ -1172,9 +1189,9 @@ func subViaHosts(subs []subscription.Declaration) []string {
 // loadPools fetches the configured subscriptions, computes pool membership,
 // and logs counts. This exercises the parse->manager->pools pipeline end to
 // end; wiring the resulting nodes into sing-box generation is a later slice.
-func loadPools(ctx context.Context, cfg *config.Config, log *slog.Logger) {
+func loadPools(ctx context.Context, cfg *config.Config, log *slog.Logger) map[string]subscription.Userinfo {
 	if len(cfg.Subscriptions) == 0 {
-		return
+		return nil
 	}
 	mgr := subscription.NewManager(subscription.NewHTTPFetcher())
 	nodes, errs := mgr.Load(ctx, cfg.Subscriptions)
@@ -1185,7 +1202,9 @@ func loadPools(ctx context.Context, cfg *config.Config, log *slog.Logger) {
 	for name, members := range cfg.Pools.Memberships(nodes) {
 		log.Info("pool membership", "pool", name, "nodes", len(members))
 	}
-	logUserinfo(log, mgr.Userinfo())
+	ui := mgr.Userinfo()
+	logUserinfo(log, ui)
+	return ui
 }
 
 // quotaWarnFraction / expiryWarnDays gate the subscription quota/expiry alerts
