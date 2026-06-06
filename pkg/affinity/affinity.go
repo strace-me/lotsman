@@ -8,6 +8,9 @@
 // Scope (per-client vs per-household) is expressed by how the caller builds the
 // key: "client|192.168.1.50|discord" vs "household|discord". Pure logic; time
 // is injected.
+//
+// Deferred (LOT-12): build-ahead, tested but not wired into runtime VPN-node
+// selection yet. Wire it when sticky-per-client/household node pinning lands.
 package affinity
 
 import (

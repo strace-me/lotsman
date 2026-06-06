@@ -7,6 +7,10 @@
 //
 // This realizes the third knob mode from the spec: off (never) / on (always) /
 // auto (the machine experiments and keeps what measurably helps — "не тупо").
+//
+// Deferred (LOT-18/LOT-10): build-ahead A/B knob measurement, no callers yet.
+// pkg/adaptive has a separate threshold-spreading Tuner that IS wired; this one
+// is the A/B-measurement variant — wire it when canary A/B knob tuning lands.
 package tuner
 
 import (

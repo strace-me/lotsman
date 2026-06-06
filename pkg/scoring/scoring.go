@@ -4,6 +4,13 @@
 // about success/throughput and tolerates latency. A profile encodes those
 // weights so the selector ranks strategies/nodes by what actually matters for
 // the service in question.
+//
+// Deferred (LOT-11/LOT-10): build-ahead, no callers yet. On review this is NOT a
+// strict duplicate of pkg/balancer: it ranks STRATEGIES from learned KB history
+// (kb.Stats), whereas balancer ranks NODES from fresh probe quality (different
+// ranked entity, different data source). Kept (not folded into balancer) — wire
+// it when LOT-10 needs multi-axis (latency/jitter/loss) strategy scoring beyond
+// the KB's success-only TopNZapret. Delete only if that path is abandoned.
 package scoring
 
 import "github.com/strace-me/lotsman/pkg/kb"
