@@ -814,7 +814,7 @@ func (s clashConnSource) Connections(ctx context.Context) ([]observe.Conn, error
 	out := make([]observe.Conn, len(cs))
 	for i, c := range cs {
 		out[i] = observe.Conn{
-			Chains: c.Chains, Upload: c.Upload, Download: c.Download,
+			Chains: c.Chains, Upload: c.Upload, Download: c.Download, Rule: c.Rule,
 			Host: c.Metadata.Host, DestIP: c.Metadata.DestinationIP, Network: c.Metadata.Network,
 		}
 	}
