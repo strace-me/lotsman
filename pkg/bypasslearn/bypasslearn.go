@@ -37,7 +37,7 @@ func (c Classifier) Candidate(network, dstIP, dstPort string, upload, download i
 		return nil, false // one-way or dead flow — not a NAT-sensitive session
 	}
 	port, err := strconv.Atoi(dstPort)
-	if err != nil || port <= 0 {
+	if err != nil || port <= 0 || port > 65535 {
 		return nil, false
 	}
 	if c.excludedPort(port) {
@@ -51,7 +51,10 @@ func (c Classifier) Candidate(network, dstIP, dstPort string, upload, download i
 		return nil, false // low/well-known ports (DNS 53, etc.) are not game/RTC
 	}
 	ip := net.ParseIP(dstIP)
-	if ip == nil || !routable(ip) {
+	// IPv4 only: the capture table is `table ip singbox` (IPv4 family); an IPv6
+	// literal in an IPv4 set is a hard nft type error that breaks the whole table.
+	// Also drop private v4 (RFC1918) defensively even if not in the Exclude set.
+	if ip == nil || ip.To4() == nil || ip.IsPrivate() || !routable(ip) {
 		return nil, false
 	}
 	for _, n := range c.Exclude {
