@@ -682,7 +682,14 @@ func main() {
 				sm := snap.Services[name]
 				log.Info("observe", "service", name, "flows", sm.Flows,
 					"leak_ratio", sm.LeakRatio, "dead_flow_ratio", sm.DeadFlowRatio,
-					"udp_flows", sm.UDPFlows, "bytes", sm.Bytes)
+					"udp_flows", sm.UDPFlows, "oneway_udp_ratio", sm.OneWayUDPRatio, "bytes", sm.Bytes)
+				// LOT-35 #2: surface a wedged one-way RTC session (sending, no return —
+				// torn voice conntrack after a restart). SURFACE-ONLY: only the client can
+				// recover by renegotiating, so this is a visibility signal, not a trigger.
+				if sm.WedgedOneWayRTC() {
+					log.Warn("possible wedged one-way RTC (sending, no return) — voice may be one-way until the client renegotiates (channel-hop)",
+						"service", name, "udp_flows", sm.UDPFlows, "oneway_udp_flows", sm.OneWayUDPFlows, "oneway_udp_ratio", sm.OneWayUDPRatio)
+				}
 			}
 			for _, v := range vs {
 				if v.Misrouted {

@@ -122,6 +122,17 @@ func TestObserveLeakAndDeadRatios(t *testing.T) {
 	if got := yt.DeadFlowRatio; got < 0.666 || got > 0.667 {
 		t.Errorf("youtube dead_ratio=%v, want ~0.6667", got)
 	}
+	// one-way UDP: both dead flows uploaded (1200) with 0 download => 2 of 3 UDP.
+	if yt.OneWayUDPFlows != 2 {
+		t.Errorf("youtube oneway_udp=%d, want 2", yt.OneWayUDPFlows)
+	}
+	if got := yt.OneWayUDPRatio; got < 0.666 || got > 0.667 {
+		t.Errorf("youtube oneway_udp_ratio=%v, want ~0.6667", got)
+	}
+	// only 3 UDP flows here (< rtcMinUDPFlows) => not enough to flag wedged RTC.
+	if yt.WedgedOneWayRTC() {
+		t.Error("3 UDP flows is below rtcMinUDPFlows; must not flag wedged RTC")
+	}
 	// bytes = sum upload+download over the 4 matched youtube flows.
 	wantBytes := int64((1200 + 0) + (1200 + 98765) + (1200 + 0) + (500 + 40000))
 	if yt.Bytes != wantBytes {
@@ -321,6 +332,30 @@ func TestHasLiveRealtimeUDP(t *testing.T) {
 			}
 			if tt.wantSvc != "" && svc != tt.wantSvc {
 				t.Errorf("svc=%q, want %q", svc, tt.wantSvc)
+			}
+		})
+	}
+}
+
+// LOT-35 #2: WedgedOneWayRTC surfaces a voice/RTC session that is sending with no
+// return (torn conntrack after a restart). It requires enough UDP flows AND most of
+// them one-way — a healthy or merely-idle service must not trip it. SURFACE-ONLY.
+func TestWedgedOneWayRTC(t *testing.T) {
+	tests := []struct {
+		name string
+		m    ServiceMetrics
+		want bool
+	}{
+		{"wedged: 5 udp, 4 one-way", ServiceMetrics{UDPFlows: 5, OneWayUDPFlows: 4, OneWayUDPRatio: 0.8}, true},
+		{"too few udp flows", ServiceMetrics{UDPFlows: 3, OneWayUDPFlows: 3, OneWayUDPRatio: 1.0}, false},
+		{"enough flows but mostly two-way", ServiceMetrics{UDPFlows: 6, OneWayUDPFlows: 2, OneWayUDPRatio: 0.33}, false},
+		{"exactly at ratio threshold (not over)", ServiceMetrics{UDPFlows: 6, OneWayUDPFlows: 3, OneWayUDPRatio: 0.5}, false},
+		{"no udp at all", ServiceMetrics{Flows: 10, UDPFlows: 0}, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := tt.m.WedgedOneWayRTC(); got != tt.want {
+				t.Errorf("WedgedOneWayRTC()=%v, want %v", got, tt.want)
 			}
 		})
 	}
