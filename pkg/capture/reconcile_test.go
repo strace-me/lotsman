@@ -129,6 +129,27 @@ func TestReconcileArmedRollsBackOnApplyFailure(t *testing.T) {
 	}
 }
 
+// A clean nft -f that nonetheless leaves the table UNREADABLE (post-apply
+// LiveTable errors — table gone) is the catastrophic case the verify exists for.
+// It must roll back, not report success (previously err!=nil skipped the guard).
+func TestReconcileArmedRollsBackWhenPostApplyTableUnreadable(t *testing.T) {
+	run := &fakeRunner{} // apply (nft -f) itself succeeds
+	calls := 0
+	live := func(context.Context) ([]byte, error) {
+		calls++
+		if calls == 1 {
+			return []byte("table ip singbox { }"), nil // before: differs -> applies
+		}
+		return nil, errors.New("nft list table: No such file or directory") // table gone after load
+	}
+	r := newRec(t, run, live)
+	r.Arm()
+	err := r.Reconcile(context.Background())
+	if err == nil || !strings.Contains(err.Error(), "rolled back") {
+		t.Fatalf("unreadable post-apply table must roll back and error, got %v", err)
+	}
+}
+
 func TestApplyScriptIsAtomicReplace(t *testing.T) {
 	s := string(applyScript(DefaultModel()))
 	if !strings.HasPrefix(s, "add table ip singbox\ndelete table ip singbox\n") {

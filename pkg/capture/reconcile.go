@@ -129,9 +129,13 @@ func (r *Reconciler) apply(ctx context.Context, script, live []byte) error {
 	// NOT byte-compare against `nft list` here — nft re-canonicalises output (set
 	// ordering/merging), so an exact compare could false-trip a rollback even on a
 	// correct load. We only catch a catastrophic load (empty/absent table).
-	if now, err := r.LiveTable(ctx); err == nil && len(bytes.TrimSpace(now)) == 0 {
+	// A healthy load leaves the table readable; if the post-apply read ERRORS (table
+	// gone after nft -f) or comes back empty, that's the catastrophic case the check
+	// exists for — roll back. (Previously err!=nil skipped the guard, so the worst
+	// case — table absent → nft list exits non-zero — slipped through as success.)
+	if now, err := r.LiveTable(ctx); err != nil || len(bytes.TrimSpace(now)) == 0 {
 		r.rollback(ctx, live)
-		return fmt.Errorf("capture: post-apply table empty, rolled back")
+		return fmt.Errorf("capture: post-apply table unreadable/empty, rolled back (read err: %v)", err)
 	}
 	r.log().Info("capture: table reconciled (applied)", "path", r.RulesetPath)
 	return nil
