@@ -169,7 +169,14 @@ func (r *Reconciler) Reconcile(ctx context.Context) error {
 		r.Log.Warn("reconcile: knob skipped for target sing-box version", "knob", k)
 	}
 
-	live, _ := os.ReadFile(r.ConfigPath)
+	live, rerr := os.ReadFile(r.ConfigPath)
+	if rerr != nil && !os.IsNotExist(rerr) {
+		// A genuine read error (not "file absent") means a config likely DOES exist
+		// but we can't see it. Proceeding would treat live as empty: no backup is
+		// taken and a failed restart has nothing to roll back to (rollback bails on
+		// len(live)==0). Refuse the tick instead of applying blind (LOT-13 hardening).
+		return fmt.Errorf("reconcile: read live config %s: %w (refusing to apply blind)", r.ConfigPath, rerr)
+	}
 	if sameConfig(desired, live) {
 		r.last = desired
 		r.setLastNodes(len(nodes))

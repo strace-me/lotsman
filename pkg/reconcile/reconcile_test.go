@@ -296,6 +296,27 @@ func TestReconcileDefersRestartDuringActiveVoice(t *testing.T) {
 	}
 }
 
+// LOT-13 hardening: if the live config exists but is UNREADABLE (a real read
+// error, not "absent"), Reconcile must refuse the tick — proceeding would treat
+// live as empty, take no backup, and leave a failed restart with nothing to roll
+// back to. A directory at ConfigPath makes os.ReadFile error with a non-IsNotExist
+// error, simulating the unreadable case.
+func TestReconcileRefusesUnreadableLiveConfig(t *testing.T) {
+	run := &fakeRunner{}
+	r, cfgPath := testReconciler(t, run, fakeLoader{nodes: []subscription.Node{node(t)}}, false)
+	if err := os.Mkdir(cfgPath, 0o755); err != nil {
+		t.Fatalf("mkdir cfgPath: %v", err)
+	}
+
+	err := r.Reconcile(context.Background())
+	if err == nil {
+		t.Fatal("expected an error when the live config is unreadable")
+	}
+	if run.ran("check") || run.ran("restart") {
+		t.Errorf("must not validate or restart when live config is unreadable, calls=%v", run.calls)
+	}
+}
+
 // LOT-13: the maintenance ticker and the armed remediation commit both call
 // Reconcile from separate goroutines. Concurrent passes must be serialized — run
 // under -race to catch any unsynchronized last/lastNodes access, and assert that N
