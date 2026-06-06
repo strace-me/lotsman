@@ -66,9 +66,11 @@ func (d *Detector) Observe(ok bool, rttMs int) {
 		switch {
 		case d.baseline == 0:
 			d.baseline = float64(rttMs)
-		case float64(rttMs) <= d.baseline*d.cfg.RTTFactor:
-			// Only learn from non-spike samples, so a sustained spike does not
-			// creep into the baseline and mask itself.
+		case d.count <= d.cfg.MinSamples || float64(rttMs) <= d.baseline*d.cfg.RTTFactor:
+			// During warm-up (before MinSamples, where State() can't yet flag) learn
+			// UNCONDITIONALLY so a fluke-fast first sample can't latch the baseline low
+			// and report Degraded forever (LOT-38). After warm-up, reject spikes so a
+			// sustained spike does not creep into the baseline and mask itself.
 			d.baseline = d.cfg.RTTAlpha*float64(rttMs) + (1-d.cfg.RTTAlpha)*d.baseline
 		}
 	}

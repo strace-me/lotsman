@@ -63,3 +63,14 @@ func TestRecoversToHealthy(t *testing.T) {
 		t.Errorf("state = %s, want healthy after recovery", got)
 	}
 }
+
+// LOT-38: a fluke-fast first sample must not latch the baseline low and report a
+// steady (higher) normal RTT as Degraded forever. Warm-up learns unconditionally.
+func TestBaselineDoesNotLatchOnFastFirstSample(t *testing.T) {
+	d := New(DefaultConfig())
+	d.Observe(true, 8)    // fluke-fast first sample seeds baseline=8
+	feed(d, 12, true, 40) // true steady-state ~40ms (> 8*2.5=20: would latch pre-fix)
+	if got := d.State(); got != Healthy {
+		t.Errorf("steady 40ms after a fluke-fast seed must read Healthy, got %s (baseline=%.0f)", got, d.BaselineRTT())
+	}
+}
