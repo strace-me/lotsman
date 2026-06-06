@@ -118,6 +118,33 @@ flag-gated and dry-run by default.
 - **Add a background maintenance job** → `periodic.Task` in main.
 - **Add a node/quality ranking signal** → `pkg/quality` + `pkg/balancer` weights; consumed by `vpnbalance`/`noderank`.
 
+## Dependencies (intra-module; AUTO — don't hand-edit; check before adding code to avoid duplication)
+Regenerate: `go list -f '{{.ImportPath}} {{join .Imports " "}}' ./... | sed -E 's#github.com/strace-me/lotsman/##g' | awk '{printf "%s:",$1;for(i=2;i<=NF;i++)if($i~/^pkg\//){sub(/^pkg\//,"",$i);printf " %s",$i}print ""}' | grep -E '^pkg/|^cmd/' | sed -E 's#^pkg/##' | sort`
+
+```
+aggregate: subscription          applier: events executor          balancer: quality
+blockcheck: strategy             brain: anomaly audit events policy registry strategy
+coherence: registry strategy     config: aggregate dataplane pools registry strategy subscription zapret
+dataplane: events quality stunprobe   desynctune: desyncgen tester   executor: dataplane registry strategy
+flowseal: subscription           kb: strategy                       metrics: brain misroute observe remediate
+misroute: observe                nfqwsgen: strategycat              noderank: balancer dataplane quality
+pathhealth: dataplane registry strategy   policy: anomaly           pools: subscription
+probing: dataplane events faillog kb registry   reconcile: executor pools registry singbox subscription
+registry: strategy               remctl: incident misroute remediate singbox   remediate: iplearn misroute
+rulesets: aggregate              scoring: kb   singbox: pools registry subscription   stunprobe: quality
+tester: quality                  tspu: strategy   vpnbalance: balancer dataplane quality
+zapret: desyncgen strategy       zapretgen: registry strategy strategycat zapret zaptune
+zaptune: nfqwsgen registry strategy strategycat
+```
+(leaf, no intra-deps: adaptive affinity anomaly audit bypasslearn capture correlate damper desyncgen
+domainscan enginehealth events faillog incident iplearn observe periodic selector state strategy
+strategycat subscription quality ttl tuner). `cmd/lotsmand` wires ~all; `cmd/lotsmanctl` = blockcheck
+coherence config dataplane domainscan registry singbox strategy subscription.
+
+**Anti-duplication rule:** before writing a new helper, grep the target pkg + check this graph — if a
+pkg already does it (e.g. composition→zaptune/nfqwsgen, NAT-sensitive classify→bypasslearn, .srs→domains
+→rulesets, node rank→noderank), reuse it.
+
 ## Other durable state
 
 - [docs/ARCHITECTURE.md](ARCHITECTURE.md) — prose architecture, state machine, routing model.
