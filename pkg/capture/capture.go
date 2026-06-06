@@ -86,23 +86,23 @@ func GenerateNft(m Model) []byte {
 	fmt.Fprintf(&b, "table ip %s {\n", m.Table)
 	fmt.Fprintf(&b, "\tchain %s {\n", m.Chain)
 	b.WriteString("\t\ttype filter hook prerouting priority mangle; policy accept;\n")
-	if len(m.LocalCIDRs) > 0 {
-		fmt.Fprintf(&b, "\t\tip daddr %s return\n", daddrSet(m.LocalCIDRs))
+	if set := daddrSet(m.LocalCIDRs); set != "" {
+		fmt.Fprintf(&b, "\t\tip daddr %s return\n", set)
 	}
 	fmt.Fprintf(&b, "\t\tmeta mark 0x%08x return\n", m.SelfMark)
-	if len(m.LoopBypassIPs) > 0 {
-		fmt.Fprintf(&b, "\t\tip daddr %s return\n", daddrSet(m.LoopBypassIPs))
+	if set := daddrSet(m.LoopBypassIPs); set != "" {
+		fmt.Fprintf(&b, "\t\tip daddr %s return\n", set)
 	}
-	if len(m.SinkholeCIDRs) > 0 {
-		fmt.Fprintf(&b, "\t\tip daddr %s return\n", daddrSet(m.SinkholeCIDRs))
+	if set := daddrSet(m.SinkholeCIDRs); set != "" {
+		fmt.Fprintf(&b, "\t\tip daddr %s return\n", set)
 	}
 	if len(m.BypassUDPPorts) > 0 {
 		fmt.Fprintf(&b, "\t\tudp dport %s return\n", portSet(m.BypassUDPPorts))
 	}
 	// TM-6 device override: per-device kernel-direct, BEFORE class bypass and tproxy.
 	for _, d := range m.DeviceBypass {
-		if len(d.SrcCIDRs) > 0 {
-			fmt.Fprintf(&b, "\t\tip saddr %s return\n", daddrSet(d.SrcCIDRs))
+		if set := daddrSet(d.SrcCIDRs); set != "" {
+			fmt.Fprintf(&b, "\t\tip saddr %s return\n", set)
 		}
 	}
 	// TM-3 bypass: kernel-direct returns for NAT-sensitive classes, BEFORE tproxy.
@@ -120,9 +120,21 @@ func GenerateNft(m Model) []byte {
 }
 
 // daddrSet renders an ip-address match: a bare value for one element, a
-// brace-set for many — members sorted by IP value (nft canonical order).
+// brace-set for many — members sorted by IP value (nft canonical order). Returns
+// "" if no valid member remains. The table is `ip` (IPv4) family, so IPv6 and
+// unparseable members are dropped: rendering them would produce invalid nft that
+// fails `nft -c`, silently stalling all capture updates (e.g. a learned IPv6
+// game-server range in a DynBypass).
 func daddrSet(items []string) string {
-	s := append([]string{}, items...)
+	s := make([]string, 0, len(items))
+	for _, it := range items {
+		if ip := ipOf(it); ip != nil && ip.To4() != nil {
+			s = append(s, it)
+		}
+	}
+	if len(s) == 0 {
+		return ""
+	}
 	sort.Slice(s, func(i, j int) bool { return bytes.Compare(ipOf(s[i]), ipOf(s[j])) < 0 })
 	if len(s) == 1 {
 		return s[0]
@@ -145,8 +157,8 @@ func ipOf(s string) net.IP {
 // (ip daddr … then <proto> dport … then return). Returns "" if it has no matcher.
 func renderBypass(bp Bypass) string {
 	var parts []string
-	if len(bp.DstCIDRs) > 0 {
-		parts = append(parts, "ip daddr "+daddrSet(bp.DstCIDRs))
+	if set := daddrSet(bp.DstCIDRs); set != "" {
+		parts = append(parts, "ip daddr "+set)
 	}
 	if len(bp.DstPorts) > 0 && bp.Proto != "" {
 		parts = append(parts, bp.Proto+" dport "+portStrSet(bp.DstPorts))
@@ -158,12 +170,30 @@ func renderBypass(bp Bypass) string {
 }
 
 // portStrSet renders string ports/ranges (e.g. "3478-3481") as a bare value or a
-// brace-set, preserving input order (ranges have no single sort key).
+// brace-set, sorted by the low end of each token — nft re-canonicalizes a port
+// set into numeric order, so emitting input order would diff against `nft list`
+// forever and churn the reconcile (LOT-1 class).
 func portStrSet(ports []string) string {
-	if len(ports) == 1 {
-		return ports[0]
+	p := append([]string{}, ports...)
+	sort.Slice(p, func(i, j int) bool { return portLow(p[i]) < portLow(p[j]) })
+	if len(p) == 1 {
+		return p[0]
 	}
-	return "{ " + strings.Join(ports, ", ") + " }"
+	return "{ " + strings.Join(p, ", ") + " }"
+}
+
+// portLow parses the low end of a port token ("443", "3478-3481", "3478:3481")
+// for nft-canonical sorting; an unparseable token sorts last.
+func portLow(tok string) int {
+	tok = strings.TrimSpace(tok)
+	if i := strings.IndexAny(tok, "-:"); i >= 0 {
+		tok = tok[:i]
+	}
+	n, err := strconv.Atoi(strings.TrimSpace(tok))
+	if err != nil {
+		return 1 << 30
+	}
+	return n
 }
 
 func portSet(ports []int) string {

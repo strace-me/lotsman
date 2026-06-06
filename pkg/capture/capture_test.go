@@ -104,3 +104,36 @@ func TestDefaultModelHasNoDeviceOverride(t *testing.T) {
 		t.Error("DefaultModel (no device override) must stay byte-identical to live")
 	}
 }
+
+// Bug-hunt fix: nft re-canonicalizes a port set into numeric order, so a bypass
+// with unsorted/range ports must be emitted sorted by the low end — else it diffs
+// against `nft list` forever and churns the reconcile (LOT-1 class).
+func TestPortSetSortedByLowEnd(t *testing.T) {
+	m := DefaultModel()
+	m.BypassSets = []Bypass{{Name: "x", Proto: "udp", DstPorts: []string{"30000-45000", "3478-3481", "443"}}}
+	out := string(GenerateNft(m))
+	if !strings.Contains(out, "udp dport { 443, 3478-3481, 30000-45000 } return") {
+		t.Errorf("port set not sorted by low end:\n%s", out)
+	}
+}
+
+// Bug-hunt fix: the table is ip (IPv4) family — IPv6/malformed members must be
+// dropped (rendering them = invalid nft that fails `nft -c`, stalling capture).
+func TestDaddrSetDropsNonIPv4(t *testing.T) {
+	m := DefaultModel()
+	m.BypassSets = []Bypass{
+		{Name: "mixed", Proto: "udp", DstCIDRs: []string{"2001:db8::/32", "1.2.3.4/32"}, DstPorts: []string{"443"}},
+		{Name: "v6only", DstCIDRs: []string{"2001:db8::/32"}}, // all-IPv6 -> no rule at all
+	}
+	out := string(GenerateNft(m))
+	if strings.Contains(out, "2001:db8") {
+		t.Errorf("IPv6 member leaked into ip-family table:\n%s", out)
+	}
+	if !strings.Contains(out, "ip daddr 1.2.3.4/32 udp dport 443 return") {
+		t.Errorf("IPv4 member of a mixed set must survive:\n%s", out)
+	}
+	// The all-IPv6 bypass has no valid matcher -> renders no rule (not a broken "ip daddr  return").
+	if strings.Contains(out, "ip daddr  ") || strings.Contains(out, "ip daddr {  }") {
+		t.Errorf("empty daddr set produced a malformed rule:\n%s", out)
+	}
+}
