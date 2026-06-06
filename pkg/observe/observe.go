@@ -77,6 +77,12 @@ type ServiceMetrics struct {
 	UDPFlows int
 	// DeadUDPFlows is matched UDP/QUIC connections with ~0 download bytes.
 	DeadUDPFlows int
+	// OneWayUDPFlows is matched UDP flows that are SENDING but getting nothing back
+	// (upload > 0, download ~0) — distinct from DeadUDPFlows, which also counts fully
+	// idle flows. This is the wedged-RTC / one-way-voice signature (LOT-35 #2): after
+	// a restart tears the call's conntrack/NAT, the client keeps transmitting RTP /
+	// retrying the handshake to several media IPs while the return path stays dead.
+	OneWayUDPFlows int
 	// Bytes is total upload+download across matched flows.
 	Bytes int64
 
@@ -90,6 +96,25 @@ type ServiceMetrics struct {
 	LeakRatio float64
 	// DeadFlowRatio = DeadUDPFlows / UDPFlows (0 when UDPFlows == 0).
 	DeadFlowRatio float64
+	// OneWayUDPRatio = OneWayUDPFlows / UDPFlows (0 when UDPFlows == 0).
+	OneWayUDPRatio float64
+}
+
+// rtcMinUDPFlows / rtcOneWayRatio gate the wedged-one-way-RTC surface signal: at
+// least this many UDP flows, most of them sending-without-receiving. Heuristic
+// thresholds, not a remediation gate — they only drive a log/metric (LOT-35 #2).
+const (
+	rtcMinUDPFlows = 4
+	rtcOneWayRatio = 0.5
+)
+
+// WedgedOneWayRTC reports whether this service shows the wedged one-way RTC
+// signature: enough UDP flows, most of them sending with no return (OneWayUDPRatio
+// over threshold). It is SURFACE-ONLY — only the client can recover a torn voice
+// session by renegotiating, so this never feeds remediation; it just makes the
+// condition visible in logs/metrics (LOT-35 #2).
+func (m ServiceMetrics) WedgedOneWayRTC() bool {
+	return m.UDPFlows >= rtcMinUDPFlows && m.OneWayUDPRatio > rtcOneWayRatio
 }
 
 // Snapshot is the result of one eye pass: per-service metrics plus the totals
@@ -254,6 +279,9 @@ func (e *Eye) Observe(ctx context.Context) (Snapshot, error) {
 			sm.UDPFlows++
 			if c.Download <= deadDownloadBytes {
 				sm.DeadUDPFlows++
+				if c.Upload > 0 {
+					sm.OneWayUDPFlows++ // sending but nothing back = wedged RTC (LOT-35 #2)
+				}
 			}
 		}
 		snap.Services[hit.svc.Name] = sm
@@ -265,6 +293,7 @@ func (e *Eye) Observe(ctx context.Context) (Snapshot, error) {
 		}
 		if sm.UDPFlows > 0 {
 			sm.DeadFlowRatio = float64(sm.DeadUDPFlows) / float64(sm.UDPFlows)
+			sm.OneWayUDPRatio = float64(sm.OneWayUDPFlows) / float64(sm.UDPFlows)
 		}
 		snap.Services[name] = sm
 	}
