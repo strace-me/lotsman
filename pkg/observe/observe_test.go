@@ -296,3 +296,32 @@ func TestMatchBySelectorRoute(t *testing.T) {
 		t.Error("empty rule must not selector-match")
 	}
 }
+
+// LOT-35: HasLiveRealtimeUDP is the voice/RTC signal the reconciler uses to defer a
+// sing-box restart. It must report a service only when a LIVE (non-dead) UDP flow
+// exists — a wedged service whose UDP flows are all dead must NOT block a recovery
+// restart, and a TCP-only service must never count.
+func TestHasLiveRealtimeUDP(t *testing.T) {
+	tests := []struct {
+		name    string
+		svcs    map[string]ServiceMetrics
+		wantOK  bool
+		wantSvc string
+	}{
+		{"no services", nil, false, ""},
+		{"live udp flow", map[string]ServiceMetrics{"discord": {Service: "discord", UDPFlows: 2, DeadUDPFlows: 1}}, true, "discord"},
+		{"all udp dead (wedged) does not block", map[string]ServiceMetrics{"youtube": {Service: "youtube", UDPFlows: 3, DeadUDPFlows: 3}}, false, ""},
+		{"tcp-only never counts", map[string]ServiceMetrics{"web": {Service: "web", Flows: 5, UDPFlows: 0}}, false, ""},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			svc, ok := Snapshot{Services: tt.svcs}.HasLiveRealtimeUDP()
+			if ok != tt.wantOK {
+				t.Fatalf("ok=%v, want %v", ok, tt.wantOK)
+			}
+			if tt.wantSvc != "" && svc != tt.wantSvc {
+				t.Errorf("svc=%q, want %q", svc, tt.wantSvc)
+			}
+		})
+	}
+}
