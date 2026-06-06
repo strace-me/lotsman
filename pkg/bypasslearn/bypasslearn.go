@@ -14,6 +14,7 @@ import (
 	"net"
 	"sort"
 	"strconv"
+	"strings"
 	"sync"
 )
 
@@ -76,7 +77,7 @@ func routable(ip net.IP) bool {
 }
 
 func equalFoldUDP(network string) bool {
-	return network == "udp" || network == "UDP" || network == "Udp"
+	return strings.EqualFold(strings.TrimSpace(network), "udp")
 }
 
 // Learner accumulates classified candidates and promotes a destination to the
