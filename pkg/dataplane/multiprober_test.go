@@ -43,6 +43,20 @@ func TestTCPProbe(t *testing.T) {
 	}
 }
 
+// LOT-3: the QUIC probe dispatches to HTTP/3 and reports a blocked/unreachable
+// QUIC path as a failure (the signal an HTTP/TCP probe misses). A dead UDP target
+// has no HTTP/3 responder, so the probe must fail rather than falsely pass.
+func TestQUICProbeUnreachable(t *testing.T) {
+	m := newProber(t, map[string]ServiceProbe{
+		"video": {Type: ProbeQUIC, Target: "https://127.0.0.1:1/"}, // nothing speaks HTTP/3 here
+	})
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	if v := m.Probe(ctx, "video", 0); v.OK || v.Err == "" {
+		t.Errorf("quic to a dead target must fail with an error, got %+v", v)
+	}
+}
+
 func TestSTUNProbe(t *testing.T) {
 	// STUN server that replies with a valid Binding Success.
 	pc, err := net.ListenPacket("udp", "127.0.0.1:0")

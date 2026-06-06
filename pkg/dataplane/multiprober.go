@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/quic-go/quic-go/http3"
 	"github.com/strace-me/lotsman/pkg/events"
 	"github.com/strace-me/lotsman/pkg/quality"
 	"github.com/strace-me/lotsman/pkg/stunprobe"
@@ -15,17 +16,20 @@ import (
 // Probe types. HTTP measures app-layer reachability; TCP measures whether a
 // handshake completes (cheap, catches RST/timeout from DPI); STUN sends a real
 // STUN Binding Request over UDP and waits for a response — the right signal for
-// UDP/voice paths (Discord voice, WebRTC) that an HTTP probe cannot see.
+// UDP/voice paths (Discord voice, WebRTC) that an HTTP probe cannot see; QUIC
+// issues an HTTP/3 request — the right signal for QUIC/video (the "TCP ok, QUIC
+// dead" trap that a TCP/HTTP probe is blind to — LOT-3).
 const (
 	ProbeHTTP = "http"
 	ProbeTCP  = "tcp"
 	ProbeSTUN = "stun" // UDP reachability via STUN
+	ProbeQUIC = "quic" // HTTP/3 reachability (direct box egress — see probeQUIC)
 )
 
 // ServiceProbe declares how to probe one service.
 type ServiceProbe struct {
-	Type   string // ProbeHTTP | ProbeTCP | ProbeSTUN
-	Target string // http: URL; tcp/stun: host:port
+	Type   string // ProbeHTTP | ProbeTCP | ProbeSTUN | ProbeQUIC
+	Target string // http/quic: URL; tcp/stun: host:port
 }
 
 // MultiProber probes each service with its configured probe type.
@@ -71,9 +75,45 @@ func (m *MultiProber) Probe(ctx context.Context, service string, position int) e
 		return m.probeTCP(ctx, service, position, sp.Target)
 	case ProbeSTUN:
 		return m.probeSTUN(ctx, service, position, sp.Target)
+	case ProbeQUIC:
+		return m.probeQUIC(ctx, service, position, sp.Target)
 	default: // ProbeHTTP or unset
 		return m.http.Probe(ctx, service, position)
 	}
+}
+
+// probeQUIC issues an HTTP/3 (QUIC) GET to the target URL. Any HTTP/3 response
+// means the QUIC path is open — the signal an HTTP/TCP probe is blind to (the
+// "TCP ok, QUIC dead" trap that left youtube's KB healthy while video stalled —
+// LOT-3). A fresh transport per probe stops a reused connection from masking a
+// fresh block.
+//
+// CAVEAT — this is DIRECT box egress, NOT the service's active routed path: QUIC
+// cannot tunnel through SOCKS5 (UDP ASSOCIATE is one-shot, a QUIC flow is not), so
+// unlike probeTCP/probeSTUN it ignores m.dialer. It therefore answers "is QUIC to
+// <target> reachable from the box directly?" — meaningful on direct/zapret tiers,
+// but it must NOT be a service's only health probe on the VPN tier, where a
+// blocked direct QUIC egress is the expected TSPU state and would false-fail.
+func (m *MultiProber) probeQUIC(ctx context.Context, service string, position int, target string) events.ProductionVerdict {
+	v := events.ProductionVerdict{Service: service, Position: position}
+	tr := &http3.Transport{}
+	defer tr.Close()
+	client := &http.Client{Transport: tr, Timeout: m.timeout}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, target, nil)
+	if err != nil {
+		v.Err = err.Error()
+		return v
+	}
+	start := time.Now()
+	resp, err := client.Do(req)
+	v.RTTms = int(time.Since(start).Milliseconds())
+	if err != nil {
+		v.Err = "quic: " + err.Error()
+		return v
+	}
+	resp.Body.Close()
+	v.OK = true
+	return v
 }
 
 // Burst runs count probes spaced by interval and computes tail-latency
