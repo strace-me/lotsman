@@ -22,6 +22,7 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"os/exec"
 	"os/signal"
 	"sort"
 	"strings"
@@ -36,6 +37,8 @@ import (
 	"github.com/strace-me/lotsman/pkg/audit"
 	"github.com/strace-me/lotsman/pkg/balancer"
 	"github.com/strace-me/lotsman/pkg/brain"
+	"github.com/strace-me/lotsman/pkg/bypasslearn"
+	"github.com/strace-me/lotsman/pkg/capture"
 	"github.com/strace-me/lotsman/pkg/config"
 	"github.com/strace-me/lotsman/pkg/correlate"
 	"github.com/strace-me/lotsman/pkg/damper"
@@ -104,6 +107,8 @@ func main() {
 		pathHealth      = flag.Bool("path-health", false, "escalation-v2 DETECT (LOT-33-design E-1, PROPOSE-ONLY): fan-out probe of EVERY chain step out-of-band (box-direct for zapret/direct, clash NodeDelay for vpn/emergency) and LOG the best working tier vs current position. Changes nothing. DEFAULT OFF.")
 		pathHealthInt   = flag.Duration("path-health-interval", time.Minute, "path-health detect period (escalation-v2 E-1)")
 		pathHealthURL   = flag.String("path-health-test-url", "http://www.gstatic.com/generate_204", "generic connectivity URL for the vpn-tier NodeDelay probe of non-HTTP (tcp/stun) services")
+		captureLearn    = flag.Bool("capture-learn", false, "TM-5 PROPOSE-ONLY: learn NAT-sensitive flows (game/voice UDP) from clash connections and reconcile the capture nft table (Lotsman-owned tproxy) with bypass `return` rules for them. Logs what it would change; does NOT apply (no -capture-arm yet). DEFAULT OFF.")
+		captureRuleset  = flag.String("capture-ruleset-file", "/etc/nftables.d/10-lotsman-capture.nft", "path the capture reconciler writes the generated nft table to (only when armed)")
 		pathHealthAct   = flag.Bool("path-health-act", false, "escalation-v2 ACT (E-2): let Brain escalate straight to the best WORKING tier from the path-health detector (skip known-down rungs) instead of one rung at a time. Requires -path-health. DEFAULT OFF.")
 		smart           = flag.Bool("smart", true, "enable the intelligence layer (policy/correlate/damper/adaptive/anomaly) in escalation decisions")
 		checkInterval   = flag.Duration("check-interval", 0, "run background maintenance (Flowseal update, subscription refresh) every interval (0 = disabled)")
@@ -707,6 +712,63 @@ func main() {
 		}
 	}
 
+	// TM-5 learned bypass (propose-only): learn NAT-sensitive UDP destinations from
+	// clash connections and reconcile the (Lotsman-owned) capture nft table with a
+	// bypass `return` for them. Off by default; never applies (no -capture-arm yet).
+	if *captureLearn {
+		base := capture.DefaultModel()
+		var exclude []*net.IPNet
+		for _, c := range base.LocalCIDRs {
+			if _, n, err := net.ParseCIDR(c); err == nil {
+				exclude = append(exclude, n)
+			}
+		}
+		for _, ip := range base.LoopBypassIPs { // VPN server IPs -> /32 exclude
+			if _, n, err := net.ParseCIDR(ip + "/32"); err == nil {
+				exclude = append(exclude, n)
+			}
+		}
+		clf := bypasslearn.Classifier{Exclude: exclude}
+		learner := &bypasslearn.Learner{}
+		capRec := &capture.Reconciler{
+			Model: base, RulesetPath: *captureRuleset, BackupDir: *reconcileBackup,
+			Runner:    executor.ExecRunner{},
+			LiveTable: func(c context.Context) ([]byte, error) { return nftListTable(c, "ip", base.Table) },
+			DynBypass: func() []capture.Bypass {
+				ips := learner.Snapshot()
+				if len(ips) == 0 {
+					return nil
+				}
+				cidrs := make([]string, len(ips))
+				for i, ip := range ips {
+					cidrs[i] = ip.String() // bare IP = nft canonical (matches list output)
+				}
+				return []capture.Bypass{{Name: "learned", DstCIDRs: cidrs}}
+			},
+			Log: log,
+		}
+		clp := periodic.New(log)
+		clp.Add(periodic.Task{Name: "capture-learn", Interval: *observeInterval, RunAtStart: true, Fn: func(c context.Context) error {
+			conns, err := clash.Connections(c)
+			if err != nil {
+				return err
+			}
+			learned := 0
+			for _, cn := range conns {
+				if ip, ok := clf.Candidate(cn.Metadata.Network, cn.Metadata.DestinationIP, cn.Metadata.DestinationPort, cn.Upload, cn.Download); ok {
+					learner.Observe(ip)
+					learned++
+				}
+			}
+			if learned > 0 {
+				log.Info("capture-learn: NAT-sensitive flows observed", "candidates", learned, "promoted", len(learner.Snapshot()))
+			}
+			return capRec.Reconcile(c)
+		}})
+		runners = append(runners, clp.Run)
+		log.Info("capture-learn enabled (TM-5, propose-only)", "interval", observeInterval.String(), "ruleset", *captureRuleset)
+	}
+
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 	if *duration > 0 {
@@ -984,6 +1046,17 @@ func wanReachable(ctx context.Context) bool {
 // breaks real clients but not the box probe can pass the canary and be learned as
 // good. Acceptable as a first gate (a recipe that breaks even the box is clearly
 // bad), but a faithful client-path probe is future work (tracked under LOT-10).
+// nftListTable returns `nft list table <family> <name>` stdout (the capture
+// reconciler's live-table source). An absent table is an error the reconciler
+// treats as "differs".
+func nftListTable(ctx context.Context, family, name string) ([]byte, error) {
+	out, err := exec.CommandContext(ctx, "nft", "list", "table", family, name).Output()
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 func httpReachable(ctx context.Context, target string) bool {
 	ctx, cancel := context.WithTimeout(ctx, 6*time.Second)
 	defer cancel()
