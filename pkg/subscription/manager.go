@@ -10,6 +10,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -83,17 +84,31 @@ func NewHTTPFetcherProxy(socksAddr string) *HTTPFetcher {
 }
 
 func (f *HTTPFetcher) Fetch(ctx context.Context, url string) ([]byte, error) {
+	b, _, err := f.fetch(ctx, url)
+	return b, err
+}
+
+// FetchWithHeaders is Fetch plus the response headers, so the Manager can read
+// the Subscription-Userinfo quota/expiry header (LOT-7). A sibling method (not on
+// the Fetcher interface) keeps the change zero-ripple: only the subscription
+// Manager opts in via a type assertion; aggregate/flowseal and the test fakes are
+// untouched.
+func (f *HTTPFetcher) FetchWithHeaders(ctx context.Context, url string) ([]byte, http.Header, error) {
+	return f.fetch(ctx, url)
+}
+
+func (f *HTTPFetcher) fetch(ctx context.Context, url string) ([]byte, http.Header, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	resp, err := f.Client.Do(req)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("subscription fetch %s: status %d", url, resp.StatusCode)
+		return nil, nil, fmt.Errorf("subscription fetch %s: status %d", url, resp.StatusCode)
 	}
 	const maxBytes = 8 << 20 // 8 MiB cap; subscriptions are tiny
 	buf := make([]byte, 0, 64<<10)
@@ -102,23 +117,55 @@ func (f *HTTPFetcher) Fetch(ctx context.Context, url string) ([]byte, error) {
 		n, rerr := resp.Body.Read(tmp)
 		buf = append(buf, tmp[:n]...)
 		if len(buf) > maxBytes {
-			return nil, fmt.Errorf("subscription %s: body exceeds %d bytes", url, maxBytes)
+			return nil, nil, fmt.Errorf("subscription %s: body exceeds %d bytes", url, maxBytes)
 		}
 		if rerr != nil {
 			break
 		}
 	}
-	return buf, nil
+	return buf, resp.Header, nil
 }
 
 // Manager turns a set of declarations into one merged, deduplicated node list.
 type Manager struct {
 	fetcher Fetcher
+
+	mu       sync.Mutex
+	userinfo map[string]Userinfo // per-declaration quota/expiry from the last fetch (LOT-7)
 }
 
 // NewManager builds a Manager over the given fetcher.
 func NewManager(f Fetcher) *Manager {
 	return &Manager{fetcher: f}
+}
+
+// headerFetcher is the optional capability a fetcher implements to expose
+// response headers (HTTPFetcher does). The Manager uses it to read the
+// Subscription-Userinfo quota/expiry header; fakes that only implement Fetcher
+// simply don't surface userinfo.
+type headerFetcher interface {
+	FetchWithHeaders(ctx context.Context, url string) ([]byte, http.Header, error)
+}
+
+// Userinfo returns a copy of the per-declaration quota/expiry captured on the
+// last Load. Safe for concurrent reads (e.g. a metrics scrape) while Load runs.
+func (m *Manager) Userinfo() map[string]Userinfo {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	out := make(map[string]Userinfo, len(m.userinfo))
+	for k, v := range m.userinfo {
+		out[k] = v
+	}
+	return out
+}
+
+func (m *Manager) setUserinfo(name string, ui Userinfo) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.userinfo == nil {
+		m.userinfo = map[string]Userinfo{}
+	}
+	m.userinfo[name] = ui
 }
 
 // Load fetches and parses every enabled declaration, stamps each node with the
@@ -142,7 +189,21 @@ func (m *Manager) Load(ctx context.Context, decls []Declaration) (nodes []Node, 
 		if inline {
 			raw = []byte(d.URL)
 		} else {
-			fetched, err := m.fetcher.Fetch(ctx, d.URL)
+			var fetched []byte
+			var err error
+			// Capture the Subscription-Userinfo quota/expiry header when the fetcher
+			// can expose headers (LOT-7); fall back to the plain Fetch otherwise.
+			if hf, ok := m.fetcher.(headerFetcher); ok {
+				var hdr http.Header
+				fetched, hdr, err = hf.FetchWithHeaders(ctx, d.URL)
+				if err == nil {
+					if ui, ok := ParseUserinfo(hdr.Get("Subscription-Userinfo")); ok {
+						m.setUserinfo(d.Name, ui)
+					}
+				}
+			} else {
+				fetched, err = m.fetcher.Fetch(ctx, d.URL)
+			}
 			if err != nil {
 				errs = append(errs, fmt.Errorf("subscription %q: fetch: %w", d.Name, err))
 				continue
