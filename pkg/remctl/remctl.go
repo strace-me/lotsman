@@ -147,7 +147,14 @@ type Controller struct {
 	actions Actions
 	rec     incident.Recorder
 	st      map[string]*state
+	mem     *remediate.Memory // optional remediation memory (LOT-19); nil = no recall/record
 }
+
+// SetMemory wires a remediation memory (LOT-19): the controller records each
+// canary outcome (resolved/rolled-back) into it and, on a fresh remediation
+// attempt, consults it to jump straight to a known-working rung instead of
+// climbing from the planner's default. nil (the default) preserves prior behavior.
+func (c *Controller) SetMemory(m *remediate.Memory) { c.mem = m }
 
 // New builds a Controller. rec may be nil (incidents discarded). actions.Apply
 // and actions.Rollback must be non-nil.
@@ -230,12 +237,35 @@ func (c *Controller) stepIdle(s *state, v misroute.Verdict, in Inputs) {
 	// already pushed nextRung higher (escalation persists across attempts).
 	plan := remediate.Decide(v, in)
 	rung := plan.Rung
+	// LOT-19: on a FRESH attempt (no escalation in progress) jump straight to a
+	// remediation that has worked for this (service, failure-class) before, instead
+	// of climbing from the planner's default rung. Skip a known ip-fallback when no
+	// CIDRs are learned (it would be a no-op) and let the planner pick.
+	knownGood := false
+	if c.mem != nil && s.nextRung == 0 {
+		if action, ok := c.mem.Best(v.Service, v.Kind); ok {
+			r := rungForAction(action)
+			if r == 1 && len(in.CIDRs[v.Service]) == 0 {
+				r = 0
+			}
+			if r > 0 {
+				rung = r
+				plan = c.planForRung(v, in, rung)
+				knownGood = true
+			}
+		}
+	}
 	if s.nextRung > rung {
 		rung = s.nextRung
 		plan = c.planForRung(v, in, rung)
+		knownGood = false
 	}
 	s.lastVerdict = v
-	c.record(v, plan, incident.PhaseDetected, "misroute confirmed past hysteresis")
+	detail := "misroute confirmed past hysteresis"
+	if knownGood {
+		detail = "misroute confirmed; jumping to known-working remediation (LOT-19 memory)"
+	}
+	c.record(v, plan, incident.PhaseDetected, detail)
 
 	if rung >= 3 {
 		// Node escalation is terminal here: record it, do not canary/rollback.
@@ -266,9 +296,11 @@ func (c *Controller) stepIdle(s *state, v misroute.Verdict, in Inputs) {
 func (c *Controller) stepCanary(s *state, v misroute.Verdict, in Inputs) {
 	plan := c.planForRung(s.lastVerdict, in, s.activeRung)
 	if !v.Misrouted {
-		// Recovered within the canary window: keep the remediation.
+		// Recovered within the canary window: keep the remediation, and remember
+		// that this action resolved this service's failure-class (LOT-19).
 		s.phase = phaseMonitoring
 		s.healthyStreak = 1
+		c.recordOutcome(s.lastVerdict, plan.Action, true)
 		c.record(v, plan, incident.PhaseResolved, "health recovered within canary window; remediation kept")
 		return
 	}
@@ -345,6 +377,8 @@ func (c *Controller) rollbackAndEscalate(s *state, v misroute.Verdict, in Inputs
 		c.record(v, plan, incident.PhaseRolledBack, "rollback failed (config may still carry remediation): "+err.Error())
 		return
 	}
+	// The applied action did not hold for this service's failure-class (LOT-19).
+	c.recordOutcome(s.lastVerdict, plan.Action, false)
 	c.record(v, plan, incident.PhaseRolledBack, "no recovery; rolled back to clean")
 	s.nextRung = s.activeRung + 1
 	s.activeRung = 0
@@ -373,6 +407,28 @@ func (c *Controller) planForRung(v misroute.Verdict, in Inputs, rung int) remedi
 		return remediate.EscalatePlan(v.Service)
 	default:
 		return remediate.Decide(v, in)
+	}
+}
+
+// recordOutcome folds an applied-remediation result into the memory, if wired
+// (LOT-19). v carries the failure-class (s.lastVerdict.Kind) the action addressed.
+func (c *Controller) recordOutcome(v misroute.Verdict, action string, ok bool) {
+	if c.mem != nil {
+		c.mem.Record(v.Service, v.Kind, action, ok)
+	}
+}
+
+// rungForAction maps a remembered action back to its ladder rung (0 = unknown).
+func rungForAction(action string) int {
+	switch action {
+	case remediate.ActionIPFallback:
+		return 1
+	case remediate.ActionRejectQUIC:
+		return 2
+	case remediate.ActionEscalateNode:
+		return 3
+	default:
+		return 0
 	}
 }
 

@@ -98,6 +98,7 @@ func main() {
 		metricsAddr     = flag.String("metrics-addr", "", "expose Prometheus /metrics on this addr, e.g. 127.0.0.1:9101 (empty = disabled)")
 		stateFile       = flag.String("state-file", "", "persist/restore chain positions to this JSON file (empty = disabled)")
 		kbFile          = flag.String("kb-file", "", "persist/restore learned strategy success (KB) to this JSON file so experience survives restart (empty = disabled)")
+		remMemFile      = flag.String("remediation-memory", "", "persist/restore learned remediation outcomes (LOT-19) to this JSON file so the controller recalls known-working remediations across restarts (empty = in-memory only)")
 		strategyCatalog = flag.String("strategy-catalog-file", "", "load blockcheck-discovered zapret strategies (LOT-10a) from this JSON file, written by `lotsmanctl harvest -out`; they join the catalog the KB ranks over (empty = builtin+config only)")
 		zapretCompose   = flag.Bool("zapret-compose", false, "PROPOSE-ONLY (LOT-10b): on -check-interval, compose a per-rule nfqws config from the services currently on a zapret rung and LOG what it would switch to (semantic-diff, only on change). Does NOT touch the live nfqws strategy. Needs a config.")
 		zapretArm       = flag.Bool("zapret-arm", false, "ARM the per-rule nfqws composer (LOT-10b-arm): it becomes the SINGLE WRITER of the nfqws strategy (symlink+restart) with a canary + rollback-to-last-good and KB feedback; the zapret executor yields strategy-switching to it. DEFAULT OFF. Requires -zapret-compose; ignored under -dry-run (stays propose-only).")
@@ -201,6 +202,18 @@ func main() {
 			log.Info("kb restored", "path", *kbFile)
 		} else {
 			log.Info("kb cold start (no prior file)", "path", *kbFile)
+		}
+	}
+
+	// Remediation memory (LOT-19): recalls which remediation resolved which
+	// (service, failure-class) so the armed controller jumps straight to it.
+	// In-memory by default; persisted when -remediation-memory is set.
+	remMem := remediate.NewMemory()
+	if *remMemFile != "" {
+		if err := remMem.Load(*remMemFile); err != nil {
+			log.Warn("remediation memory load failed (starting empty)", "path", *remMemFile, "err", err)
+		} else {
+			log.Info("remediation memory restored", "path", *remMemFile)
 		}
 	}
 
@@ -575,6 +588,11 @@ func main() {
 				return knowledge.Save(*kbFile)
 			}})
 		}
+		if *remMemFile != "" {
+			pr.Add(periodic.Task{Name: "remmem-save", Interval: *checkInterval, Fn: func(context.Context) error {
+				return remMem.Save(*remMemFile)
+			}})
+		}
 		runners = append(runners, pr.Run)
 		log.Info("maintenance loop enabled", "interval", checkInterval.String())
 	}
@@ -669,6 +687,9 @@ func main() {
 				rc.Remediations = activeSet.Snapshot
 				ctl = remctl.New(remctl.DefaultConfig(), activeSet.Actions(), incidents)
 				log.Warn("ARMED remediation controller enabled (LOT-18b): observe loop will AUTO-APPLY remediations with canary+rollback", "dry_run", *dryRun)
+			}
+			if ctl != nil {
+				ctl.SetMemory(remMem) // LOT-19: recall + record known-working remediations
 			}
 		}
 
@@ -886,6 +907,11 @@ func main() {
 	if *kbFile != "" {
 		if err := knowledge.Save(*kbFile); err != nil {
 			log.Warn("kb final save failed", "path", *kbFile, "err", err)
+		}
+	}
+	if *remMemFile != "" {
+		if err := remMem.Save(*remMemFile); err != nil {
+			log.Warn("remediation memory final save failed", "path", *remMemFile, "err", err)
 		}
 	}
 	log.Info("lotsmand stopped")
