@@ -115,6 +115,7 @@ func main() {
 		checkInterval   = flag.Duration("check-interval", 0, "run background maintenance (Flowseal update, subscription refresh) every interval (0 = disabled)")
 		observeInterval = flag.Duration("observe-interval", 30*time.Second, "run the passive-observation eye (observe/detect/propose, PROPOSE-ONLY) every interval, independent of -check-interval (0 = disabled)")
 		remediateArm    = flag.Bool("remediate", false, "ARM the self-heal remediation ladder (LOT-18b): the observe loop AUTO-APPLIES remediations to the live sing-box config with canary+auto-rollback. DEFAULT OFF = propose-only. Requires -reconcile + -singbox-config; refuses to arm otherwise. -dry-run still gates whether reconcile actually writes.")
+		remediateHot    = flag.Bool("remediate-hot-reload", false, "LOT-34: apply reject-QUIC/ip-fallback by rewriting sing-box LOCAL rule_set toggle files (hot-reloaded, NO restart) instead of rebuilding+restarting sing-box (which drops ALL connections). Requires -remediate + -reconcile. The reconciler emits permanent rules matching the toggle rule_sets for tunnel-intended services. DEFAULT OFF.")
 		incidentLog     = flag.String("incident-log", "", "append armed-remediation lifecycle events (detected/applied/resolved/rolled-back/escalated) as JSONL to this path (empty = disabled)")
 		flowsealBase    = flag.String("flowseal-base", "/opt", "parent dir for Flowseal bundles (holds flowseal-current symlink)")
 		reconcileSB     = flag.Bool("reconcile", false, "daemon owns the sing-box config: regenerate from config+subs and apply on structural change (needs -singbox-config + a config with subscriptions; -dry-run gates whether it actually applies)")
@@ -380,6 +381,30 @@ func main() {
 		rc = newReconciler(conf, reg, clash, *singboxConfig, *singboxBin, *singboxRestart, *reconcileBackup, *reconcileBase, *probeProxy, *dryRun, log)
 	}
 
+	// LOT-34 hot-reload remediation scaffold: when armed+hot, the reconciler emits
+	// PERMANENT reject-QUIC/ip-fallback rules matching toggle rule_sets (for
+	// tunnel-intended services), and the controller (below) arms them by rewriting
+	// the rule_set files — no sing-box restart. Set the generator opts here and
+	// ensure the toggle files EXIST before sing-box ever loads a config referencing
+	// them (else it fails to start). Off => byte-identical (no scaffold emitted).
+	var remServices []string
+	if *remediateArm && *remediateHot && rc != nil {
+		for name, svc := range reg.Services {
+			if svc.TunnelIntended() {
+				remServices = append(remServices, name)
+			}
+		}
+		sort.Strings(remServices)
+		rc.Opts.RemHotReload = true
+		rc.Opts.RemServices = remServices
+		rc.Opts.RemDir = *rulesetsDir
+		if err := singbox.EnsureRemFiles(*rulesetsDir, remServices); err != nil {
+			log.Error("LOT-34: cannot create rule_set toggle files; hot-reload remediation NOT safe — exiting", "err", err)
+			os.Exit(1)
+		}
+		log.Info("LOT-34 hot-reload remediation scaffold enabled", "services", remServices, "dir", *rulesetsDir)
+	}
+
 	// Background maintenance loop (Flowseal update, subscription refresh).
 	runners := []func(context.Context){br.Run, ap.Run, eng.Run}
 	if *checkInterval > 0 {
@@ -578,6 +603,21 @@ func main() {
 		if *remediateArm {
 			if rc == nil {
 				log.Error("-remediate set but no reconciler (needs -reconcile and -singbox-config with subscriptions); staying PROPOSE-ONLY")
+			} else if *remediateHot {
+				// LOT-34: hot-reload backend — Apply/Rollback rewrite the toggle rule_set
+				// files (sing-box hot-reloads, no restart, no dropped connections). The
+				// permanent rules come from rc.Opts.RemHotReload (set above); rc.Remediations
+				// stays nil (no inline restart path). reject-QUIC arms with the service's
+				// domains + learned CDN IPs (QUIC SNI sniff is unreliable, IPs carry it).
+				hot := remctl.HotActions{
+					Dir: *rulesetsDir,
+					RejectMatch: func(s string) ([]string, []string) {
+						return reg.Services[s].Domains, cidrStrings(learner.Snapshot(s))
+					},
+					Log: log,
+				}
+				ctl = remctl.New(remctl.DefaultConfig(), hot.Actions(), incidents)
+				log.Warn("ARMED remediation controller (LOT-34 hot-reload: rule_set files, no sing-box restart)", "dry_run", *dryRun)
 			} else {
 				// ActiveSet owns the per-service remediation map and keeps it
 				// consistent with what reconcile actually committed (LOT-24): a failed
@@ -1054,6 +1094,17 @@ func wanReachable(ctx context.Context) bool {
 // breaks real clients but not the box probe can pass the canary and be learned as
 // good. Acceptable as a first gate (a recipe that breaks even the box is clearly
 // bad), but a faithful client-path probe is future work (tracked under LOT-10).
+// cidrStrings renders learned IP networks as CIDR strings to arm a rem rule_set (LOT-34).
+func cidrStrings(nets []*net.IPNet) []string {
+	out := make([]string, 0, len(nets))
+	for _, n := range nets {
+		if n != nil {
+			out = append(out, n.String())
+		}
+	}
+	return out
+}
+
 // nftListTable returns `nft list table <family> <name>` stdout (the capture
 // reconciler's live-table source). An absent table is an error the reconciler
 // treats as "differs".
