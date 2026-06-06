@@ -1185,6 +1185,37 @@ func loadPools(ctx context.Context, cfg *config.Config, log *slog.Logger) {
 	for name, members := range cfg.Pools.Memberships(nodes) {
 		log.Info("pool membership", "pool", name, "nodes", len(members))
 	}
+	logUserinfo(log, mgr.Userinfo())
+}
+
+// quotaWarnFraction / expiryWarnDays gate the subscription quota/expiry alerts
+// (LOT-7): warn once a sub crosses 90% of its quota or has under 7 days left.
+const (
+	quotaWarnFraction = 0.9
+	expiryWarnDays    = 7
+)
+
+// logUserinfo surfaces per-subscription quota/expiry (LOT-7): it always logs the
+// numbers and escalates to WARN when a sub is near its quota or expiry, so a sub
+// running out is visible in logread before it silently dies.
+func logUserinfo(log *slog.Logger, infos map[string]subscription.Userinfo) {
+	now := time.Now()
+	for name, ui := range infos {
+		frac := ui.FractionUsed()
+		days := ui.DaysUntilExpire(now)
+		attrs := []any{"subscription", name, "used_bytes", ui.Used(),
+			"total_bytes", ui.Total, "fraction_used", frac, "days_until_expire", days}
+		switch {
+		case ui.Expired(now):
+			log.Warn("subscription EXPIRED", attrs...)
+		case days >= 0 && days < expiryWarnDays:
+			log.Warn("subscription expiring soon", attrs...)
+		case frac >= quotaWarnFraction:
+			log.Warn("subscription near quota", attrs...)
+		default:
+			log.Info("subscription userinfo", attrs...)
+		}
+	}
 }
 
 // rankNodes runs one per-service node-ranking cycle: for every service that has

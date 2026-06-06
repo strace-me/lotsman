@@ -5,8 +5,22 @@ import (
 	"errors"
 	"io"
 	"net"
+	"net/http"
+	"net/http/httptest"
 	"testing"
 )
+
+// fakeHeaderFetcher implements the optional headerFetcher capability (LOT-7),
+// returning canned body + headers so Manager.Load can capture Subscription-Userinfo.
+type fakeHeaderFetcher struct {
+	body   []byte
+	header http.Header
+}
+
+func (f fakeHeaderFetcher) Fetch(context.Context, string) ([]byte, error) { return f.body, nil }
+func (f fakeHeaderFetcher) FetchWithHeaders(context.Context, string) ([]byte, http.Header, error) {
+	return f.body, f.header, nil
+}
 
 // fakeFetcher serves canned bytes per URL, or an error.
 type fakeFetcher struct {
@@ -302,5 +316,69 @@ func TestManagerSkipsFailedSubscription(t *testing.T) {
 	// The healthy subscription still yields its node.
 	if len(nodes) != 1 || nodes[0].Server != "1.1.1.1" {
 		t.Fatalf("got %v, want one node 1.1.1.1", nodes)
+	}
+}
+
+// LOT-7: a fetcher that exposes headers lets Manager.Load capture the
+// Subscription-Userinfo quota/expiry and surface it via Userinfo().
+func TestManagerCapturesUserinfo(t *testing.T) {
+	hdr := http.Header{}
+	hdr.Set("Subscription-Userinfo", "upload=10; download=20; total=100; expire=1740268800")
+	m := NewManager(fakeHeaderFetcher{body: []byte("hysteria2://p@2.2.2.2:443#b"), header: hdr})
+	decls := []Declaration{{Name: "acme", URL: "sub://x", Format: FormatV2rayPlain, Enabled: true}}
+
+	if _, errs := m.Load(context.Background(), decls); len(errs) != 0 {
+		t.Fatalf("load errs: %v", errs)
+	}
+	ui, ok := m.Userinfo()["acme"]
+	if !ok {
+		t.Fatal("userinfo not captured for acme")
+	}
+	if ui.Used() != 30 || ui.Total != 100 {
+		t.Errorf("used=%d total=%d, want 30/100", ui.Used(), ui.Total)
+	}
+	if ui.Expire.Unix() != 1740268800 {
+		t.Errorf("expire=%d, want 1740268800", ui.Expire.Unix())
+	}
+}
+
+// LOT-7: a plain Fetcher (no header capability) loads nodes fine and simply
+// surfaces no userinfo — the capture is opt-in, never required.
+func TestManagerNoUserinfoFromPlainFetcher(t *testing.T) {
+	ff := fakeFetcher{data: map[string][]byte{"sub://x": []byte("hysteria2://p@2.2.2.2:443#b")}}
+	m := NewManager(ff)
+	decls := []Declaration{{Name: "acme", URL: "sub://x", Format: FormatV2rayPlain, Enabled: true}}
+
+	if _, errs := m.Load(context.Background(), decls); len(errs) != 0 {
+		t.Fatalf("load errs: %v", errs)
+	}
+	if got := m.Userinfo(); len(got) != 0 {
+		t.Errorf("plain fetcher must surface no userinfo, got %v", got)
+	}
+}
+
+// LOT-7: HTTPFetcher.FetchWithHeaders returns the response headers end-to-end,
+// while the plain Fetch still works (shared core).
+func TestHTTPFetcherWithHeaders(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Subscription-Userinfo", "upload=1; download=2; total=10")
+		w.Write([]byte("body-bytes"))
+	}))
+	defer srv.Close()
+	f := NewHTTPFetcher()
+
+	body, hdr, err := f.FetchWithHeaders(context.Background(), srv.URL)
+	if err != nil {
+		t.Fatalf("FetchWithHeaders: %v", err)
+	}
+	if string(body) != "body-bytes" {
+		t.Errorf("body=%q, want body-bytes", body)
+	}
+	if hdr.Get("Subscription-Userinfo") == "" {
+		t.Error("Subscription-Userinfo header not captured")
+	}
+
+	if b2, err := f.Fetch(context.Background(), srv.URL); err != nil || string(b2) != "body-bytes" {
+		t.Errorf("Fetch fallback: body=%q err=%v", b2, err)
 	}
 }
