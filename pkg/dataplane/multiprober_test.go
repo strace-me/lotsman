@@ -3,6 +3,8 @@ package dataplane
 import (
 	"context"
 	"net"
+	"net/http"
+	"net/http/httptest"
 	"testing"
 	"time"
 )
@@ -54,6 +56,26 @@ func TestQUICProbeUnreachable(t *testing.T) {
 	defer cancel()
 	if v := m.Probe(ctx, "video", 0); v.OK || v.Err == "" {
 		t.Errorf("quic to a dead target must fail with an error, got %+v", v)
+	}
+}
+
+// LOT-3: a per-rung override replaces the service-level probe for that position
+// only. Here rung 0 is overridden to a TCP probe at a dead port (fails), while
+// rung 1 (no override) falls back to the service HTTP probe (reachable -> OK).
+func TestRungOverrideProbeType(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {}))
+	defer srv.Close()
+
+	m := newProber(t, map[string]ServiceProbe{
+		"youtube": {Type: ProbeHTTP, Target: srv.URL},
+	})
+	m.OverrideRung("youtube", 0, ServiceProbe{Type: ProbeTCP, Target: "127.0.0.1:1"}) // refused
+
+	if v := m.Probe(context.Background(), "youtube", 0); v.OK {
+		t.Error("rung 0 must use the TCP override (dead port) and fail")
+	}
+	if v := m.Probe(context.Background(), "youtube", 1); !v.OK {
+		t.Errorf("rung 1 must fall back to the service HTTP probe (reachable), got %+v", v)
 	}
 }
 

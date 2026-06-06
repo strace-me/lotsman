@@ -34,10 +34,36 @@ type ServiceProbe struct {
 
 // MultiProber probes each service with its configured probe type.
 type MultiProber struct {
-	specs   map[string]ServiceProbe
-	http    *HTTPProber
-	timeout time.Duration
-	dialer  *socks5Dialer // nil = probe direct from the box
+	specs     map[string]ServiceProbe
+	rungSpecs map[string]map[int]ServiceProbe // per-(service,position) override of specs (LOT-3)
+	http      *HTTPProber
+	timeout   time.Duration
+	dialer    *socks5Dialer // nil = probe direct from the box
+}
+
+// OverrideRung sets a probe spec for one service at one chain position, taking
+// precedence over the service-level spec for that rung only (LOT-3). Use it to put
+// a QUIC probe on the rungs where box-direct HTTP/3 is representative (direct/
+// zapret) while leaving the VPN rung on its HTTP probe.
+func (m *MultiProber) OverrideRung(service string, position int, sp ServiceProbe) {
+	if m.rungSpecs == nil {
+		m.rungSpecs = map[string]map[int]ServiceProbe{}
+	}
+	if m.rungSpecs[service] == nil {
+		m.rungSpecs[service] = map[int]ServiceProbe{}
+	}
+	m.rungSpecs[service][position] = sp
+}
+
+// specFor resolves the probe spec for a service at a position: a per-rung override
+// if one is set, else the service-level spec.
+func (m *MultiProber) specFor(service string, position int) ServiceProbe {
+	if byPos, ok := m.rungSpecs[service]; ok {
+		if sp, ok := byPos[position]; ok {
+			return sp
+		}
+	}
+	return m.specs[service]
 }
 
 // NewMultiProber builds a prober from per-service probe specs. Services without
@@ -69,7 +95,7 @@ func NewMultiProberProxy(specs map[string]ServiceProbe, proxyAddr string) *Multi
 }
 
 func (m *MultiProber) Probe(ctx context.Context, service string, position int) events.ProductionVerdict {
-	sp := m.specs[service]
+	sp := m.specFor(service, position)
 	switch sp.Type {
 	case ProbeTCP:
 		return m.probeTCP(ctx, service, position, sp.Target)

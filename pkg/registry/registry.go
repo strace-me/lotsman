@@ -23,6 +23,13 @@ type ChainStep struct {
 	State         string
 	StrategyClass string
 	StrategyID    string // empty => resolve from KB at escalation time
+	// ProbeType/ProbeTarget optionally override the service-level probe for THIS
+	// rung only (LOT-3): e.g. a QUIC probe on the direct/zapret rungs (where a
+	// box-direct HTTP/3 probe is representative) while the VPN rung keeps its HTTP
+	// probe — a direct QUIC probe would false-fail on the VPN tier. Empty = inherit
+	// the service-level ProbeType/ProbeTarget.
+	ProbeType   string
+	ProbeTarget string
 }
 
 // Service is a registered service and its denormalized chain. The route-match
