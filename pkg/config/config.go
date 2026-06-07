@@ -171,9 +171,11 @@ type serviceYAML struct {
 }
 
 type chainStepYAML struct {
-	State      string `yaml:"state"`
-	Class      string `yaml:"class"`
-	StrategyID string `yaml:"strategy_id"`
+	State       string `yaml:"state"`
+	Class       string `yaml:"class"`
+	StrategyID  string `yaml:"strategy_id"`
+	ProbeType   string `yaml:"probe_type"`   // per-rung probe override (LOT-3): http|tcp|stun|quic (empty = inherit service)
+	ProbeTarget string `yaml:"probe_target"` // per-rung probe target override
 }
 
 type poolYAML struct {
@@ -266,7 +268,7 @@ func buildCategories(in map[string]categoryYAML) (map[string]registry.Category, 
 			if !validClass(step.Class) {
 				return nil, fmt.Errorf("config: category %q step %d: unknown class %q", name, i, step.Class)
 			}
-			chain = append(chain, registry.ChainStep{State: step.State, StrategyClass: step.Class, StrategyID: step.StrategyID})
+			chain = append(chain, registry.ChainStep{State: step.State, StrategyClass: step.Class, StrategyID: step.StrategyID, ProbeType: step.ProbeType, ProbeTarget: step.ProbeTarget})
 		}
 		cats[name] = registry.Category{Name: name, RequiredCaps: c.RequiredCaps, DefaultChain: chain,
 			DefaultProfile: c.Profile, DefaultSticky: c.Sticky}
@@ -374,6 +376,9 @@ func buildRegistry(svcs []serviceYAML, cats map[string]registry.Category) (*regi
 		}
 		if !validProbeType(s.ProbeType) {
 			return nil, fmt.Errorf("config: service %q: unknown probe_type %q (want http/tcp/stun)", s.Name, s.ProbeType)
+		}
+		if s.ProbeType == dataplane.ProbeQUIC {
+			return nil, fmt.Errorf("config: service %q: probe_type quic is per-rung only — set it on a direct/zapret chain step, not service-level (it false-fails VPN rungs)", s.Name)
 		}
 		chain, err := resolveChain(s, cats)
 		if err != nil {
@@ -495,7 +500,7 @@ func resolveChain(s serviceYAML, cats map[string]registry.Category) ([]registry.
 	var steps []registry.ChainStep
 	if len(s.Chain) > 0 {
 		for _, step := range s.Chain {
-			steps = append(steps, registry.ChainStep{State: step.State, StrategyClass: step.Class, StrategyID: step.StrategyID})
+			steps = append(steps, registry.ChainStep{State: step.State, StrategyClass: step.Class, StrategyID: step.StrategyID, ProbeType: step.ProbeType, ProbeTarget: step.ProbeTarget})
 		}
 	} else {
 		cat, ok := cats[s.Category]
@@ -515,7 +520,16 @@ func resolveChain(s serviceYAML, cats map[string]registry.Category) ([]registry.
 		if !validClass(step.StrategyClass) {
 			return nil, fmt.Errorf("config: service %q step %d: unknown class %q", s.Name, i, step.StrategyClass)
 		}
-		out = append(out, registry.ChainStep{Position: i, State: step.State, StrategyClass: step.StrategyClass, StrategyID: step.StrategyID})
+		if !validProbeType(step.ProbeType) {
+			return nil, fmt.Errorf("config: service %q step %d: unknown probe_type %q (want http/tcp/stun/quic)", s.Name, i, step.ProbeType)
+		}
+		// A box-direct QUIC probe only represents the direct/zapret tiers; on a
+		// VPN/emergency rung it would false-fail (the tunnel carries no direct
+		// HTTP/3 path). Enforce the LOT-3 footgun structurally.
+		if step.ProbeType == dataplane.ProbeQUIC && step.StrategyClass != strategy.ClassDirect && step.StrategyClass != strategy.ClassZapret {
+			return nil, fmt.Errorf("config: service %q step %d: probe_type quic is only valid on direct/zapret rungs, not %q", s.Name, i, step.StrategyClass)
+		}
+		out = append(out, registry.ChainStep{Position: i, State: step.State, StrategyClass: step.StrategyClass, StrategyID: step.StrategyID, ProbeType: step.ProbeType, ProbeTarget: step.ProbeTarget})
 	}
 	return out, nil
 }
@@ -583,7 +597,7 @@ func validProfile(p string) bool {
 
 func validProbeType(t string) bool {
 	switch t {
-	case "", dataplane.ProbeHTTP, dataplane.ProbeTCP, dataplane.ProbeSTUN:
+	case "", dataplane.ProbeHTTP, dataplane.ProbeTCP, dataplane.ProbeSTUN, dataplane.ProbeQUIC:
 		return true
 	}
 	return false
