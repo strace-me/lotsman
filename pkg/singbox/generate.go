@@ -9,6 +9,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/strace-me/lotsman/pkg/affinity"
 	"github.com/strace-me/lotsman/pkg/pools"
 	"github.com/strace-me/lotsman/pkg/registry"
 	"github.com/strace-me/lotsman/pkg/subscription"
@@ -614,7 +615,7 @@ func Generate(services []registry.Service, devices []registry.Device, nodes []su
 			remEligible[s] = true
 		}
 	}
-	var rejectRules, domainRules, ipRules []any
+	var rejectRules, spreadRules, domainRules, ipRules []any
 	for _, svc := range services {
 		if len(svc.RuleSets) == 0 && len(svc.Domains) == 0 && len(svc.IPs) == 0 {
 			continue // nothing to route for this service yet
@@ -674,6 +675,36 @@ func Generate(services []registry.Service, devices []registry.Device, nodes []su
 		if len(svc.IPs) > 0 {
 			ipRules = append(ipRules, svcRule(map[string]any{"ip_cidr": svc.IPs}, target, frag))
 		}
+		// Per-client spread (LOT-23): pin each declared client CIDR to one concrete
+		// pool node (rendezvous hash), so different clients of this service ride
+		// different nodes. Each client gets source_ip_cidr+match -> node rules,
+		// emitted in their own tier BEFORE the plain service rules so they win.
+		if !svc.DirectOnly() && len(svc.SpreadClients) > 0 {
+			var poolTags []string
+			if pool := svc.VPNPool(); pool != "" {
+				for _, m := range memberships[pool] {
+					if t, ok := tagOf[m.ID]; ok {
+						poolTags = append(poolTags, t)
+					}
+				}
+			}
+			sort.Strings(poolTags) // deterministic input to Spread
+			for _, client := range svc.SpreadClients {
+				if len(poolTags) == 0 {
+					break // no nodes to spread across; leave the client on the selector
+				}
+				node := affinity.Spread(client+"|"+svc.Name, poolTags)
+				if len(svc.RuleSets) > 0 {
+					spreadRules = append(spreadRules, map[string]any{"source_ip_cidr": []string{client}, "rule_set": svc.RuleSets, "outbound": node})
+				}
+				if len(svc.Domains) > 0 {
+					spreadRules = append(spreadRules, map[string]any{"source_ip_cidr": []string{client}, "domain_suffix": svc.Domains, "outbound": node})
+				}
+				if len(svc.IPs) > 0 {
+					spreadRules = append(spreadRules, map[string]any{"source_ip_cidr": []string{client}, "ip_cidr": svc.IPs, "outbound": node})
+				}
+			}
+		}
 
 		// Self-heal remediation (LOT-18), opt-in per service. Absent => no rules
 		// added => byte-identical to the no-remediation config. reject-QUIC rules
@@ -730,6 +761,9 @@ func Generate(services []registry.Service, devices []registry.Device, nodes []su
 	// could route it), then domain tier, then IP tier (see tiering note above).
 	routeRules = append(routeRules, rejectRules...)
 	routeRules = append(routeRules, subRules...)
+	// Per-client spread (LOT-23): before the plain domain/IP service rules so a
+	// client's source_ip_cidr+match wins over the service's shared selector.
+	routeRules = append(routeRules, spreadRules...)
 	routeRules = append(routeRules, domainRules...)
 	routeRules = append(routeRules, ipRules...)
 

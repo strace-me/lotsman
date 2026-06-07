@@ -415,3 +415,23 @@ services:
 		t.Errorf("twitch explicit profile=general sticky=false must override category, got profile=%q sticky=%v", tw.Profile, tw.Sticky)
 	}
 }
+
+// LOT-23: spread_clients loads through config -> registry.Service.
+func TestServiceSpreadClients(t *testing.T) {
+	in := `
+services:
+  - name: youtube
+    category: streaming
+    probe_target: https://x
+    rule_sets: [geosite-youtube]
+    spread_clients: ["192.168.1.50/32", "192.168.1.60/32"]
+`
+	cfg, err := Parse([]byte(in))
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	svc := cfg.Registry.Services["youtube"]
+	if len(svc.SpreadClients) != 2 || svc.SpreadClients[0] != "192.168.1.50/32" {
+		t.Errorf("spread_clients = %v, want the two client CIDRs", svc.SpreadClients)
+	}
+}

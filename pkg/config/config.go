@@ -158,6 +158,7 @@ type serviceYAML struct {
 	RuleSets       []string        `yaml:"rule_sets"`
 	Domains        []string        `yaml:"domains"`
 	ExcludeDomains []string        `yaml:"exclude_domains"` // raw-pass through nfqws desync (composer --hostlist-exclude; LOT-36 CDNs)
+	SpreadClients  []string        `yaml:"spread_clients"`  // LAN client CIDRs spread across this service's VPN nodes (LOT-23)
 	IPs            []string        `yaml:"ips"`
 	IPsFile        string          `yaml:"ips_file"` // optional file of extra CIDRs (one per line, # comments); merged into IPs. Home for runtime-learned sets (e.g. Discord voice).
 	Sticky         *bool           `yaml:"sticky"`   // pointer so "unset" (inherit category) differs from explicit false — LOT-23
@@ -417,6 +418,7 @@ func buildRegistry(svcs []serviceYAML, cats map[string]registry.Category) (*regi
 			RuleSets:       s.RuleSets,
 			Domains:        s.Domains,
 			ExcludeDomains: s.ExcludeDomains,
+			SpreadClients:  s.SpreadClients,
 			IPs:            ips,
 			Sticky:         sticky,
 			Profile:        profile,
