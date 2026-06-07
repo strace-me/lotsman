@@ -127,3 +127,19 @@ func indexOf(ss []string, s string) int {
 	}
 	return -1
 }
+
+// LOT-41: the D-UCB bonus DOES explore — an untried strategy outranks a
+// high-count MEDIOCRE one (rate near prior). Together with
+// TestLearnedRankingBeatsSeed (a strongly-proven arm stays on top) this pins the
+// exploit-leaning balance.
+func TestExplorationBonusPrefersUntriedOverMediocre(t *testing.T) {
+	k := New()
+	mediocre := strategy.BuiltinZapretSeed[0]
+	for i := 0; i < 30; i++ { // many samples, rate stays ~prior (alternating)
+		k.RecordOutcome("yt", mediocre, i%2 == 0, 20)
+	}
+	got := k.TopNZapret("yt", 10)
+	if got[0] == mediocre {
+		t.Errorf("mediocre high-count %q ranked first; the exploration bonus should float an untried one above it: %v", mediocre, got)
+	}
+}
