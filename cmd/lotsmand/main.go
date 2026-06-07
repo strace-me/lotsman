@@ -357,6 +357,17 @@ func main() {
 			SuggestClass: func(errText string, rttMs int) string {
 				return tspu.SuggestClass(tspu.Classify(tspu.Signals{OK: false, Err: errText, RTTms: rttMs}))
 			},
+			// LOT-40: raw observed block-type + per-strategy declared block-types, so
+			// zapret strategy resolution prefers one known to beat the current block.
+			BlockType: func(errText string, rttMs int) string {
+				return string(tspu.Classify(tspu.Signals{OK: false, Err: errText, RTTms: rttMs}))
+			},
+			BlockTypesFor: func(id string) []string {
+				if d, ok := catalog.Resolve(id); ok {
+					return d.BlockTypes
+				}
+				return nil
+			},
 		})
 		log.Info("intelligence layer enabled", "components", "policy/correlate/damper/adaptive/anomaly")
 	}
