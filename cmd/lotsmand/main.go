@@ -392,6 +392,9 @@ func main() {
 		}
 		return out
 	})
+	if ranker != nil {
+		mc.SetNodeHealthSnapshot(ranker.HealthSnapshot) // LOT-6: surface noderank health (no dup Tracker)
+	}
 	if *metricsAddr != "" {
 		srv := mc.Serve(*metricsAddr)
 		defer srv.Close()

@@ -184,6 +184,35 @@ func (r *Ranker) observe(tag string, q quality.Quality) (eff quality.Quality, he
 	return h.lastGood, false, false // degraded: keep last-good, not evicted
 }
 
+// NodeHealth is a read-only per-node health view (LOT-6).
+type NodeHealth struct {
+	Node       string
+	State      string // "healthy" | "degraded" | "down"
+	ConsecFail int
+}
+
+// HealthSnapshot returns the current per-node health noderank already tracks —
+// the visibility gap that LOT-6 noted, surfaced FROM the ranker instead of a
+// duplicate subscription Tracker. Same down/degraded thresholds as observe.
+// Safe for concurrent reads. Sorted by node tag.
+func (r *Ranker) HealthSnapshot() []NodeHealth {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	out := make([]NodeHealth, 0, len(r.health))
+	for tag, h := range r.health {
+		state := "healthy"
+		switch {
+		case h.consecFail >= downAfter || !h.hasGood:
+			state = "down"
+		case h.consecFail > 0:
+			state = "degraded"
+		}
+		out = append(out, NodeHealth{Node: tag, State: state, ConsecFail: h.consecFail})
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Node < out[j].Node })
+	return out
+}
+
 // Pick narrows cands by svc's country policy, probes survivors via svc.ProbeURL,
 // ranks them by svc.Weights, and pins svc.Selector to the winner when it differs
 // from the current pick and is a real member of the selector. Returns the chosen

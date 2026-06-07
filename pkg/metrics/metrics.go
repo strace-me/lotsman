@@ -16,6 +16,7 @@ import (
 
 	"github.com/strace-me/lotsman/pkg/brain"
 	"github.com/strace-me/lotsman/pkg/misroute"
+	"github.com/strace-me/lotsman/pkg/noderank"
 	"github.com/strace-me/lotsman/pkg/observe"
 	"github.com/strace-me/lotsman/pkg/remediate"
 	"github.com/strace-me/lotsman/pkg/subscription"
@@ -29,6 +30,7 @@ type Collector struct {
 	misrouteSnap     func() []misroute.Verdict               // optional; nil = misroute detector disabled
 	remediationSnap  func() []remediate.Plan                 // optional; nil = remediation planner disabled (LOT-18a)
 	subscriptionSnap func() map[string]subscription.Userinfo // optional; nil = no subscription userinfo (LOT-7)
+	nodeHealthSnap   func() []noderank.NodeHealth            // optional; nil = noderank disabled (LOT-6)
 
 	mu        sync.Mutex
 	probeOK   map[string]int
@@ -65,6 +67,11 @@ func (c *Collector) SetRemediationSnapshot(fn func() []remediate.Plan) { c.remed
 func (c *Collector) SetSubscriptionSnapshot(fn func() map[string]subscription.Userinfo) {
 	c.subscriptionSnap = fn
 }
+
+// SetNodeHealthSnapshot wires noderank's per-node health (LOT-6): surfaces the
+// health the ranker already tracks (no duplicate Tracker). Publishes
+// lotsman_node_health / lotsman_node_consec_fail. No-op until set.
+func (c *Collector) SetNodeHealthSnapshot(fn func() []noderank.NodeHealth) { c.nodeHealthSnap = fn }
 
 // ObserveProbe records a probe outcome. Implements probing.ProbeObserver.
 func (c *Collector) ObserveProbe(service string, ok bool, _ int) {
@@ -217,6 +224,20 @@ func (c *Collector) ServeHTTP(w http.ResponseWriter, _ *http.Request) {
 		b.WriteString("# TYPE lotsman_subscription_used_bytes gauge\n")
 		for _, s := range subs {
 			fmt.Fprintf(&b, "lotsman_subscription_used_bytes{subscription=%q} %d\n", s, ui[s].Used())
+		}
+	}
+
+	if c.nodeHealthSnap != nil {
+		hs := c.nodeHealthSnap() // already sorted by node
+		b.WriteString("# HELP lotsman_node_health Per-node health from the ranker: 1 on the node's current state row (healthy/degraded/down).\n")
+		b.WriteString("# TYPE lotsman_node_health gauge\n")
+		for _, h := range hs {
+			fmt.Fprintf(&b, "lotsman_node_health{node=%q,state=%q} 1\n", h.Node, h.State)
+		}
+		b.WriteString("# HELP lotsman_node_consec_fail Consecutive failed probes for a node (ranker hysteresis).\n")
+		b.WriteString("# TYPE lotsman_node_consec_fail gauge\n")
+		for _, h := range hs {
+			fmt.Fprintf(&b, "lotsman_node_consec_fail{node=%q} %d\n", h.Node, h.ConsecFail)
 		}
 	}
 

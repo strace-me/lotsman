@@ -386,3 +386,24 @@ func TestStickyKeepsHealthyNodeDespiteBetterCandidate(t *testing.T) {
 		t.Errorf("sticky: first=%q second=%q, want a then a (must not flip by latency)", f, s)
 	}
 }
+
+// LOT-6: HealthSnapshot surfaces the ranker's own per-node health (healthy /
+// degraded / down) — the visibility gap, no duplicate Tracker.
+func TestHealthSnapshot(t *testing.T) {
+	api := newFake("a", []string{"a", "b", "direct"},
+		map[string]map[string]int{"a": {svcURL: 10}}) // a serves the svc URL; b is dead on it
+	r := New(api, 1, false, quietLog())
+	svc := Service{Name: "x", Selector: "sel-x", ProbeURL: svcURL, Weights: balancer.ProfileFor("general")}
+	r.Pick(context.Background(), svc, []Candidate{{"a", ""}, {"b", ""}})
+
+	state := map[string]string{}
+	for _, h := range r.HealthSnapshot() {
+		state[h.Node] = h.State
+	}
+	if state["a"] != "healthy" {
+		t.Errorf("a = %q, want healthy", state["a"])
+	}
+	if state["b"] != "down" {
+		t.Errorf("b = %q, want down (dead on the service URL, never good)", state["b"])
+	}
+}
