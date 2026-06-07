@@ -866,3 +866,52 @@ func TestSubscriptionViaPoolFailsafe(t *testing.T) {
 		t.Error("via-hosts without a via-pool must not change output (opt-in, byte-identical)")
 	}
 }
+
+// LOT-23 per-client spread: a service with SpreadClients pins each client CIDR to
+// a concrete pool node (source_ip_cidr -> node tag), emitted BEFORE the service's
+// shared selector rule so the per-client override wins.
+func TestPerClientSpread(t *testing.T) {
+	n1 := mustParse(t, "hysteria2://p@45.91.54.1:443?sni=x", subscription.FormatSingleURL)
+	n2 := mustParse(t, "hysteria2://p@45.91.54.2:443?sni=x", subscription.FormatSingleURL)
+	tag1, _ := NodeTag(n1)
+	tag2, _ := NodeTag(n2)
+	s := svc("youtube", "vpn_url_test", "geosite-youtube")
+	s.SpreadClients = []string{"192.168.1.50/32", "192.168.1.60/32"}
+	memberships := map[string][]subscription.Node{"vpn_url_test": {n1, n2}}
+
+	res, err := Generate([]registry.Service{s}, nil, []subscription.Node{n1, n2}, memberships, DefaultOptions())
+	if err != nil {
+		t.Fatalf("generate: %v", err)
+	}
+	var cfg map[string]any
+	json.Unmarshal(res.JSON, &cfg)
+	rules := cfg["route"].(map[string]any)["rules"].([]any)
+
+	nodeTags := map[string]bool{tag1: true, tag2: true}
+	spreadIdx := map[string]int{}
+	serviceIdx := -1
+	for i, r := range rules {
+		m := r.(map[string]any)
+		if src, _ := m["source_ip_cidr"].([]any); len(src) == 1 {
+			client := src[0].(string)
+			if ob, _ := m["outbound"].(string); !nodeTags[ob] {
+				t.Errorf("spread client %s -> %q, want a concrete pool-node tag", client, ob)
+			}
+			spreadIdx[client] = i
+		}
+		if m["outbound"] == registry.SelectorTag("youtube") {
+			serviceIdx = i
+		}
+	}
+	if len(spreadIdx) != 2 {
+		t.Fatalf("want a spread rule per client (2), got %v", spreadIdx)
+	}
+	if serviceIdx == -1 {
+		t.Fatal("service selector rule missing")
+	}
+	for c, idx := range spreadIdx {
+		if idx > serviceIdx {
+			t.Errorf("spread rule for %s (idx %d) must precede the service selector (idx %d)", c, idx, serviceIdx)
+		}
+	}
+}
