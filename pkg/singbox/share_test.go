@@ -97,6 +97,21 @@ func TestShadowsocksBothForms(t *testing.T) {
 	}
 }
 
+// Bug-hunt: a password containing '@' must survive both forms (the userinfo form
+// previously re-split on '@' after decode and truncated the password).
+func TestShadowsocksPasswordWithAt(t *testing.T) {
+	// userinfo form: base64(method:p@ss)@host:port — the bug case.
+	ob := build(t, "ss://"+b64ss("aes-256-gcm:p@ssw0rd")+"@1.1.1.1:8388#x", subscription.FormatSingleURL)
+	if ob["password"] != "p@ssw0rd" {
+		t.Errorf("userinfo form: password=%q, want p@ssw0rd (not truncated at '@')", ob["password"])
+	}
+	// full-base64 form: '@' in password still works (host:port is the LAST '@').
+	ob = build(t, "ss://"+b64ss("aes-256-gcm:p@ssw0rd@2.2.2.2:8388")+"#x", subscription.FormatSingleURL)
+	if ob["password"] != "p@ssw0rd" {
+		t.Errorf("full-base64 form: password=%q, want p@ssw0rd", ob["password"])
+	}
+}
+
 func TestVMessWS(t *testing.T) {
 	js := `{"v":"2","add":"3.3.3.3","port":"443","id":"vmess-uuid","aid":"0","net":"ws","host":"vm.example","path":"/ray","tls":"tls","scy":"auto"}`
 	ob := build(t, "vmess://"+b64ss(js), subscription.FormatSingleURL)
