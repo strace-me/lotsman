@@ -16,6 +16,7 @@ package nfqwsgen
 import (
 	"strings"
 
+	"github.com/strace-me/lotsman/pkg/aggregate"
 	"github.com/strace-me/lotsman/pkg/strategycat"
 )
 
@@ -44,16 +45,33 @@ type Block struct {
 func Compose(blocks []Block) []string {
 	var out []string
 	for _, b := range blocks {
-		if len(b.Domains) == 0 || len(b.Recipe.NfqwsArgs) == 0 {
+		// Validate domains before they are joined into a /bin/sh exec arg list
+		// (RenderComposed): rule_set-resolved domains come from a remote .srs and a
+		// stray space/;/backtick would break the args or inject a shell token. Drop
+		// anything that isn't a clean domain (defense-in-depth on the shell sink).
+		doms := validDomains(b.Domains)
+		if len(doms) == 0 || len(b.Recipe.NfqwsArgs) == 0 {
 			continue
 		}
-		doms := strings.Join(b.Domains, ",")
+		joined := strings.Join(doms, ",")
 		out = append(out, "--new")
 		for _, a := range b.Recipe.NfqwsArgs {
-			out = append(out, strings.ReplaceAll(a, domainsPlaceholder, doms))
+			out = append(out, strings.ReplaceAll(a, domainsPlaceholder, joined))
 		}
-		if len(b.Exclude) > 0 {
-			out = append(out, "--hostlist-exclude-domains="+strings.Join(b.Exclude, ","))
+		if excl := validDomains(b.Exclude); len(excl) > 0 {
+			out = append(out, "--hostlist-exclude-domains="+strings.Join(excl, ","))
+		}
+	}
+	return out
+}
+
+// validDomains keeps only well-formed domains (aggregate.ValidDomain), preserving
+// order. The shell-sink guard for Compose.
+func validDomains(in []string) []string {
+	out := make([]string, 0, len(in))
+	for _, d := range in {
+		if aggregate.ValidDomain(d) {
+			out = append(out, d)
 		}
 	}
 	return out

@@ -1,6 +1,7 @@
 package subscription
 
 import (
+	"bytes"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
@@ -26,6 +27,10 @@ const (
 // sniffs the encoding. Unparseable individual entries are skipped (a bad line
 // should not sink the whole pull); a wholly unrecognized payload errors.
 func Parse(data []byte, format Format, source string) ([]Node, error) {
+	// Strip a leading UTF-8 BOM: some providers/CDNs prepend it, which otherwise
+	// defeats format detection (BOM bytes aren't base64/JSON/scheme chars) and
+	// silently yields zero nodes from an otherwise-valid subscription.
+	data = bytes.TrimPrefix(data, []byte("\xEF\xBB\xBF"))
 	if format == FormatAuto {
 		format = Detect(data)
 	}

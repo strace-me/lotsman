@@ -69,3 +69,20 @@ func TestComposeEmitsExclude(t *testing.T) {
 		t.Errorf("block without Exclude must emit no exclude arg, got %v", plain)
 	}
 }
+
+// Bug-hunt: domains are validated before joining into the /bin/sh exec arg list —
+// a malformed/shell-metachar domain (e.g. from a remote .srs) is dropped, not
+// emitted into the script.
+func TestComposeDropsMalformedDomains(t *testing.T) {
+	blocks := []Block{
+		{Service: "x", Domains: []string{"good.com", "bad domain", "evil;rm -rf", "ok.net"},
+			Recipe: recipe("--hostlist-domains={{DOMAINS}}")},
+	}
+	got := strings.Join(Compose(blocks), " ")
+	if !strings.Contains(got, "good.com,ok.net") {
+		t.Errorf("valid domains must survive in order: %s", got)
+	}
+	if strings.Contains(got, "bad domain") || strings.Contains(got, "evil;rm") || strings.Contains(got, " rf") {
+		t.Errorf("malformed/shell-metachar domain leaked into shell args: %s", got)
+	}
+}

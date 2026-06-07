@@ -202,16 +202,22 @@ func ssCreds(raw string) (method, password string, ok bool) {
 		rest = rest[:i]
 	}
 	creds := rest
+	userinfoForm := false
 	if at := strings.LastIndex(rest, "@"); at >= 0 {
 		creds = rest[:at] // userinfo form: base64(method:pass)@host:port
+		userinfoForm = true
 	}
 	dec, err := decodeAnyBase64(creds)
 	if err == nil {
 		creds = dec
 	}
-	// full-base64 form decodes to method:pass@host:port; keep only userinfo.
-	if at := strings.LastIndex(creds, "@"); at >= 0 {
-		creds = creds[:at]
+	// full-base64 form decodes to method:pass@host:port; keep only userinfo. Skip
+	// this when the @host:port was ALREADY stripped above (userinfo form) — else an
+	// '@' inside the (now decoded) password would be mis-cut and truncate it.
+	if !userinfoForm {
+		if at := strings.LastIndex(creds, "@"); at >= 0 {
+			creds = creds[:at]
+		}
 	}
 	m, p, found := strings.Cut(creds, ":")
 	if !found || m == "" {

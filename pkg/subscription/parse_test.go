@@ -152,3 +152,16 @@ func TestParseAutoRoundTrip(t *testing.T) {
 		}
 	}
 }
+
+// Bug-hunt: a leading UTF-8 BOM (some CDNs prepend it) must not defeat format
+// detection and silently yield zero nodes from a valid subscription.
+func TestParseStripsBOM(t *testing.T) {
+	body := "\xEF\xBB\xBF" + "hysteria2://pw@2.2.2.2:443#b"
+	nodes, err := Parse([]byte(body), FormatAuto, "s")
+	if err != nil {
+		t.Fatalf("BOM-prefixed sub must parse, got %v", err)
+	}
+	if len(nodes) != 1 {
+		t.Fatalf("got %d nodes, want 1 (BOM stripped)", len(nodes))
+	}
+}
