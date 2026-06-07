@@ -1,0 +1,48 @@
+# LOT-36 — Epic Games / Fortnite / EasyAntiCheat raw-pass exclude (Case A:
+# the desync corrupts their TLS handshake; the endpoints are NOT TSPU-blocked,
+# they work raw — proven by "stop zapret → start download → re-enable → continues").
+#
+# This is the Lotsman-owned source of truth. The LIVE engine is alt12.sh (Flowseal),
+# which reads Flowseal's own user-lists — Lotsman does not write them, so this is a
+# DEPLOY-TIME install, not a config field. (registry.Service.ExcludeDomains /
+# r5s.yaml exclude_domains feed ONLY the propose-only composer = inert today.)
+#
+# DEPLOY (on the router, no active voice — LOT-35; nfqws restart is benign):
+#   1. backup:  cp /opt/flowseal-current/lists/list-exclude-user.txt{,.bak}
+#               cp /opt/flowseal-current/lists/ipset-exclude-user.txt{,.bak}
+#   2. append the [DOMAINS] block  -> list-exclude-user.txt
+#      append the [IPSET] block    -> ipset-exclude-user.txt
+#   3. /etc/init.d/lotsman restart   (daemon relaunches nfqws → reloads lists)
+#   4. verify (see docs/ISSUES.md LOT-36): repro Fortnite, clash :9090/connections,
+#      A/B with nfqws on/off, "download started with zapret on" must continue.
+#   rollback: restore the .bak files + restart nfqws.
+#
+# Flowseal's shipped list-exclude.txt ALREADY has: epicgames.com, epicgames.dev,
+# unrealengine.com, akamaitechnologies.com — do NOT duplicate. Below = the GAP.
+
+# ============================ [DOMAINS] -> list-exclude-user.txt ===============
+# Download / update CDN (Akamai — works raw, blanket desync breaks it)
+download.epicgames.com
+epicgames-download1.akamaized.net
+epicgamescdn.com
+cdn1.epicgames.com
+cdn2.epicgames.com
+akamaized.net
+# Launcher / store / Unreal ecosystem
+fab.com
+# Online services / datarouter
+fortnite.com
+datarouter.ol.epicgames.com
+# EasyAntiCheat (EOS-integrated; without it the game won't even launch)
+easy.ac
+eac-cdn.com
+
+# ============================ [IPSET] -> ipset-exclude-user.txt ================
+# Epic-owned ranges (narrow, safe)
+148.78.112.0/20
+199.255.40.0/22
+# Akamai download CDN — BROAD, may over-match other Akamai-fronted services.
+# Prefer capturing the exact failing /24 during a Fortnite repro and listing that
+# instead. Uncomment only if the targeted approach is impractical:
+#23.0.0.0/8
+#104.64.0.0/10
