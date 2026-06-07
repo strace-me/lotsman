@@ -129,6 +129,52 @@ pools:
 	}
 }
 
+func TestParsePerRungQUICProbe(t *testing.T) {
+	in := `
+services:
+  - name: youtube
+    probe_target: https://www.youtube.com/generate_204
+    chain:
+      - { state: PREFERRED, class: zapret, probe_type: quic, probe_target: "https://www.youtube.com/" }
+      - { state: VPN,       class: vpn,    strategy_id: vpn_url_test }
+      - { state: EMERGENCY, class: emergency, strategy_id: emergency_pool }
+`
+	cfg, err := Parse([]byte(in))
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	steps := cfg.Registry.Services["youtube"].Chain
+	if steps[0].ProbeType != "quic" || steps[0].ProbeTarget != "https://www.youtube.com/" {
+		t.Errorf("rung0 probe = %q / %q, want quic / url", steps[0].ProbeType, steps[0].ProbeTarget)
+	}
+	if steps[1].ProbeType != "" {
+		t.Errorf("vpn rung should inherit the service probe (empty), got %q", steps[1].ProbeType)
+	}
+}
+
+func TestParseRejectsQUICOnVPNRung(t *testing.T) {
+	in := `
+services:
+  - name: youtube
+    probe_target: https://x
+    chain:
+      - { state: VPN, class: vpn, strategy_id: vpn_url_test, probe_type: quic }
+`
+	if _, err := Parse([]byte(in)); err == nil {
+		t.Fatal("expected error: probe_type quic on a vpn rung false-fails the tunnel")
+	}
+}
+
+func TestParseRejectsServiceLevelQUIC(t *testing.T) {
+	in := `
+services:
+  - { name: youtube, category: streaming, probe_target: https://x, probe_type: quic }
+`
+	if _, err := Parse([]byte(in)); err == nil {
+		t.Fatal("expected error: service-level probe_type quic is per-rung only")
+	}
+}
+
 func TestParseZapretInstances(t *testing.T) {
 	yaml := `
 services:
