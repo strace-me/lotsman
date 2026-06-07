@@ -31,7 +31,10 @@ subscriptions:
   # Our own server — hy2+salamander on a non-443 UDP port (TSPU drops UDP/443/QUIC,
   # other UDP ports pass). Self-signed cert (no domain) -> insecure=1. UDP-native.
   - { name: operator-de, url: "hysteria2://PASSWORD@HOST:2096/?obfs=salamander&obfs-password=OBFS-PASSWORD&sni=SNI&insecure=1", format: single_url, tags: [normal], enabled: true }
-  # TODO: demo / liberty / tunnel-out subscriptions.
+  # Additional subscription sources — placeholders, enable after filling a real URL.
+  - { name: demo, url: "https://YOUR-PANEL.example/s/DEMO-TOKEN", format: auto, tags: [normal], enabled: false }
+  - { name: liberty, url: "https://YOUR-PANEL.example/s/LIBERTY-TOKEN", format: auto, tags: [normal], enabled: false }
+  - { name: tunnel-out, url: "https://YOUR-PANEL.example/s/TUNNEL-OUT-TOKEN", format: auto, tags: [normal], enabled: false }
 
 pools:
   # countries_exclude: [ru] keeps RF-blocked services off RU-exit nodes (a RU exit
@@ -124,8 +127,9 @@ services:
   # VPN is a last resort for login only; real game-server traffic is by IP, not
   # matched here, so it falls through to `final: direct` (low ping preserved).
   # sticky = never flap mid-session. NOTE: these domains must land in the zapret
-  # nfqws hostlist for the PREFERRED step to act — to be fed by the autoupdate
-  # pipeline (design pending approval). profile: gaming weights tail-latency + jitter.
+  # nfqws hostlist for the PREFERRED step to act — fed by the `hostlists:` section
+  # below (the daemon's hostlist-rebuild task refreshes it each check-interval).
+  # profile: gaming weights tail-latency + jitter.
   - name: gaming-epic   # Epic Games + Rocket League
     probe_target: https://www.epicgames.com/
     domains: [epicgames.com, unrealengine.com, fortnite.com, rocketleague.com, psyonix.com, helpshift.com, easy.ac]
@@ -170,6 +174,18 @@ services:
     chain:
       - { state: VPN,       class: vpn,       strategy_id: vpn_url_test }
       - { state: EMERGENCY, class: emergency, strategy_id: emergency_pool }
+
+# ── Hostlists ──────────────────────────────────────────────────────────────────
+# The daemon refreshes each list every check-interval (hostlist-rebuild task):
+# fetch sources, merge, drop `exclude`, write `out` — the nfqws hostlist the zapret
+# strategies read. min_keep_ratio aborts the write if the merged list shrank below
+# that fraction of the previous one (guards against a source going 404/empty).
+hostlists:
+  - name: gaming-zapret
+    out: /opt/zapret-lotsman/lists/gaming.txt
+    sources:
+      - https://example.invalid/gaming-launchers.txt
+    min_keep_ratio: 0.5
 
 # The working hysteria2 node (fastvpn-nl) is currently a manual outbound in the
 # router's sing-box config, NOT a subscription. To put it under vpn_url_test_udp
