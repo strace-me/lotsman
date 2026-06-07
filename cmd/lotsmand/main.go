@@ -74,6 +74,11 @@ import (
 	"github.com/strace-me/lotsman/pkg/zaptune"
 )
 
+// version is the build/deploy label, stamped at build time via
+// -ldflags "-X main.version=v6.9-<git-short>". "dev" for a plain `go build`.
+// Logged at startup so the running daemon self-reports what's deployed.
+var version = "dev"
+
 func main() {
 	var (
 		configPath      = flag.String("config", "", "path to YAML config (registry+subscriptions+pools); empty = builtin youtube only")
@@ -135,7 +140,7 @@ func main() {
 	flag.Parse()
 
 	log := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelInfo}))
-	log.Info("lotsmand starting", "dry_run", *dryRun, "simulate", *simulate, "interval", interval.String())
+	log.Info("lotsmand starting", "version", version, "dry_run", *dryRun, "simulate", *simulate, "interval", interval.String())
 
 	bus := events.NewBus()
 	knowledge := kb.New()
