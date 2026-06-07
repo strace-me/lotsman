@@ -7,6 +7,7 @@ import (
 
 	"github.com/strace-me/lotsman/pkg/brain"
 	"github.com/strace-me/lotsman/pkg/misroute"
+	"github.com/strace-me/lotsman/pkg/noderank"
 	"github.com/strace-me/lotsman/pkg/observe"
 	"github.com/strace-me/lotsman/pkg/remediate"
 	"github.com/strace-me/lotsman/pkg/subscription"
@@ -141,4 +142,19 @@ func TestRemediationProposedEncodesActionNoneAsZero(t *testing.T) {
 	body := scrape(t, c)
 	mustContain(t, body, `lotsman_service_remediation_proposed{service="a",action="none"} 0`)
 	mustContain(t, body, `lotsman_service_remediation_proposed{service="b",action="ip-fallback"} 1`)
+}
+
+// LOT-6: node health renders as state-labeled gauge + consec-fail counter.
+func TestServeHTTPRendersNodeHealth(t *testing.T) {
+	c := New(func() []brain.ServiceState { return nil }, func() map[string]float64 { return nil })
+	c.SetNodeHealthSnapshot(func() []noderank.NodeHealth {
+		return []noderank.NodeHealth{
+			{Node: "de-1", State: "healthy", ConsecFail: 0},
+			{Node: "nl-2", State: "down", ConsecFail: 4},
+		}
+	})
+	body := scrape(t, c)
+	mustContain(t, body, `lotsman_node_health{node="de-1",state="healthy"} 1`)
+	mustContain(t, body, `lotsman_node_health{node="nl-2",state="down"} 1`)
+	mustContain(t, body, `lotsman_node_consec_fail{node="nl-2"} 4`)
 }
