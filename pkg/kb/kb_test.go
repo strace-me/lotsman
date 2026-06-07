@@ -143,3 +143,44 @@ func TestExplorationBonusPrefersUntriedOverMediocre(t *testing.T) {
 		t.Errorf("mediocre high-count %q ranked first; the exploration bonus should float an untried one above it: %v", mediocre, got)
 	}
 }
+
+// LOT-41: Decay is the freshness mechanism — shrinks observation counts (so an
+// un-retried strategy regains an exploration bonus and gets re-validated) WITHOUT
+// touching the learned EWMA rate.
+func TestDecayFreshness(t *testing.T) {
+	k := New()
+	id := strategy.BuiltinZapretSeed[0]
+	for i := 0; i < 20; i++ {
+		k.RecordOutcome("yt", id, true, 20)
+	}
+	rateBefore := k.Stats("yt", id).Success
+	for i := 0; i < 30; i++ {
+		k.Decay(0.5)
+	}
+	if got := k.Stats("yt", id).Success; got != rateBefore {
+		t.Errorf("Decay must NOT change the EWMA rate: before=%v after=%v", rateBefore, got)
+	}
+	k.Decay(0)   // out-of-range = no-op
+	k.Decay(1.5) // out-of-range = no-op
+
+	// Re-validation via count asymmetry: A and B share equal mediocre history, then
+	// only A keeps being re-sampled while B goes stale (decayed). At equal rate the
+	// stale B carries the larger exploration bonus, so B ranks ABOVE the freshly-
+	// re-sampled A — re-check the one not confirmed lately.
+	k2 := New()
+	a, b := strategy.BuiltinZapretSeed[0], strategy.BuiltinZapretSeed[1]
+	for i := 0; i < 20; i++ {
+		k2.RecordOutcome("yt", a, i%2 == 0, 20)
+		k2.RecordOutcome("yt", b, i%2 == 0, 20)
+	}
+	for i := 0; i < 8; i++ {
+		k2.Decay(0.5)
+	}
+	for i := 0; i < 20; i++ {
+		k2.RecordOutcome("yt", a, i%2 == 0, 20) // re-sample A only; B stays stale
+	}
+	got := k2.TopNZapret("yt", 20)
+	if indexOf(got, b) >= indexOf(got, a) {
+		t.Errorf("stale B should rank above freshly-resampled A (freshness re-validation): %v", got)
+	}
+}
