@@ -203,6 +203,24 @@ func (k *KB) TopNZapret(service string, n int, exclude ...string) []string {
 	return out
 }
 
+// Decay multiplies every observation count by factor (0<factor<1) — the D-UCB
+// freshness mechanism (LOT-41, "рабочая раньше ≠ рабочая сейчас"). Counts shrink
+// over wall-time when a strategy is NOT re-tried, so its exploration bonus rises
+// and it gets re-validated; the learned EWMA rate is left intact (the forced
+// re-probe refreshes it — gentler than blindly forgetting the rate). Call
+// periodically (the daemon ticks it each check-interval). No-op for out-of-range
+// factor.
+func (k *KB) Decay(factor float64) {
+	if factor <= 0 || factor >= 1 {
+		return
+	}
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	for key := range k.count {
+		k.count[key] *= factor
+	}
+}
+
 // rateLocked returns the EWMA for (service, strategyID), or the prior if unseen.
 // Caller holds k.mu.
 func (k *KB) rateLocked(service, strategyID string) float64 {

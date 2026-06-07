@@ -612,6 +612,14 @@ func main() {
 				return remMem.Save(*remMemFile)
 			}})
 		}
+		// D-UCB freshness (LOT-41): decay strategy observation counts each check so
+		// an un-retried strategy's exploration bonus rises and it gets re-validated
+		// ("рабочая раньше ≠ рабочая сейчас"). 0.95/15m ≈ 3.4h half-life — tracks
+		// daily TSPU drift without churning. Learned EWMA rates are untouched.
+		pr.Add(periodic.Task{Name: "kb-decay", Interval: *checkInterval, Fn: func(context.Context) error {
+			knowledge.Decay(0.95)
+			return nil
+		}})
 		runners = append(runners, pr.Run)
 		log.Info("maintenance loop enabled", "interval", checkInterval.String())
 	}
