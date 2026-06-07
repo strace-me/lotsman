@@ -66,9 +66,11 @@ func TestLearnedRankingBeatsSeed(t *testing.T) {
 	if got[0] != good {
 		t.Fatalf("learned: first = %q, want %q (proven). full: %v", got[0], good, got)
 	}
-	// The tanked strategy should sink below unseen (prior 0.5) ones.
+	// The tanked strategy should sink below unseen (prior 0.5) ones — or, since 40
+	// consecutive failures also trip the circuit breaker (LOT-41 inc3), be excluded
+	// entirely (posTop == -1), which is an even stronger "ranks below unseen".
 	posTop, posUnseen := indexOf(got, top), indexOf(got, strategy.BuiltinZapretSeed[2]) // v4 unseen
-	if posTop < posUnseen {
+	if posTop != -1 && posTop < posUnseen {
 		t.Errorf("tanked %q (pos %d) should rank below unseen %q (pos %d)", top, posTop, strategy.BuiltinZapretSeed[2], posUnseen)
 	}
 }
@@ -116,6 +118,66 @@ func TestSnapshot(t *testing.T) {
 	snap["yt|alt10"] = 999
 	if k.Snapshot()["yt|alt10"] == 999 {
 		t.Error("snapshot is not a copy")
+	}
+}
+
+// LOT-41 inc3: breakerThreshold consecutive failures quarantine a strategy —
+// TopNZapret stops returning it so the chain skips a proven-dead pick.
+func TestBreakerQuarantinesPersistentFailer(t *testing.T) {
+	k := New()
+	bad := strategy.BuiltinZapretSeed[0]
+	for i := 0; i < breakerThreshold; i++ {
+		k.RecordOutcome("yt", bad, false, 0)
+	}
+	if got := k.TopNZapret("yt", 10); indexOf(got, bad) != -1 {
+		t.Fatalf("persistent failer %q should be quarantined out of %v", bad, got)
+	}
+}
+
+// LOT-41 inc3: a quarantine lifts after breakerCooldownTicks Decay ticks (half-open).
+func TestBreakerReleasesAfterCooldown(t *testing.T) {
+	k := New()
+	bad := strategy.BuiltinZapretSeed[0]
+	for i := 0; i < breakerThreshold; i++ {
+		k.RecordOutcome("yt", bad, false, 0)
+	}
+	if indexOf(k.TopNZapret("yt", 10), bad) != -1 {
+		t.Fatal("should be quarantined right after threshold failures")
+	}
+	for i := 0; i < breakerCooldownTicks; i++ {
+		k.Decay(0.95)
+	}
+	if indexOf(k.TopNZapret("yt", 10), bad) == -1 {
+		t.Fatalf("should be released (half-open) after %d cooldown ticks", breakerCooldownTicks)
+	}
+}
+
+// LOT-41 inc3: a single success resets the consecutive-failure streak.
+func TestBreakerSuccessResetsStreak(t *testing.T) {
+	k := New()
+	bad := strategy.BuiltinZapretSeed[0]
+	for i := 0; i < breakerThreshold-1; i++ {
+		k.RecordOutcome("yt", bad, false, 0)
+	}
+	k.RecordOutcome("yt", bad, true, 20) // resets the streak
+	for i := 0; i < breakerThreshold-1; i++ {
+		k.RecordOutcome("yt", bad, false, 0)
+	}
+	if indexOf(k.TopNZapret("yt", 10), bad) == -1 {
+		t.Fatal("success should reset the failure streak; not enough fresh failures to quarantine")
+	}
+}
+
+// LOT-41 inc3: the breaker must never strand the chain — if every strategy is
+// quarantined, TopNZapret falls back to returning them ranked.
+func TestBreakerNeverStrandsChain(t *testing.T) {
+	k := New()
+	k.SetZapretSeed([]string{"alt12"}) // sole strategy
+	for i := 0; i < breakerThreshold; i++ {
+		k.RecordOutcome("yt", "alt12", false, 0)
+	}
+	if got := k.TopNZapret("yt", 5); len(got) != 1 || got[0] != "alt12" {
+		t.Fatalf("breaker stranded the chain when all strategies quarantined: got %v", got)
 	}
 }
 

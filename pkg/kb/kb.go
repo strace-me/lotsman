@@ -31,6 +31,16 @@ const prior = 0.5
 // (rate near the prior) or a tie. (Garivier-Moulines D-UCB; reward in [0,1].)
 const exploreC = 0.2
 
+// Circuit breaker (LOT-41 inc3, goal "exclude known-non-working"). After
+// breakerThreshold consecutive failures a strategy is quarantined — TopNZapret
+// stops returning it so the chain doesn't waste a rung on a proven-dead pick.
+// Quarantine lifts after breakerCooldownTicks Decay ticks (the wall-clock proxy,
+// ~1h at a 15m check-interval): the strategy goes half-open and is re-probed once;
+// a fresh success closes the breaker, another failure re-opens it. A single
+// success at any point resets the failure streak.
+const breakerThreshold = 3
+const breakerCooldownTicks = 4
+
 // KB is the strategy knowledge base.
 type KB struct {
 	mu     sync.Mutex
@@ -38,6 +48,8 @@ type KB struct {
 	rtt    map[string]float64 // latency EWMA (ms), updated only on success
 	jitter map[string]float64 // EWMA of |rtt - rttEWMA| (ms), connection stability
 	count  map[string]float64 // observation count per key, for the D-UCB exploration bonus (LOT-41)
+	cfail  map[string]int     // consecutive failures per key, for the circuit breaker (LOT-41 inc3)
+	quar   map[string]int     // remaining cooldown ticks; >0 = strategy quarantined (LOT-41 inc3)
 	seed   []string           // cold-start ranking of zapret strategy IDs (what TopNZapret may return)
 }
 
@@ -48,6 +60,8 @@ func New() *KB {
 		rtt:    make(map[string]float64),
 		jitter: make(map[string]float64),
 		count:  make(map[string]float64),
+		cfail:  make(map[string]int),
+		quar:   make(map[string]int),
 		seed:   strategy.BuiltinZapretSeed,
 	}
 }
@@ -57,7 +71,9 @@ type record struct {
 	EWMA   float64 `json:"ewma"`
 	RTT    float64 `json:"rtt"`
 	Jitter float64 `json:"jitter"`
-	Count  float64 `json:"count,omitempty"` // observation count (D-UCB bonus, LOT-41)
+	Count  float64 `json:"count,omitempty"`       // observation count (D-UCB bonus, LOT-41)
+	CFail  int     `json:"consec_fail,omitempty"` // consecutive failures (circuit breaker, LOT-41 inc3)
+	Quar   int     `json:"quarantine,omitempty"`  // remaining cooldown ticks (circuit breaker, LOT-41 inc3)
 }
 
 type persisted struct {
@@ -71,7 +87,7 @@ func (k *KB) Save(path string) error {
 	k.mu.Lock()
 	recs := make(map[string]record, len(k.ewma))
 	for key, e := range k.ewma {
-		recs[key] = record{EWMA: e, RTT: k.rtt[key], Jitter: k.jitter[key], Count: k.count[key]}
+		recs[key] = record{EWMA: e, RTT: k.rtt[key], Jitter: k.jitter[key], Count: k.count[key], CFail: k.cfail[key], Quar: k.quar[key]}
 	}
 	k.mu.Unlock()
 
@@ -108,6 +124,8 @@ func (k *KB) Load(path string) error {
 		k.rtt[key] = r.RTT
 		k.jitter[key] = r.Jitter
 		k.count[key] = r.Count
+		k.cfail[key] = r.CFail
+		k.quar[key] = r.Quar
 	}
 	return nil
 }
@@ -166,15 +184,29 @@ func (k *KB) TopNZapret(service string, n int, exclude ...string) []string {
 		rate    float64
 		n       float64 // observation count (D-UCB)
 	}
-	cands := make([]cand, 0, len(k.seed))
 	var totalN float64
-	for i, id := range k.seed {
-		if skip[id] {
-			continue
+	build := func(honorQuarantine bool) []cand {
+		out := make([]cand, 0, len(k.seed))
+		totalN = 0
+		for i, id := range k.seed {
+			if skip[id] {
+				continue
+			}
+			key := service + "|" + id
+			if honorQuarantine && k.quar[key] > 0 {
+				continue // circuit breaker: skip a quarantined (proven-dead) strategy (LOT-41 inc3)
+			}
+			n := k.count[key]
+			out = append(out, cand{id: id, seedIdx: i, rate: k.rateLocked(service, id), n: n})
+			totalN += n
 		}
-		n := k.count[service+"|"+id]
-		cands = append(cands, cand{id: id, seedIdx: i, rate: k.rateLocked(service, id), n: n})
-		totalN += n
+		return out
+	}
+	cands := build(true)
+	// Safety: never strand the chain. If the breaker quarantined every eligible
+	// strategy, fall back to ranking them anyway — a known-bad pick beats none.
+	if len(cands) == 0 {
+		cands = build(false)
 	}
 	k.mu.Unlock()
 
@@ -219,6 +251,14 @@ func (k *KB) Decay(factor float64) {
 	for key := range k.count {
 		k.count[key] *= factor
 	}
+	// One Decay tick is also one circuit-breaker cooldown tick (LOT-41 inc3): count
+	// down quarantines and release (half-open) the ones that reach zero.
+	for key := range k.quar {
+		k.quar[key]--
+		if k.quar[key] <= 0 {
+			delete(k.quar, key)
+		}
+	}
 }
 
 // rateLocked returns the EWMA for (service, strategyID), or the prior if unseen.
@@ -248,6 +288,18 @@ func (k *KB) RecordOutcome(service, strategyID string, ok bool, rttMs int) float
 	cur = alpha*sample + (1-alpha)*cur
 	k.ewma[key] = cur
 	k.count[key]++ // sample count feeds the D-UCB exploration bonus (LOT-41)
+
+	// Circuit breaker (LOT-41 inc3): a success resets the failure streak and lifts
+	// any quarantine; breakerThreshold consecutive failures quarantine the strategy.
+	if ok {
+		k.cfail[key] = 0
+		delete(k.quar, key)
+	} else {
+		k.cfail[key]++
+		if k.cfail[key] >= breakerThreshold {
+			k.quar[key] = breakerCooldownTicks
+		}
+	}
 
 	if ok && rttMs > 0 {
 		if r, seen := k.rtt[key]; seen {
