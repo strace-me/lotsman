@@ -379,3 +379,39 @@ func TestParseRejectsBadInput(t *testing.T) {
 		})
 	}
 }
+
+// LOT-23 group lever: a service without its own profile/sticky inherits the
+// category's defaults; an explicit per-service value overrides.
+func TestCategoryProfileStickyInheritance(t *testing.T) {
+	in := `
+categories:
+  streaming:
+    profile: streaming
+    sticky: true
+    default_chain:
+      - { state: VPN, class: vpn, strategy_id: vpn_url_test }
+services:
+  - name: youtube
+    category: streaming
+    probe_target: https://x
+    domains: [googlevideo.com]
+  - name: twitch
+    category: streaming
+    probe_target: https://x
+    domains: [twitch.tv]
+    profile: general
+    sticky: false
+`
+	cfg, err := Parse([]byte(in))
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	yt := cfg.Registry.Services["youtube"]
+	if yt.Profile != "streaming" || !yt.Sticky {
+		t.Errorf("youtube must inherit category profile=streaming sticky=true, got profile=%q sticky=%v", yt.Profile, yt.Sticky)
+	}
+	tw := cfg.Registry.Services["twitch"]
+	if tw.Profile != "general" || tw.Sticky {
+		t.Errorf("twitch explicit profile=general sticky=false must override category, got profile=%q sticky=%v", tw.Profile, tw.Sticky)
+	}
+}

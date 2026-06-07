@@ -108,6 +108,8 @@ type multiplexYAML struct {
 type categoryYAML struct {
 	RequiredCaps []string        `yaml:"required_caps"`
 	DefaultChain []chainStepYAML `yaml:"default_chain"`
+	Profile      string          `yaml:"profile"` // group default profile (services inherit if unset) — LOT-23
+	Sticky       bool            `yaml:"sticky"`  // group default sticky (services inherit if unset) — LOT-23
 }
 
 type strategyYAML struct {
@@ -158,7 +160,7 @@ type serviceYAML struct {
 	ExcludeDomains []string        `yaml:"exclude_domains"` // raw-pass through nfqws desync (composer --hostlist-exclude; LOT-36 CDNs)
 	IPs            []string        `yaml:"ips"`
 	IPsFile        string          `yaml:"ips_file"` // optional file of extra CIDRs (one per line, # comments); merged into IPs. Home for runtime-learned sets (e.g. Discord voice).
-	Sticky         bool            `yaml:"sticky"`
+	Sticky         *bool           `yaml:"sticky"`   // pointer so "unset" (inherit category) differs from explicit false — LOT-23
 	Profile        string          `yaml:"profile"`
 	Static         bool            `yaml:"static"`
 	EscalateAfter  int             `yaml:"escalate_after"`
@@ -266,7 +268,8 @@ func buildCategories(in map[string]categoryYAML) (map[string]registry.Category, 
 			}
 			chain = append(chain, registry.ChainStep{State: step.State, StrategyClass: step.Class, StrategyID: step.StrategyID})
 		}
-		cats[name] = registry.Category{Name: name, RequiredCaps: c.RequiredCaps, DefaultChain: chain}
+		cats[name] = registry.Category{Name: name, RequiredCaps: c.RequiredCaps, DefaultChain: chain,
+			DefaultProfile: c.Profile, DefaultSticky: c.Sticky}
 	}
 	return cats, nil
 }
@@ -392,8 +395,19 @@ func buildRegistry(svcs []serviceYAML, cats map[string]registry.Category) (*regi
 				return nil, fmt.Errorf("config: service %q: invalid domain %q", s.Name, d)
 			}
 		}
-		if !validProfile(s.Profile) {
-			return nil, fmt.Errorf("config: service %q: unknown profile %q (want general/voice/streaming/gaming)", s.Name, s.Profile)
+		// Group-level lever (LOT-23): inherit profile/sticky from the category when the
+		// service does not set its own (profile unset = "", sticky unset = nil pointer).
+		cat := cats[s.Category]
+		profile := s.Profile
+		if profile == "" {
+			profile = cat.DefaultProfile
+		}
+		sticky := cat.DefaultSticky
+		if s.Sticky != nil {
+			sticky = *s.Sticky
+		}
+		if !validProfile(profile) {
+			return nil, fmt.Errorf("config: service %q: unknown profile %q (want general/voice/streaming/gaming)", s.Name, profile)
 		}
 		reg.Services[s.Name] = registry.Service{
 			Name:           s.Name,
@@ -404,8 +418,8 @@ func buildRegistry(svcs []serviceYAML, cats map[string]registry.Category) (*regi
 			Domains:        s.Domains,
 			ExcludeDomains: s.ExcludeDomains,
 			IPs:            ips,
-			Sticky:         s.Sticky,
-			Profile:        s.Profile,
+			Sticky:         sticky,
+			Profile:        profile,
 			Static:         s.Static,
 			EscalateAfter:  s.EscalateAfter,
 			RecoverAfter:   s.RecoverAfter,

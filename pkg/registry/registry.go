@@ -93,6 +93,12 @@ type Category struct {
 	Name         string
 	RequiredCaps []string    // "tcp" | "udp_native"
 	DefaultChain []ChainStep // inherited when the service declares no chain (Position assigned at build)
+	// DefaultProfile/DefaultSticky are the group-level behavior lever (LOT-23): a
+	// service that does not set its own profile/sticky inherits the category's, so
+	// "all streaming = sticky, voice-profile" is one declaration on the category
+	// instead of repeated per service. Empty/false = no group default.
+	DefaultProfile string
+	DefaultSticky  bool
 }
 
 // BuiltinCategories returns the seven categories from the spec (§4.1.1/4.1.2).
