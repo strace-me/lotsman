@@ -1324,6 +1324,7 @@ func rankNodes(ctx context.Context, conf *config.Config, reg *registry.Registry,
 			Selector: registry.SelectorTag(svc.Name),
 			ProbeURL: svc.ProbeTarget,
 			Weights:  balancer.ProfileFor(prof),
+			Sticky:   svc.Sticky, // LOT-12: honor the declared sticky flag (was a no-op)
 		}
 		if _, err := ranker.Pick(ctx, ns, cands); err != nil {
 			log.Warn("noderank: pick failed", "service", svc.Name, "err", err.Error())

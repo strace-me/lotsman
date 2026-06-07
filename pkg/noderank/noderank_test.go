@@ -362,3 +362,27 @@ func TestNoEligibleCandidates(t *testing.T) {
 		t.Fatalf("must not switch with no eligible nodes, got %v", api.setCalls)
 	}
 }
+
+// LOT-12: a sticky service keeps its healthy advised node even when a far better
+// candidate appears (never flip by latency); a non-sticky service switches.
+func TestStickyKeepsHealthyNodeDespiteBetterCandidate(t *testing.T) {
+	run := func(sticky bool) (first, second string) {
+		api := newFake("a", []string{"a", "b", "direct"},
+			map[string]map[string]int{"a": {svcURL: 10}, "b": {svcURL: 90}})
+		r := New(api, 1, false, quietLog())
+		svc := Service{Name: "voice", Selector: "sel-voice", ProbeURL: svcURL,
+			Weights: balancer.ProfileFor("voice"), Sticky: sticky}
+		cands := []Candidate{{"a", ""}, {"b", ""}}
+		first, _ = r.Pick(context.Background(), svc, cands) // advises a (best)
+		// b becomes far better than a — well beyond the switch margin.
+		api.delays = map[string]map[string]int{"a": {svcURL: 200}, "b": {svcURL: 5}}
+		second, _ = r.Pick(context.Background(), svc, cands)
+		return first, second
+	}
+	if f, s := run(false); f != "a" || s != "b" {
+		t.Errorf("non-sticky: first=%q second=%q, want a then b (switches to far-better node)", f, s)
+	}
+	if f, s := run(true); f != "a" || s != "a" {
+		t.Errorf("sticky: first=%q second=%q, want a then a (must not flip by latency)", f, s)
+	}
+}

@@ -55,6 +55,12 @@ type Service struct {
 	Weights   balancer.Weights // category profile (balancer.ProfileFor)
 	ExcludeCC []string         // exit countries to never pin (e.g. ["ru"]); unknown country is never excluded
 	IncludeCC []string         // if non-empty, ONLY pin these (e.g. ["us"] for Netflix); unknown country fails this filter
+	// Sticky pins the service to its currently-advised node as long as that node
+	// stays healthy and a selector member — never flipping by latency/score, only
+	// failing over on real failure (the node leaving the pool). For multi-connection
+	// sessions (voice/games) that a node change would disrupt. LOT-12 (right-sized:
+	// per-service, not per-client).
+	Sticky bool
 }
 
 // nodeHealth carries per-node hysteresis state across Pick cycles: how many
@@ -285,8 +291,10 @@ func (r *Ranker) Pick(ctx context.Context, svc Service, cands []Candidate) (stri
 			}
 			topScore := balancer.Score(best, svc.Weights)
 			prevScore := balancer.Score(p.cand, svc.Weights)
-			if topScore-prevScore <= r.SwitchMargin {
-				best = p.cand // within margin: stay put
+			// Sticky: never flip a healthy advised node by latency/score (only the
+			// down/ineligible fall-through above fails it over). Else apply the margin.
+			if svc.Sticky || topScore-prevScore <= r.SwitchMargin {
+				best = p.cand // sticky or within margin: stay put
 			}
 			break
 		}
