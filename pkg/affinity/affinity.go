@@ -14,9 +14,32 @@
 package affinity
 
 import (
+	"hash/fnv"
 	"sync"
 	"time"
 )
+
+// Spread deterministically picks one node for a key, balancing keys across nodes
+// AND minimizing reassignment when the node set changes — rendezvous (HRW) hashing:
+// the node maximizing hash(key|node) wins, so adding/removing a node only moves
+// the keys that hashed to it, not everyone (unlike hash-mod). Returns "" for an
+// empty node set. Pure — the per-client node assignment for LOT-23 spread
+// (different clients of a service routed to different nodes). The caller builds
+// key per-scope, e.g. "192.168.1.50/32|youtube".
+func Spread(key string, nodes []string) string {
+	best, bestScore := "", uint64(0)
+	for _, n := range nodes {
+		h := fnv.New64a()
+		h.Write([]byte(key))
+		h.Write([]byte{0}) // unambiguous key|node boundary
+		h.Write([]byte(n))
+		s := h.Sum64()
+		if best == "" || s > bestScore {
+			best, bestScore = n, s
+		}
+	}
+	return best
+}
 
 type entry struct {
 	outbound string
