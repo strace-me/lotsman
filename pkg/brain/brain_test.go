@@ -500,3 +500,23 @@ func TestReassertDropsUnderBackpressure(t *testing.T) {
 		}
 	}
 }
+
+// LOT-40: preferBlockType floats strategies declared to beat the observed block
+// type to the front, keeping EWMA order within the matched/unmatched groups.
+func TestPreferBlockType(t *testing.T) {
+	lookup := func(id string) []string {
+		return map[string][]string{"alt12": {"tcp_reset"}, "alt11": {"timeout"}}[id] // alt10 -> nil
+	}
+	// EWMA order alt11,alt10,alt12; tcp_reset observed -> alt12 floats first.
+	if got := preferBlockType([]string{"alt11", "alt10", "alt12"}, "tcp_reset", lookup); got[0] != "alt12" {
+		t.Errorf("tcp_reset must float alt12 first, got %v", got)
+	}
+	// stable within groups (match first, rest keep order).
+	if got := preferBlockType([]string{"alt11", "alt10", "alt12"}, "timeout", lookup); got[0] != "alt11" || got[1] != "alt10" || got[2] != "alt12" {
+		t.Errorf("timeout: want [alt11 alt10 alt12], got %v", got)
+	}
+	// no match (or no observed type) -> unchanged EWMA order.
+	if got := preferBlockType([]string{"alt11", "alt10"}, "throttle", lookup); got[0] != "alt11" || got[1] != "alt10" {
+		t.Errorf("no match must keep EWMA order, got %v", got)
+	}
+}

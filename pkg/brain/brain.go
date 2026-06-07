@@ -13,6 +13,7 @@ package brain
 import (
 	"context"
 	"log/slog"
+	"strings"
 	"sync"
 	"time"
 
@@ -37,6 +38,13 @@ type Smarts struct {
 	Anomaly       func(service string) anomaly.State     // current anomaly state
 	RecordSwitch  func(service string, now time.Time)    // note a transition for the flap damper
 	SuggestClass  func(errText string, rttMs int) string // block-type -> mechanism class for escalation jumps
+	// BlockType returns the raw observed block-type string (e.g. "tcp_reset") for a
+	// probe failure, and BlockTypesFor returns the block-types a strategy is declared
+	// to beat. Together they let zapret strategy resolution PREFER a strategy known
+	// to beat the currently-observed block type (LOT-40). Both optional; nil = the
+	// plain KB EWMA ordering (no block-type preference).
+	BlockType     func(errText string, rttMs int) string
+	BlockTypesFor func(strategyID string) []string
 }
 
 // SetSmarts enables the intelligence layer. Call before Run.
@@ -79,16 +87,17 @@ type Recommender interface {
 }
 
 type runtime struct {
-	svc             registry.Service
-	position        int
-	failsCurrent    int
-	recSuccesses    map[int]int // lower position -> consecutive silent successes
-	settlingUntil   time.Time
-	broken          bool
-	currentStrategy string // resolved strategy id of the active step
-	suggestedClass  string // mechanism class suggested by block-type detection
-	desiredPos      int
-	actualPos       int // -1 = unknown
+	svc                registry.Service
+	position           int
+	failsCurrent       int
+	recSuccesses       map[int]int // lower position -> consecutive silent successes
+	settlingUntil      time.Time
+	broken             bool
+	currentStrategy    string // resolved strategy id of the active step
+	suggestedClass     string // mechanism class suggested by block-type detection
+	suggestedBlockType string // raw observed block-type (e.g. "tcp_reset"); biases zapret strategy pick
+	desiredPos         int
+	actualPos          int // -1 = unknown
 }
 
 // Brain holds per-service runtime state and drives the state machine.
@@ -354,6 +363,9 @@ func (b *Brain) onVerdict(v events.ProductionVerdict) {
 			if b.smarts != nil && b.smarts.SuggestClass != nil {
 				rt.suggestedClass = b.smarts.SuggestClass(v.Err, v.RTTms)
 			}
+			if b.smarts != nil && b.smarts.BlockType != nil {
+				rt.suggestedBlockType = b.smarts.BlockType(v.Err, v.RTTms)
+			}
 			if b.shouldEscalate(rt) {
 				b.escalateLocked(rt)
 				if b.smarts != nil && b.smarts.RecordSwitch != nil {
@@ -570,9 +582,40 @@ func (b *Brain) resolveStrategyLocked(rt *runtime, step registry.ChainStep) stri
 				exclude = append(exclude, s.StrategyID)
 			}
 		}
-		if top := b.kb.TopNZapret(rt.svc.Name, 1, exclude...); len(top) > 0 {
-			return top[0]
+		top := b.kb.TopNZapret(rt.svc.Name, 16, exclude...)
+		if len(top) == 0 {
+			return ""
 		}
+		// BlockTypes preference (soft): float strategies declared to beat the
+		// currently-observed block type to the front, preserving the KB's EWMA order
+		// within each group. No observed type / no lookup / no match => unchanged
+		// EWMA-best (LOT-40).
+		if rt.suggestedBlockType != "" && b.smarts != nil && b.smarts.BlockTypesFor != nil {
+			top = preferBlockType(top, rt.suggestedBlockType, b.smarts.BlockTypesFor)
+		}
+		return top[0]
 	}
 	return ""
+}
+
+// preferBlockType stable-reorders ids so strategies whose declared block-types
+// include blockType come first (EWMA order kept within each group). Pure.
+func preferBlockType(ids []string, blockType string, lookup func(string) []string) []string {
+	match := make([]string, 0, len(ids))
+	rest := make([]string, 0, len(ids))
+	for _, id := range ids {
+		hit := false
+		for _, bt := range lookup(id) {
+			if strings.EqualFold(strings.TrimSpace(bt), blockType) {
+				hit = true
+				break
+			}
+		}
+		if hit {
+			match = append(match, id)
+		} else {
+			rest = append(rest, id)
+		}
+	}
+	return append(match, rest...)
 }
