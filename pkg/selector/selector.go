@@ -4,6 +4,14 @@
 // tspu) and, within that, the candidate with the best learned score (success
 // rate penalized by latency, from the KB). So "DPI reset detected" jumps to the
 // best-performing zapret strategy rather than the next-in-line one.
+//
+// Deferred (LOT-40): build-ahead, no callers — SUPERSEDED in practice. Its two
+// jobs are already done elsewhere: block-type→class jumping by brain.escalateLocked
+// (the empirical/path-health jump + suggestedClass fallback), and learned score
+// ranking by kb.TopNZapret / zaptune.KBPicker. Within-class block-type preference
+// landed in brain.resolveStrategyLocked (preferBlockType). Keep as a clean
+// reference impl; delete if it stays unused after the strategy-intelligence epic
+// (LOT-10) settles.
 package selector
 
 // Candidate is a strategy available to switch to.
