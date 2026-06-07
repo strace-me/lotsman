@@ -191,5 +191,5 @@ hostlists:
 # router's sing-box config, NOT a subscription. To put it under vpn_url_test_udp
 # (so UDP-sensitive services actually use it) the daemon needs inline-node support
 # + hysteria2 salamander-obfs in the generator. Details to declare it (from the
-# live config): server 192.0.2.12:443, sni nl3.fastsub.ru, obfs salamander.
+# live config): server YOUR-HY2-HOST:443, sni YOUR-SNI, obfs salamander.
 # TODO: implement inline nodes + hy2 obfs, then add it here as a node.
