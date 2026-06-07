@@ -6,6 +6,7 @@ package kb
 
 import (
 	"encoding/json"
+	"math"
 	"os"
 	"sort"
 	"sync"
@@ -19,12 +20,24 @@ const alpha = 0.1
 // prior is the assumed success rate for a never-observed (service, strategy).
 const prior = 0.5
 
+// exploreC scales the D-UCB exploration bonus in TopNZapret (LOT-41). The EWMA is
+// a recency-weighted estimate (the right non-stationary mean), but greedy ranking
+// alone under-explores: a strategy whose estimate decayed, or one never tried,
+// must occasionally be re-checked so a working alternative is found after a
+// failure and a previously-good one is re-validated. Deliberately EXPLOIT-leaning
+// (0.2, below the bandit-textbook ~0.5): on a censorship router, abandoning a
+// CONFIRMED-good strategy to try an unknown is costly, so a strongly-proven arm
+// must stay on top; the bonus only flips the pick when the incumbent is mediocre
+// (rate near the prior) or a tie. (Garivier-Moulines D-UCB; reward in [0,1].)
+const exploreC = 0.2
+
 // KB is the strategy knowledge base.
 type KB struct {
 	mu     sync.Mutex
 	ewma   map[string]float64 // success-rate EWMA, key: service|strategyID
 	rtt    map[string]float64 // latency EWMA (ms), updated only on success
 	jitter map[string]float64 // EWMA of |rtt - rttEWMA| (ms), connection stability
+	count  map[string]float64 // observation count per key, for the D-UCB exploration bonus (LOT-41)
 	seed   []string           // cold-start ranking of zapret strategy IDs (what TopNZapret may return)
 }
 
@@ -34,6 +47,7 @@ func New() *KB {
 		ewma:   make(map[string]float64),
 		rtt:    make(map[string]float64),
 		jitter: make(map[string]float64),
+		count:  make(map[string]float64),
 		seed:   strategy.BuiltinZapretSeed,
 	}
 }
@@ -43,6 +57,7 @@ type record struct {
 	EWMA   float64 `json:"ewma"`
 	RTT    float64 `json:"rtt"`
 	Jitter float64 `json:"jitter"`
+	Count  float64 `json:"count,omitempty"` // observation count (D-UCB bonus, LOT-41)
 }
 
 type persisted struct {
@@ -56,7 +71,7 @@ func (k *KB) Save(path string) error {
 	k.mu.Lock()
 	recs := make(map[string]record, len(k.ewma))
 	for key, e := range k.ewma {
-		recs[key] = record{EWMA: e, RTT: k.rtt[key], Jitter: k.jitter[key]}
+		recs[key] = record{EWMA: e, RTT: k.rtt[key], Jitter: k.jitter[key], Count: k.count[key]}
 	}
 	k.mu.Unlock()
 
@@ -92,6 +107,7 @@ func (k *KB) Load(path string) error {
 		k.ewma[key] = r.EWMA
 		k.rtt[key] = r.RTT
 		k.jitter[key] = r.Jitter
+		k.count[key] = r.Count
 	}
 	return nil
 }
@@ -148,19 +164,31 @@ func (k *KB) TopNZapret(service string, n int, exclude ...string) []string {
 		id      string
 		seedIdx int
 		rate    float64
+		n       float64 // observation count (D-UCB)
 	}
 	cands := make([]cand, 0, len(k.seed))
+	var totalN float64
 	for i, id := range k.seed {
 		if skip[id] {
 			continue
 		}
-		cands = append(cands, cand{id: id, seedIdx: i, rate: k.rateLocked(service, id)})
+		n := k.count[service+"|"+id]
+		cands = append(cands, cand{id: id, seedIdx: i, rate: k.rateLocked(service, id), n: n})
+		totalN += n
 	}
 	k.mu.Unlock()
 
+	// D-UCB ranking (LOT-41): score = EWMA rate + exploration bonus. At cold start
+	// (totalN==0) the bonus is 0 for all, so this is exactly the old rate+seed
+	// order. Once some strategies are observed, an unseen/low-count one gets a
+	// bonus so it is tried — finding a working alternative after a failure and
+	// re-validating a previously-good one. n+1 avoids the sqrt(1/0) blow-up.
+	logT := math.Log(1 + totalN)
+	score := func(c cand) float64 { return c.rate + exploreC*math.Sqrt(logT/(c.n+1)) }
 	sort.SliceStable(cands, func(i, j int) bool {
-		if cands[i].rate != cands[j].rate {
-			return cands[i].rate > cands[j].rate // higher success first
+		si, sj := score(cands[i]), score(cands[j])
+		if si != sj {
+			return si > sj // higher score (rate + exploration) first
 		}
 		return cands[i].seedIdx < cands[j].seedIdx // tiebreak: seed (blockcheck) order
 	})
@@ -201,6 +229,7 @@ func (k *KB) RecordOutcome(service, strategyID string, ok bool, rttMs int) float
 	}
 	cur = alpha*sample + (1-alpha)*cur
 	k.ewma[key] = cur
+	k.count[key]++ // sample count feeds the D-UCB exploration bonus (LOT-41)
 
 	if ok && rttMs > 0 {
 		if r, seen := k.rtt[key]; seen {
