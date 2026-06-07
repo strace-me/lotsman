@@ -40,7 +40,16 @@ func tlsBlock(q url.Values, serverName string) outbound {
 	if sec == "none" {
 		return nil
 	}
-	sni := first(q, "sni", "peer", "host")
+	// For Reality the SNI must be the decoy server_name (sni/peer), never the WS/
+	// HTTP transport `host` header — using host as SNI breaks the Reality handshake
+	// (LOT-38). Non-Reality TLS may still fall back to host (common in ws links).
+	isReality := sec == "reality" || q.Get("pbk") != ""
+	var sni string
+	if isReality {
+		sni = first(q, "sni", "peer")
+	} else {
+		sni = first(q, "sni", "peer", "host")
+	}
 	if sec == "" && sni == "" && q.Get("pbk") == "" {
 		return nil
 	}

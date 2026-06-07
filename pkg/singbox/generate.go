@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net"
+	"net/url"
 	"os"
 	"sort"
 	"strconv"
@@ -236,11 +237,21 @@ func dnsResolver(resolver string) map[string]any {
 		resolver = "https://1.1.1.1/dns-query"
 	}
 	if strings.HasPrefix(resolver, "https://") {
+		// Parse properly so a non-standard DoH port and an IPv6 literal survive —
+		// the old "cut at first :/" dropped the port and split the v6 address (LOT-38).
 		host := resolver[len("https://"):]
-		if i := strings.IndexAny(host, "/:"); i >= 0 {
-			host = host[:i]
+		if u, err := url.Parse(resolver); err == nil && u.Host != "" {
+			host = u.Host // keeps host[:port] and [v6][:port]; drops the /dns-query path
 		}
-		return map[string]any{"tag": "resolver", "type": "https", "server": host}
+		srv := map[string]any{"tag": "resolver", "type": "https"}
+		if h, p, err := net.SplitHostPort(host); err == nil {
+			host = h
+			if port, err := strconv.Atoi(p); err == nil {
+				srv["server_port"] = port
+			}
+		}
+		srv["server"] = strings.Trim(host, "[]") // unbracket a port-less v6 literal
+		return srv
 	}
 	host := resolver
 	srv := map[string]any{"tag": "resolver", "type": "udp"}

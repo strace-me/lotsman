@@ -50,6 +50,25 @@ func outboundsByTag(t *testing.T, js []byte) (map[string]map[string]any, map[str
 	return byTag, byType, cfg
 }
 
+func TestDNSResolverDoH(t *testing.T) {
+	// Non-standard DoH port survives (was dropped by the old "cut at first :/").
+	if r := dnsResolver("https://1.1.1.1:8443/dns-query"); r["server"] != "1.1.1.1" || r["server_port"] != 8443 {
+		t.Errorf("DoH host:port = %v / %v, want 1.1.1.1 / 8443", r["server"], r["server_port"])
+	}
+	// IPv6 literal is not split mid-address; brackets stripped, no spurious port.
+	r := dnsResolver("https://[2606:4700:4700::1111]/dns-query")
+	if r["server"] != "2606:4700:4700::1111" {
+		t.Errorf("DoH v6 server = %v", r["server"])
+	}
+	if _, ok := r["server_port"]; ok {
+		t.Errorf("DoH v6 (no port) should not set server_port: %v", r["server_port"])
+	}
+	// IPv6 literal with an explicit port.
+	if r := dnsResolver("https://[2606:4700:4700::1111]:8443/dns-query"); r["server"] != "2606:4700:4700::1111" || r["server_port"] != 8443 {
+		t.Errorf("DoH v6:port = %v / %v", r["server"], r["server_port"])
+	}
+}
+
 func TestGeneratePerServiceSelectors(t *testing.T) {
 	hy2 := mustParse(t, "hysteria2://secretpass@45.91.54.162:443?sni=magic.example", subscription.FormatSingleURL)
 	native := mustParse(t, `{"outbounds":[{"type":"hysteria2","tag":"nat","server":"5.6.7.8","server_port":443,"password":"pw2","tls":{"enabled":true,"server_name":"x.example"}}]}`, subscription.FormatSingbox)

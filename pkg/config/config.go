@@ -26,7 +26,6 @@ import (
 // Config is the parsed, validated configuration.
 type Config struct {
 	Registry        *registry.Registry
-	Categories      map[string]registry.Category // builtin 7 + config overrides; services inherit their DefaultChain
 	Subscriptions   []subscription.Declaration
 	Pools           *pools.Set
 	Zapret          []zapret.Instance
@@ -248,7 +247,7 @@ func Parse(data []byte) (*Config, error) {
 	if f.Multiplex != nil && f.Multiplex.Enabled {
 		mux = &Multiplex{Protocol: f.Multiplex.Protocol, MaxConnections: f.Multiplex.MaxConnections, MinStreams: f.Multiplex.MinStreams, Padding: f.Multiplex.Padding, BrutalUp: f.Multiplex.BrutalUp, BrutalDown: f.Multiplex.BrutalDown}
 	}
-	return &Config{Registry: reg, Categories: cats, Subscriptions: f.Subscriptions, Pools: pl, Zapret: instances, Devices: devices, Hostlists: hostlists, Strategies: strategies, UTLSFingerprint: f.UTLSFingerprint, SingboxVersion: f.SingboxVersion, FakeIP: fakeip, Multiplex: mux, SubViaPool: f.SubViaPool}, nil
+	return &Config{Registry: reg, Subscriptions: f.Subscriptions, Pools: pl, Zapret: instances, Devices: devices, Hostlists: hostlists, Strategies: strategies, UTLSFingerprint: f.UTLSFingerprint, SingboxVersion: f.SingboxVersion, FakeIP: fakeip, Multiplex: mux, SubViaPool: f.SubViaPool}, nil
 }
 
 // buildCategories starts from the builtin seven and applies config overrides

@@ -49,6 +49,15 @@ func TestVLESSRealityVision(t *testing.T) {
 	}
 }
 
+func TestVLESSRealityIgnoresWSHostForSNI(t *testing.T) {
+	// Reality node with a ws `host` header but no explicit sni: the SNI must NOT
+	// fall back to the transport host — that breaks the Reality handshake (LOT-38).
+	ob := build(t, "vless://uuid@1.2.3.4:443?security=reality&pbk=PUBKEY&sid=ab12&type=ws&host=cdn.example.com#x", subscription.FormatSingleURL)
+	if sni := ob["tls"].(outbound)["server_name"]; sni == "cdn.example.com" {
+		t.Errorf("Reality SNI must not be the ws host; got %v", sni)
+	}
+}
+
 func TestVLESSWebSocketTLS(t *testing.T) {
 	ob := build(t, "vless://uuid@1.2.3.4:443?security=tls&type=ws&path=%2Fvideo&host=cdn.example.com&sni=cdn.example.com#x", subscription.FormatSingleURL)
 	tr := ob["transport"].(outbound)
