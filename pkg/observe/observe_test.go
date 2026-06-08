@@ -236,6 +236,30 @@ func TestDestIPsDedup(t *testing.T) {
 	}
 }
 
+// LOT-35: DeadQUICFlows counts only dead UDP flows on udp/443 (QUIC), separating a
+// real QUIC stall (reject-quic fixes it) from one-way voice on RTC ports.
+func TestDeadQUICFlowsByPort(t *testing.T) {
+	conns := []Conn{
+		// 2 dead QUIC flows (udp/443, sending, no return).
+		{Chains: []string{"sel-youtube"}, Host: "a.googlevideo.com", DestIP: "142.251.1.1", DestPort: 443, Network: "udp", Upload: 1200},
+		{Chains: []string{"sel-youtube"}, Host: "b.googlevideo.com", DestIP: "142.251.1.2", DestPort: 443, Network: "udp", Upload: 1200},
+		// 2 dead VOICE flows (udp on an RTC port, not QUIC).
+		{Chains: []string{"sel-youtube"}, Host: "c.googlevideo.com", DestIP: "142.251.1.3", DestPort: 50001, Network: "udp", Upload: 1200},
+		{Chains: []string{"sel-youtube"}, Host: "d.googlevideo.com", DestIP: "142.251.1.4", DestPort: 19301, Network: "udp", Upload: 1200},
+	}
+	snap, err := New(fakeSource{conns}, testRegistry()).Observe(context.Background())
+	if err != nil {
+		t.Fatalf("Observe: %v", err)
+	}
+	yt := snap.Services["youtube"]
+	if yt.UDPFlows != 4 || yt.DeadUDPFlows != 4 {
+		t.Fatalf("udp=%d dead=%d, want 4/4", yt.UDPFlows, yt.DeadUDPFlows)
+	}
+	if yt.DeadQUICFlows != 2 {
+		t.Errorf("DeadQUICFlows=%d, want 2 (only the udp/443 flows)", yt.DeadQUICFlows)
+	}
+}
+
 func TestMatchByDomainSuffix(t *testing.T) {
 	m := matcher{suffixes: []string{"googlevideo.com"}}
 	cases := []struct {

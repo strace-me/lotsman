@@ -97,7 +97,13 @@ func detectOne(sm observe.ServiceMetrics, cfg Config) Verdict {
 	}
 
 	leaking := sm.Flows >= cfg.MinFlows && sm.LeakRatio > cfg.LeakRatioThreshold
-	dead := sm.UDPFlows >= cfg.MinUDPFlows && sm.DeadFlowRatio > cfg.DeadFlowRatioThreshold
+	// A "dead" verdict drives the reject-quic remedy (force udp/443 → TCP), so it
+	// must be a real QUIC stall: require at least one dead flow on udp/443. A
+	// dead-ratio made up entirely of one-way VOICE/RTC flows (DeadQUICFlows==0) is
+	// self-healing — the client renegotiates — and reject-quic cannot fix it; firing
+	// there just flaps an ineffective remediation (LOT-35). WedgedOneWayRTC surfaces
+	// that case separately as a log/metric.
+	dead := sm.UDPFlows >= cfg.MinUDPFlows && sm.DeadFlowRatio > cfg.DeadFlowRatioThreshold && sm.DeadQUICFlows > 0
 
 	switch {
 	case leaking:

@@ -25,6 +25,7 @@ import (
 	"os/exec"
 	"os/signal"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"syscall"
@@ -955,9 +956,10 @@ func (s clashConnSource) Connections(ctx context.Context) ([]observe.Conn, error
 	}
 	out := make([]observe.Conn, len(cs))
 	for i, c := range cs {
+		port, _ := strconv.Atoi(c.Metadata.DestinationPort) // 0 on parse failure (DestPort is best-effort)
 		out[i] = observe.Conn{
 			Chains: c.Chains, Upload: c.Upload, Download: c.Download, Rule: c.Rule,
-			Host: c.Metadata.Host, DestIP: c.Metadata.DestinationIP, Network: c.Metadata.Network,
+			Host: c.Metadata.Host, DestIP: c.Metadata.DestinationIP, DestPort: port, Network: c.Metadata.Network,
 		}
 	}
 	return out, nil

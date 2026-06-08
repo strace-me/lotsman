@@ -52,8 +52,8 @@ func TestDetect_HighLeak_IsMisroutedLeak(t *testing.T) {
 }
 
 func TestDetect_HighDead_IsMisroutedDead(t *testing.T) {
-	// No leaks; 4 UDP flows, 3 dead → ratio 0.75 > 0.5, UDPFlows 4 >= MinUDPFlows 4.
-	s := snap(observe.ServiceMetrics{Service: "meet", Flows: 4, UDPFlows: 4, DeadUDPFlows: 3})
+	// No leaks; 4 UDP flows, 3 dead (all QUIC/udp443) → ratio 0.75 > 0.5, UDPFlows 4 >= MinUDPFlows 4.
+	s := snap(observe.ServiceMetrics{Service: "meet", Flows: 4, UDPFlows: 4, DeadUDPFlows: 3, DeadQUICFlows: 3})
 	v := verdictFor(t, Detect(s, DefaultConfig()), "meet")
 
 	if !v.Misrouted || v.Kind != KindDead {
@@ -61,6 +61,19 @@ func TestDetect_HighDead_IsMisroutedDead(t *testing.T) {
 	}
 	if v.DeadFlowRatio != 0.75 {
 		t.Fatalf("DeadFlowRatio = %v, want 0.75", v.DeadFlowRatio)
+	}
+}
+
+// LOT-35: a dead-ratio made up ENTIRELY of one-way voice/RTC flows (no dead QUIC
+// on udp/443) must NOT fire a dead verdict — reject-quic can't fix voice one-way,
+// and the condition self-heals on the client's renegotiation. This is the discord
+// reject-quic flap fix.
+func TestDetect_OneWayVoice_NotDead(t *testing.T) {
+	// 4 UDP voice flows, 3 dead one-way, but DeadQUICFlows==0 (none on udp/443).
+	s := snap(observe.ServiceMetrics{Service: "discord", Flows: 4, UDPFlows: 4, DeadUDPFlows: 3, DeadQUICFlows: 0})
+	v := verdictFor(t, Detect(s, DefaultConfig()), "discord")
+	if v.Misrouted || v.Kind != KindNone {
+		t.Fatalf("voice one-way (no dead QUIC) should NOT be dead-misrouted: misrouted=%v kind=%q", v.Misrouted, v.Kind)
 	}
 }
 
