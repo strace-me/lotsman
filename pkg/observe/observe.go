@@ -29,6 +29,10 @@ const directOutbound = "direct"
 // avoid flagging brief or low-rate flows as dead.
 const deadDownloadBytes int64 = 0
 
+// quicPort is udp/443 — QUIC. A dead UDP flow on this port is a genuine QUIC
+// stall (reject-quic fixes it); dead flows on other UDP ports are voice/RTC.
+const quicPort = 443
+
 // Conn is the subset of a sing-box /connections record the eye needs, decoupled
 // from the dataplane HTTP types so observe depends only on registry. main.go
 // maps dataplane.Connection into this shape.
@@ -42,6 +46,7 @@ type Conn struct {
 	Download int64
 	Host     string
 	DestIP   string
+	DestPort int    // destination port (0 if unknown); distinguishes QUIC (udp/443) from voice/RTC UDP
 	Network  string // "tcp" | "udp"
 	// Rule is sing-box's matched routing rule string, e.g.
 	// "rule_set=geosite-youtube => route(sel-youtube)". It carries the ROUTE
@@ -77,6 +82,12 @@ type ServiceMetrics struct {
 	UDPFlows int
 	// DeadUDPFlows is matched UDP/QUIC connections with ~0 download bytes.
 	DeadUDPFlows int
+	// DeadQUICFlows is the subset of DeadUDPFlows on udp/443 (QUIC). It gates the
+	// reject-quic remediation: reject-quic forces udp/443 → TCP, so it only helps
+	// when QUIC itself is stalling. A dead-ratio driven purely by one-way VOICE on
+	// RTC ports (19294-19344/50000-50100) carries DeadQUICFlows==0 — that condition
+	// is self-healing (WedgedOneWayRTC) and reject-quic cannot fix it (LOT-35).
+	DeadQUICFlows int
 	// OneWayUDPFlows is matched UDP flows that are SENDING but getting nothing back
 	// (upload > 0, download ~0) — distinct from DeadUDPFlows, which also counts fully
 	// idle flows. This is the wedged-RTC / one-way-voice signature (LOT-35 #2): after
@@ -279,6 +290,9 @@ func (e *Eye) Observe(ctx context.Context) (Snapshot, error) {
 			sm.UDPFlows++
 			if c.Download <= deadDownloadBytes {
 				sm.DeadUDPFlows++
+				if c.DestPort == quicPort {
+					sm.DeadQUICFlows++ // a stalled QUIC flow — the thing reject-quic actually fixes
+				}
 				if c.Upload > 0 {
 					sm.OneWayUDPFlows++ // sending but nothing back = wedged RTC (LOT-35 #2)
 				}
