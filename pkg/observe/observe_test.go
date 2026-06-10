@@ -260,6 +260,59 @@ func TestDeadQUICFlowsByPort(t *testing.T) {
 	}
 }
 
+// LOT-43: a flow whose bytes don't advance between passes, stuck at a small total,
+// is "frozen" (TSPU throttle signature). Tiny idle flows and big completed transfers
+// are excluded by the [stuckMin, stuckMax] window.
+func TestStallDetection(t *testing.T) {
+	conns := []Conn{
+		{ID: "a", Chains: []string{"sel-youtube"}, Host: "a.googlevideo.com", DestIP: "1.1.1.1", Network: "tcp", Download: 4000, Upload: 1000}, // 5KB stuck → frozen
+		{ID: "b", Chains: []string{"sel-youtube"}, Host: "b.googlevideo.com", DestIP: "1.1.1.2", Network: "tcp", Download: 3000, Upload: 2000}, // 5KB stuck → frozen
+		{ID: "c", Chains: []string{"sel-youtube"}, Host: "c.googlevideo.com", DestIP: "1.1.1.3", Network: "tcp", Download: 500, Upload: 200},   // 700B → too small (idle keepalive)
+		{ID: "d", Chains: []string{"sel-youtube"}, Host: "d.googlevideo.com", DestIP: "1.1.1.4", Network: "tcp", Download: 200000, Upload: 9},  // 200KB → completed, not stuck
+	}
+	eye := New(fakeSource{conns}, testRegistry())
+	if _, err := eye.Observe(context.Background()); err != nil { // pass 1 seeds prev, no frozen yet
+		t.Fatal(err)
+	}
+	snap, err := eye.Observe(context.Background()) // pass 2: identical bytes → a,b frozen
+	if err != nil {
+		t.Fatal(err)
+	}
+	yt := snap.Services["youtube"]
+	if yt.FrozenFlows != 2 {
+		t.Errorf("FrozenFlows=%d, want 2 (a,b stuck in window; c too small, d completed)", yt.FrozenFlows)
+	}
+	if got := yt.StalledRatio; got != 0.5 {
+		t.Errorf("StalledRatio=%v, want 0.5 (2 frozen / 4 flows)", got)
+	}
+}
+
+// LOT-43: a flow that ADVANCES between passes is not frozen.
+func TestStallDetection_AdvancingNotFrozen(t *testing.T) {
+	mk := func(dl int64) []Conn {
+		return []Conn{{ID: "a", Chains: []string{"sel-youtube"}, Host: "a.googlevideo.com", DestIP: "1.1.1.1", Network: "tcp", Download: dl, Upload: 1000}}
+	}
+	eye := New(&seqSource{passes: [][]Conn{mk(4000), mk(40000)}}, testRegistry())
+	eye.Observe(context.Background())            // pass 1: 5KB
+	snap, _ := eye.Observe(context.Background()) // pass 2: 41KB (advanced 36KB)
+	if got := snap.Services["youtube"].FrozenFlows; got != 0 {
+		t.Errorf("advancing flow FrozenFlows=%d, want 0", got)
+	}
+}
+
+type seqSource struct {
+	passes [][]Conn
+	i      int
+}
+
+func (s *seqSource) Connections(context.Context) ([]Conn, error) {
+	c := s.passes[s.i]
+	if s.i < len(s.passes)-1 {
+		s.i++
+	}
+	return c, nil
+}
+
 func TestMatchByDomainSuffix(t *testing.T) {
 	m := matcher{suffixes: []string{"googlevideo.com"}}
 	cases := []struct {

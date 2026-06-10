@@ -958,6 +958,7 @@ func (s clashConnSource) Connections(ctx context.Context) ([]observe.Conn, error
 	for i, c := range cs {
 		port, _ := strconv.Atoi(c.Metadata.DestinationPort) // 0 on parse failure (DestPort is best-effort)
 		out[i] = observe.Conn{
+			ID:     c.ID,
 			Chains: c.Chains, Upload: c.Upload, Download: c.Download, Rule: c.Rule,
 			Host: c.Metadata.Host, DestIP: c.Metadata.DestinationIP, DestPort: port, Network: c.Metadata.Network,
 		}
