@@ -16,6 +16,7 @@ import (
 // "hysteria2-node" or "direct"). Upload/Download are cumulative bytes for the
 // connection.
 type Connection struct {
+	ID       string             `json:"id"` // stable per-connection id; lets the eye track byte deltas across passes (LOT-43 stall detection)
 	Chains   []string           `json:"chains"`
 	Upload   int64              `json:"upload"`
 	Download int64              `json:"download"`

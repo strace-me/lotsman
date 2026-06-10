@@ -16,6 +16,7 @@ import (
 	"context"
 	"net"
 	"strings"
+	"sync"
 
 	"github.com/strace-me/lotsman/pkg/registry"
 )
@@ -41,6 +42,7 @@ const quicPort = 443
 // node tag). Upload/Download are cumulative bytes. Host is the sniffed SNI (may
 // be empty when sniff failed — that flow is matched by DestIP instead).
 type Conn struct {
+	ID       string // stable per-connection id (for cross-pass stall detection, LOT-43)
 	Chains   []string
 	Upload   int64
 	Download int64
@@ -88,6 +90,11 @@ type ServiceMetrics struct {
 	// RTC ports (19294-19344/50000-50100) carries DeadQUICFlows==0 — that condition
 	// is self-healing (WedgedOneWayRTC) and reject-quic cannot fix it (LOT-35).
 	DeadQUICFlows int
+	// FrozenFlows is matched flows (TCP or UDP) whose cumulative bytes barely
+	// advanced between passes while stuck at a small total — the TSPU IP-throttle
+	// freeze signature (LOT-43). Unlike DeadUDPFlows (UDP-only, single-snapshot,
+	// 0-download), this catches a TCP fallback frozen mid-stream at a few KB.
+	FrozenFlows int
 	// OneWayUDPFlows is matched UDP flows that are SENDING but getting nothing back
 	// (upload > 0, download ~0) — distinct from DeadUDPFlows, which also counts fully
 	// idle flows. This is the wedged-RTC / one-way-voice signature (LOT-35 #2): after
@@ -109,6 +116,8 @@ type ServiceMetrics struct {
 	DeadFlowRatio float64
 	// OneWayUDPRatio = OneWayUDPFlows / UDPFlows (0 when UDPFlows == 0).
 	OneWayUDPRatio float64
+	// StalledRatio = FrozenFlows / Flows (0 when Flows == 0) — the throttle-freeze ratio (LOT-43).
+	StalledRatio float64
 }
 
 // rtcMinUDPFlows / rtcOneWayRatio gate the wedged-one-way-RTC surface signal: at
@@ -191,10 +200,24 @@ func (m matcher) matchesHeuristic(c Conn) bool {
 	return false
 }
 
+// Stall detection (LOT-43): a flow is "frozen" when its cumulative byte count
+// barely advances between passes while it sits stuck at a small total — the
+// TSPU IP-throttle signature (a connection establishes, moves a few KB, then
+// freezes until timeout; the app churns new ones that freeze too). A header-only
+// probe and the UDP-only dead-flow detector both miss this; watching byte deltas
+// across passes catches it for TCP and UDP alike.
+const (
+	frozenDeltaMax int64 = 256    // <this many bytes of progress between passes = "not advancing"
+	stuckMinBytes  int64 = 2048   // past the handshake (it WAS transferring), so not just an idle keepalive
+	stuckMaxBytes  int64 = 131072 // under a real sustained transfer (a completed/large download is not "stuck")
+)
+
 // Eye computes observed metrics from the live connection table.
 type Eye struct {
+	mu       sync.Mutex
 	src      Source
 	matchers []matcher
+	prev     map[string]int64 // connID -> cumulative bytes last pass, for stall/freeze detection (LOT-43)
 }
 
 // New builds an Eye over a connection source and the service registry. Every
@@ -204,7 +227,7 @@ type Eye struct {
 // Domains/IPs cannot see (LOT-20). Domains (suffix) and IPs (CIDR) remain as the
 // heuristic fallback for direct/final flows that carry no selector route.
 func New(src Source, reg *registry.Registry) *Eye {
-	e := &Eye{src: src}
+	e := &Eye{src: src, prev: map[string]int64{}}
 	for _, svc := range reg.Services {
 		m := matcher{svc: svc, routeFrag: "route(" + registry.SelectorTag(svc.Name) + ")"}
 		for _, d := range svc.Domains {
@@ -238,6 +261,9 @@ func (e *Eye) Observe(ctx context.Context) (Snapshot, error) {
 	if err != nil {
 		return Snapshot{}, err
 	}
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	cur := make(map[string]int64, len(conns)) // this pass's per-conn bytes; becomes prev for stall detection
 	snap := Snapshot{Services: map[string]ServiceMetrics{}}
 	// seenIP dedups destination IPs per service within this pass, so DestIPs holds
 	// each distinct address once even when many flows share a CDN edge.
@@ -298,12 +324,24 @@ func (e *Eye) Observe(ctx context.Context) (Snapshot, error) {
 				}
 			}
 		}
+		// Stall/freeze detection (LOT-43): a flow stuck at a small total whose bytes
+		// did not advance since last pass = the TSPU IP-throttle freeze.
+		if c.ID != "" {
+			total := c.Upload + c.Download
+			cur[c.ID] = total
+			if p, seen := e.prev[c.ID]; seen {
+				if d := total - p; d < frozenDeltaMax && d > -frozenDeltaMax && total >= stuckMinBytes && total <= stuckMaxBytes {
+					sm.FrozenFlows++
+				}
+			}
+		}
 		snap.Services[hit.svc.Name] = sm
 	}
 
 	for name, sm := range snap.Services {
 		if sm.Flows > 0 {
 			sm.LeakRatio = float64(sm.LeakFlows) / float64(sm.Flows)
+			sm.StalledRatio = float64(sm.FrozenFlows) / float64(sm.Flows)
 		}
 		if sm.UDPFlows > 0 {
 			sm.DeadFlowRatio = float64(sm.DeadUDPFlows) / float64(sm.UDPFlows)
@@ -311,6 +349,7 @@ func (e *Eye) Observe(ctx context.Context) (Snapshot, error) {
 		}
 		snap.Services[name] = sm
 	}
+	e.prev = cur // remember this pass's byte counts for next-pass stall detection
 	return snap, nil
 }
 
