@@ -662,6 +662,21 @@ func main() {
 			defer eyeMu.Unlock()
 			return verdicts
 		})
+		// LOT-43: feed the throttle-stall signal to the probe engine. A header-only
+		// probe can't see the TSPU IP-throttle freeze; the eye can. When a service is
+		// stalled, its active probe is failed so Brain escalates to a foreign egress
+		// (the only thing that escapes an IP-keyed throttle). Always-on (the eye runs
+		// regardless of -remediate); escalation itself is the standard chain walk.
+		eng.SetStallOracle(func(service string) bool {
+			eyeMu.Lock()
+			defer eyeMu.Unlock()
+			for _, v := range verdicts {
+				if v.Service == service && v.Kind == misroute.KindStalled {
+					return true
+				}
+			}
+			return false
+		})
 		// Remediation planner (LOT-18a): on each misroute verdict propose a
 		// remediation rung. PROPOSE-ONLY — it logs and publishes a metric; it does
 		// NOT call the generator with the plan, trigger reconcile, or touch the live

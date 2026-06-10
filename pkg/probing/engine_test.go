@@ -97,6 +97,32 @@ func TestActiveProbePublishesVerdict(t *testing.T) {
 	}
 }
 
+// LOT-43: a header-only prober can't see the TSPU throttle freeze, so when the
+// stall oracle reports the service stalled, a "healthy" ACTIVE probe is overridden
+// to a failure — driving Brain to escalate off the throttled path.
+func TestStallOracleFailsActiveProbe(t *testing.T) {
+	bus := events.NewBus()
+	prober := &fakeProber{ok: true, rtt: 42}
+	e := New(bus, prober, fixedPositioner(0), oneServiceReg(), kb.New(), nil, nil, 5*time.Millisecond, discardLog())
+	e.SetStallOracle(func(string) bool { return true })
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go e.Run(ctx)
+
+	select {
+	case v := <-bus.Verdicts:
+		if v.OK {
+			t.Fatalf("stalled service's active probe must be failed; got OK verdict %+v", v)
+		}
+		if v.Err == "" {
+			t.Error("overridden verdict should carry a throttle-stall err")
+		}
+	case <-time.After(time.Second):
+		t.Fatal("no verdict published")
+	}
+}
+
 // TestRecordOutcomeInvoked: the engine folds the probed strategy's outcome into
 // the KB. A successful probe at position 0 must move youtube|alt12 above the
 // 0.5 prior and mark it seen.

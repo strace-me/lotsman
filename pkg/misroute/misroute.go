@@ -19,9 +19,10 @@ import (
 
 // Verdict kinds.
 const (
-	KindNone = ""     // not misrouted
-	KindLeak = "leak" // flows leaking to direct above threshold
-	KindDead = "dead" // matched UDP/QUIC flows stalled above threshold
+	KindNone    = ""        // not misrouted
+	KindLeak    = "leak"    // flows leaking to direct above threshold
+	KindDead    = "dead"    // matched UDP/QUIC flows stalled above threshold
+	KindStalled = "stalled" // flows frozen mid-stream (TSPU IP-throttle); only a foreign egress escapes it (LOT-43)
 )
 
 // Config holds the detection thresholds. Zero value is unusable; use
@@ -38,6 +39,12 @@ type Config struct {
 	// MinUDPFlows: minimum matched UDP/QUIC flows before a dead verdict is
 	// trusted.
 	MinUDPFlows int
+
+	// StalledRatioThreshold: a service is throttle-stalled when StalledRatio
+	// exceeds this. MinStallFlows: minimum matched flows before a stalled verdict
+	// is trusted (the throttle shows as several frozen flows + churn, LOT-43).
+	StalledRatioThreshold float64
+	MinStallFlows         int
 }
 
 // DefaultConfig returns sane, service-agnostic defaults.
@@ -57,6 +64,8 @@ func DefaultConfig() Config {
 		MinFlows:               4,
 		DeadFlowRatioThreshold: 0.5,
 		MinUDPFlows:            4,
+		StalledRatioThreshold:  0.5,
+		MinStallFlows:          4,
 	}
 }
 
@@ -67,9 +76,10 @@ func DefaultConfig() Config {
 type Verdict struct {
 	Service       string
 	Misrouted     bool
-	Kind          string // KindLeak | KindDead | KindNone
+	Kind          string // KindLeak | KindDead | KindStalled | KindNone
 	LeakRatio     float64
 	DeadFlowRatio float64
+	StalledRatio  float64
 	Reason        string
 }
 
@@ -94,9 +104,15 @@ func detectOne(sm observe.ServiceMetrics, cfg Config) Verdict {
 		Kind:          KindNone,
 		LeakRatio:     sm.LeakRatio,
 		DeadFlowRatio: sm.DeadFlowRatio,
+		StalledRatio:  sm.StalledRatio,
 	}
 
 	leaking := sm.Flows >= cfg.MinFlows && sm.LeakRatio > cfg.LeakRatioThreshold
+	// Stalled = a majority of the service's flows frozen mid-stream (the TSPU
+	// IP-throttle). Only a foreign egress escapes an IP-keyed throttle (desync /
+	// reject-quic can't), so this verdict must drive a chain ESCALATION, not a
+	// route toggle — handled downstream (LOT-43).
+	stalled := sm.Flows >= cfg.MinStallFlows && sm.StalledRatio > cfg.StalledRatioThreshold
 	// A "dead" verdict drives the reject-quic remedy (force udp/443 → TCP), so it
 	// must be a real QUIC stall: require at least one dead flow on udp/443. A
 	// dead-ratio made up entirely of one-way VOICE/RTC flows (DeadQUICFlows==0) is
@@ -110,12 +126,21 @@ func detectOne(sm observe.ServiceMetrics, cfg Config) Verdict {
 		v.Misrouted = true
 		v.Kind = KindLeak
 		v.Reason = reasonLeak(sm, cfg)
+	case stalled:
+		v.Misrouted = true
+		v.Kind = KindStalled
+		v.Reason = reasonStalled(sm, cfg)
 	case dead:
 		v.Misrouted = true
 		v.Kind = KindDead
 		v.Reason = reasonDead(sm, cfg)
 	}
 	return v
+}
+
+func reasonStalled(sm observe.ServiceMetrics, cfg Config) string {
+	return fmt.Sprintf("stalled: %d/%d flows frozen mid-stream (ratio %.2f > %.2f) — TSPU IP-throttle; escalate to a foreign egress",
+		sm.FrozenFlows, sm.Flows, sm.StalledRatio, cfg.StalledRatioThreshold)
 }
 
 func reasonLeak(sm observe.ServiceMetrics, cfg Config) string {

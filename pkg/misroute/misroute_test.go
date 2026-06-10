@@ -14,6 +14,7 @@ func snap(metrics ...observe.ServiceMetrics) observe.Snapshot {
 	for _, m := range metrics {
 		if m.Flows > 0 {
 			m.LeakRatio = float64(m.LeakFlows) / float64(m.Flows)
+			m.StalledRatio = float64(m.FrozenFlows) / float64(m.Flows)
 		}
 		if m.UDPFlows > 0 {
 			m.DeadFlowRatio = float64(m.DeadUDPFlows) / float64(m.UDPFlows)
@@ -74,6 +75,17 @@ func TestDetect_OneWayVoice_NotDead(t *testing.T) {
 	v := verdictFor(t, Detect(s, DefaultConfig()), "discord")
 	if v.Misrouted || v.Kind != KindNone {
 		t.Fatalf("voice one-way (no dead QUIC) should NOT be dead-misrouted: misrouted=%v kind=%q", v.Misrouted, v.Kind)
+	}
+}
+
+// LOT-43: a service with a majority of flows frozen mid-stream (TSPU throttle) is
+// KindStalled — the verdict that must drive a foreign-egress escalation.
+func TestDetect_Stalled(t *testing.T) {
+	// 6 flows, 4 frozen → ratio 0.667 > 0.5, Flows 6 >= MinStallFlows 4. No leak/dead.
+	s := snap(observe.ServiceMetrics{Service: "discord", Flows: 6, FrozenFlows: 4})
+	v := verdictFor(t, Detect(s, DefaultConfig()), "discord")
+	if !v.Misrouted || v.Kind != KindStalled {
+		t.Fatalf("want stalled, got misrouted=%v kind=%q", v.Misrouted, v.Kind)
 	}
 }
 

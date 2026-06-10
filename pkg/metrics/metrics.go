@@ -160,6 +160,12 @@ func (c *Collector) ServeHTTP(w http.ResponseWriter, _ *http.Request) {
 			fmt.Fprintf(&b, "lotsman_service_dead_flow_ratio{service=%q} %s\n", s, strconv.FormatFloat(osnap.Services[s].DeadFlowRatio, 'f', 4, 64))
 		}
 
+		b.WriteString("# HELP lotsman_service_stalled_ratio Fraction of a service's matched flows frozen mid-stream across passes (TSPU IP-throttle freeze, LOT-43).\n")
+		b.WriteString("# TYPE lotsman_service_stalled_ratio gauge\n")
+		for _, s := range svcs {
+			fmt.Fprintf(&b, "lotsman_service_stalled_ratio{service=%q} %s\n", s, strconv.FormatFloat(osnap.Services[s].StalledRatio, 'f', 4, 64))
+		}
+
 		b.WriteString("# HELP lotsman_service_oneway_udp_ratio Fraction of a service's matched UDP flows that are sending with no return (wedged one-way RTC signature, LOT-35).\n")
 		b.WriteString("# TYPE lotsman_service_oneway_udp_ratio gauge\n")
 		for _, s := range svcs {
