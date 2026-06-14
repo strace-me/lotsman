@@ -53,12 +53,12 @@ func TestVariantA_SingleInstance(t *testing.T) {
 		t.Fatal(err)
 	}
 	opts := DefaultNftOptions()
-	opts.VPNServers = []string{"45.91.54.162"}
+	opts.VPNServers = []string{"198.51.100.10"}
 	nft := GenerateNft(in, opts)
 
 	for _, want := range []string{
 		"table inet zapret {",
-		"ip daddr { 45.91.54.162 } return",
+		"ip daddr { 198.51.100.10 } return",
 		`oifname "eth0" meta l4proto tcp tcp dport { 80, 443 } ct original packets 1-12 queue num 200 bypass`,
 		`oifname "eth0" meta l4proto udp udp dport { 443, 50000-50100 } ct original packets 1-12 queue num 200 bypass`,
 	} {

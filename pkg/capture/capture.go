@@ -66,13 +66,16 @@ type Bypass struct {
 	DstPorts []string // dport values/ranges, e.g. "3478-3481", "30000-45000"
 }
 
-// DefaultModel is the live R5S capture configuration (the byte-identical target).
+// DefaultModel is a reference R5S capture configuration (the byte-identical
+// target shape). LoopBypassIPs here are RFC5737 documentation placeholders — the
+// operator supplies the real VPN-server IPs via config so the tunnel egress
+// skips the tproxy loop; don't hardcode infra here.
 func DefaultModel() Model {
 	return Model{
 		Table: "singbox", Chain: "prerouting", LanIface: "br-lan",
 		TproxyIP: "127.0.0.1", TproxyPort: 7893, Mark: 1, SelfMark: 0xff,
 		LocalCIDRs:     []string{"127.0.0.0/8", "10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16"},
-		LoopBypassIPs:  []string{"45.91.54.162", "192.0.2.12"},
+		LoopBypassIPs:  []string{"198.51.100.10", "203.0.113.20"}, // placeholders (RFC5737); real IPs via config
 		SinkholeCIDRs:  []string{"192.0.2.0/24"},
 		BypassUDPPorts: []int{67, 68},
 	}

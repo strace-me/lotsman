@@ -168,7 +168,7 @@ func TestManagerInlineNodeNoFetch(t *testing.T) {
 	m := NewManager(fakeFetcher{})
 	decls := []Declaration{{
 		Name:    "fastvpn",
-		URL:     "hysteria2://pw@192.0.2.12:443?sni=nl3.example&obfs=salamander",
+		URL:     "hysteria2://pw@203.0.113.20:443?sni=nl3.example&obfs=salamander",
 		Format:  FormatSingleURL,
 		Tags:    []string{"normal"},
 		Enabled: true,
@@ -177,7 +177,7 @@ func TestManagerInlineNodeNoFetch(t *testing.T) {
 	if len(errs) != 0 {
 		t.Fatalf("inline node should not fetch/error: %v", errs)
 	}
-	n, ok := findNode(nodes, "192.0.2.12")
+	n, ok := findNode(nodes, "203.0.113.20")
 	if !ok {
 		t.Fatalf("inline hysteria2 node not loaded: %v", nodes)
 	}
@@ -196,7 +196,7 @@ func TestFetchHost(t *testing.T) {
 		{"https://panel.example:8443/s/TOKEN", "panel.example", true},
 		{"http://1.2.3.4:9000/sub", "1.2.3.4", true},
 		// Inline node share-links are the node itself, never a fetch host.
-		{"hysteria2://pw@192.0.2.12:443?sni=x", "", false},
+		{"hysteria2://pw@203.0.113.20:443?sni=x", "", false},
 		{"vless://uuid@host:443", "", false},
 	}
 	for _, c := range cases {
