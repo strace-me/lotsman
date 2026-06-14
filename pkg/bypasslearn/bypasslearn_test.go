@@ -14,7 +14,7 @@ func mustCIDR(s string) *net.IPNet {
 }
 
 func TestClassifierAcceptsGameUDP(t *testing.T) {
-	c := Classifier{Exclude: []*net.IPNet{mustCIDR("10.0.0.0/8"), mustCIDR("45.91.54.162/32")}}
+	c := Classifier{Exclude: []*net.IPNet{mustCIDR("10.0.0.0/8"), mustCIDR("198.51.100.10/32")}}
 	ip, ok := c.Candidate("udp", "20.190.140.10", "30041", 1200, 4300)
 	if !ok || ip.String() != "20.190.140.10" {
 		t.Fatalf("game UDP to a routable non-excluded dst should be a candidate, got %v %v", ip, ok)
@@ -22,7 +22,7 @@ func TestClassifierAcceptsGameUDP(t *testing.T) {
 }
 
 func TestClassifierRejects(t *testing.T) {
-	c := Classifier{Exclude: []*net.IPNet{mustCIDR("10.0.0.0/8"), mustCIDR("45.91.0.0/16")}}
+	c := Classifier{Exclude: []*net.IPNet{mustCIDR("10.0.0.0/8"), mustCIDR("198.51.100.0/24")}}
 	cases := []struct {
 		name              string
 		network, ip, port string
@@ -33,7 +33,7 @@ func TestClassifierRejects(t *testing.T) {
 		{"low port (dns)", "udp", "20.190.140.10", "53", 100, 100},
 		{"one-way (no download)", "udp", "20.190.140.10", "30041", 100, 0},
 		{"dead (no upload)", "udp", "20.190.140.10", "30041", 0, 100},
-		{"excluded vpn dst", "udp", "45.91.54.162", "30041", 100, 100},
+		{"excluded vpn dst", "udp", "198.51.100.10", "30041", 100, 100},
 		{"private dst", "udp", "10.1.2.3", "30041", 100, 100},
 		{"loopback", "udp", "127.0.0.1", "30041", 100, 100},
 		{"bad ip", "udp", "not-an-ip", "30041", 100, 100},

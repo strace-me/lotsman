@@ -70,7 +70,7 @@ func TestDNSResolverDoH(t *testing.T) {
 }
 
 func TestGeneratePerServiceSelectors(t *testing.T) {
-	hy2 := mustParse(t, "hysteria2://secretpass@45.91.54.162:443?sni=magic.example", subscription.FormatSingleURL)
+	hy2 := mustParse(t, "hysteria2://secretpass@198.51.100.10:443?sni=magic.example", subscription.FormatSingleURL)
 	native := mustParse(t, `{"outbounds":[{"type":"hysteria2","tag":"nat","server":"5.6.7.8","server_port":443,"password":"pw2","tls":{"enabled":true,"server_name":"x.example"}}]}`, subscription.FormatSingbox)
 	vless := mustParse(t, "vless://uuid@1.2.3.4:443?type=ws#v", subscription.FormatSingleURL)
 
@@ -217,7 +217,7 @@ func TestGenerateDomainAndIPRoutes(t *testing.T) {
 }
 
 func TestPerSourceDeviceRouting(t *testing.T) {
-	hy2 := mustParse(t, "hysteria2://p@45.91.54.162:443?sni=x", subscription.FormatSingleURL)
+	hy2 := mustParse(t, "hysteria2://p@198.51.100.10:443?sni=x", subscription.FormatSingleURL)
 	services := []registry.Service{svc("youtube", "vpn_url_test", "geosite-youtube")}
 	devices := []registry.Device{
 		{Name: "gaming-pc", Sources: []string{"192.168.1.50/32"}, Policy: "direct"},
@@ -262,7 +262,7 @@ func TestPerSourceDeviceRouting(t *testing.T) {
 }
 
 func TestDirectOnlyServiceAndPriorityOrder(t *testing.T) {
-	hy2 := mustParse(t, "hysteria2://p@45.91.54.162:443?sni=x", subscription.FormatSingleURL)
+	hy2 := mustParse(t, "hysteria2://p@198.51.100.10:443?sni=x", subscription.FormatSingleURL)
 
 	ruDirect := registry.Service{
 		Name: "ru-direct", RuleSets: []string{"geosite-ru"}, Priority: -10,
@@ -320,7 +320,7 @@ func TestDirectOnlyServiceAndPriorityOrder(t *testing.T) {
 // has a more-first Priority — so SNI/domain disambiguates a shared IP before any
 // broad ip_cidr can hijack it.
 func TestDomainRulesBeatIPRules(t *testing.T) {
-	hy2 := mustParse(t, "hysteria2://p@45.91.54.162:443?sni=x", subscription.FormatSingleURL)
+	hy2 := mustParse(t, "hysteria2://p@198.51.100.10:443?sni=x", subscription.FormatSingleURL)
 
 	ipSvc := svc("voice", "vpn_url_test") // ip_cidr only, tries to jump ahead
 	ipSvc.IPs = []string{"66.22.192.0/18"}
@@ -359,7 +359,7 @@ func TestDomainRulesBeatIPRules(t *testing.T) {
 }
 
 func TestTLSFragmentKnob(t *testing.T) {
-	hy2 := mustParse(t, "hysteria2://p@45.91.54.162:443?sni=x", subscription.FormatSingleURL)
+	hy2 := mustParse(t, "hysteria2://p@198.51.100.10:443?sni=x", subscription.FormatSingleURL)
 	frag := svc("youtube", "vpn_url_test", "geosite-youtube")
 	frag.TLSFragment = true
 	plain := svc("discord", "vpn_url_test", "geosite-discord") // no fragment
@@ -533,7 +533,7 @@ func toNum(v any) int {
 }
 
 func TestVersionGateDropsUnsupportedKnobs(t *testing.T) {
-	hy2 := mustParse(t, "hysteria2://p@45.91.54.162:443?sni=x", subscription.FormatSingleURL)
+	hy2 := mustParse(t, "hysteria2://p@198.51.100.10:443?sni=x", subscription.FormatSingleURL)
 	frag := svc("youtube", "vpn_url_test", "geosite-youtube")
 	frag.TLSFragment = true
 
@@ -567,7 +567,7 @@ func TestVersionGateDropsUnsupportedKnobs(t *testing.T) {
 
 func TestUTLSInjection(t *testing.T) {
 	vless := mustParse(t, "vless://uuid@1.2.3.4:443?security=tls&sni=ex.com#v", subscription.FormatSingleURL)
-	hy2 := mustParse(t, "hysteria2://p@45.91.54.162:443?sni=x", subscription.FormatSingleURL)
+	hy2 := mustParse(t, "hysteria2://p@198.51.100.10:443?sni=x", subscription.FormatSingleURL)
 	opts := DefaultOptions()
 	opts.UTLSFingerprint = "chrome"
 
@@ -594,7 +594,7 @@ func TestUTLSInjection(t *testing.T) {
 
 func TestMultiplexInjection(t *testing.T) {
 	vless := mustParse(t, "vless://uuid@1.2.3.4:443?security=tls&sni=ex.com#v", subscription.FormatSingleURL)
-	hy2 := mustParse(t, "hysteria2://p@45.91.54.162:443?sni=x", subscription.FormatSingleURL)
+	hy2 := mustParse(t, "hysteria2://p@198.51.100.10:443?sni=x", subscription.FormatSingleURL)
 	opts := DefaultOptions()
 	opts.Multiplex = &MultiplexOptions{Protocol: "smux", MaxConnections: 4, Padding: true, BrutalUp: 100, BrutalDown: 100}
 
@@ -752,7 +752,7 @@ func TestECHKnob(t *testing.T) {
 }
 
 func TestWarmupPoolNeverSleeps(t *testing.T) {
-	hy2 := mustParse(t, "hysteria2://p@45.91.54.162:443?sni=x", subscription.FormatSingleURL)
+	hy2 := mustParse(t, "hysteria2://p@198.51.100.10:443?sni=x", subscription.FormatSingleURL)
 	vless := mustParse(t, "vless://uuid@1.2.3.4:443?type=ws#v", subscription.FormatSingleURL)
 	services := []registry.Service{svc("youtube", "warm", "geosite-youtube")}
 	memberships := map[string][]subscription.Node{"warm": {hy2}, "lazy": {vless}}
@@ -890,8 +890,8 @@ func TestSubscriptionViaPoolFailsafe(t *testing.T) {
 // a concrete pool node (source_ip_cidr -> node tag), emitted BEFORE the service's
 // shared selector rule so the per-client override wins.
 func TestPerClientSpread(t *testing.T) {
-	n1 := mustParse(t, "hysteria2://p@45.91.54.1:443?sni=x", subscription.FormatSingleURL)
-	n2 := mustParse(t, "hysteria2://p@45.91.54.2:443?sni=x", subscription.FormatSingleURL)
+	n1 := mustParse(t, "hysteria2://p@198.51.100.1:443?sni=x", subscription.FormatSingleURL)
+	n2 := mustParse(t, "hysteria2://p@198.51.100.2:443?sni=x", subscription.FormatSingleURL)
 	tag1, _ := NodeTag(n1)
 	tag2, _ := NodeTag(n2)
 	s := svc("youtube", "vpn_url_test", "geosite-youtube")

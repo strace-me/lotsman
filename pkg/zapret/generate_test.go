@@ -12,7 +12,7 @@ func TestGenerateInit(t *testing.T) {
 		Connbytes: 0,
 	}
 	opts := DefaultInitOptions()
-	opts.Nft.VPNServers = []string{"45.91.54.162"}
+	opts.Nft.VPNServers = []string{"198.51.100.10"}
 	got := GenerateInit(in, opts)
 
 	for _, want := range []string{
@@ -21,7 +21,7 @@ func TestGenerateInit(t *testing.T) {
 		"ACTIVE=/opt/zapret-lotsman/discord_voice/active.sh",
 		"QNUM=201",
 		"nft delete table inet zapret_discord_voice",
-		"ip daddr { 45.91.54.162 } return",
+		"ip daddr { 198.51.100.10 } return",
 		`oifname "eth0" meta l4proto udp udp dport { 19294-19344, 50000-50100 } queue num 201 bypass`,
 		`procd_set_param command "$ACTIVE" "$QNUM"`,
 		"procd_set_param respawn",

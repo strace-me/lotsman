@@ -13,7 +13,7 @@ var liveSingboxTable = strings.Join([]string{
 	"\t\ttype filter hook prerouting priority mangle; policy accept;",
 	"\t\tip daddr { 10.0.0.0/8, 127.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16 } return",
 	"\t\tmeta mark 0x000000ff return",
-	"\t\tip daddr { 45.91.54.162, 192.0.2.12 } return",
+	"\t\tip daddr { 198.51.100.10, 203.0.113.20 } return",
 	"\t\tip daddr 192.0.2.0/24 return",
 	"\t\tudp dport { 67, 68 } return",
 	"\t\tiifname \"br-lan\" meta l4proto tcp tproxy to 127.0.0.1:7893 meta mark set 0x00000001 accept",
@@ -34,7 +34,7 @@ func TestGenerateNftByteIdenticalToLive(t *testing.T) {
 func TestGenerateNftSortsSetsCanonically(t *testing.T) {
 	m := DefaultModel()
 	m.LocalCIDRs = []string{"192.168.0.0/16", "10.0.0.0/8", "172.16.0.0/12", "127.0.0.0/8"} // shuffled
-	m.LoopBypassIPs = []string{"192.0.2.12", "45.91.54.162"}                            // reversed
+	m.LoopBypassIPs = []string{"203.0.113.20", "198.51.100.10"}                            // reversed
 	if got := string(GenerateNft(m)); got != liveSingboxTable {
 		t.Errorf("shuffled model must still render canonical order:\n%s", got)
 	}
