@@ -81,11 +81,30 @@ func TestDetect_OneWayVoice_NotDead(t *testing.T) {
 // LOT-43: a service with a majority of flows frozen mid-stream (TSPU throttle) is
 // KindStalled — the verdict that must drive a foreign-egress escalation.
 func TestDetect_Stalled(t *testing.T) {
-	// 6 flows, 4 frozen → ratio 0.667 > 0.5, Flows 6 >= MinStallFlows 4. No leak/dead.
+	// 6 flows, 4 frozen → ratio 0.667 > 0.5, Flows 6 >= MinStallFlows 2. No leak/dead.
 	s := snap(observe.ServiceMetrics{Service: "discord", Flows: 6, FrozenFlows: 4})
 	v := verdictFor(t, Detect(s, DefaultConfig()), "discord")
 	if !v.Misrouted || v.Kind != KindStalled {
 		t.Fatalf("want stalled, got misrouted=%v kind=%q", v.Misrouted, v.Kind)
+	}
+}
+
+// MinStallFlows lowered 4→2: two flows both frozen mid-stream is a real throttle
+// signal, not one idle keepalive (LOT-43).
+func TestDetect_Stalled_TwoFlows(t *testing.T) {
+	s := snap(observe.ServiceMetrics{Service: "gaming-epic", Flows: 2, FrozenFlows: 2})
+	if v := verdictFor(t, Detect(s, DefaultConfig()), "gaming-epic"); !v.Misrouted || v.Kind != KindStalled {
+		t.Fatalf("2/2 frozen should be stalled, got misrouted=%v kind=%q", v.Misrouted, v.Kind)
+	}
+}
+
+// A single frozen flow is NOT escalated: indistinguishable from a completed-then-
+// idle connection without an active-intent signal (LOT-43; the active throughput
+// probe is the deterministic fix for the single-flow case).
+func TestDetect_SingleFrozenFlow_NotStalled(t *testing.T) {
+	s := snap(observe.ServiceMetrics{Service: "youtube", Flows: 1, FrozenFlows: 1})
+	if v := verdictFor(t, Detect(s, DefaultConfig()), "youtube"); v.Misrouted {
+		t.Fatalf("single frozen flow must NOT auto-escalate (ambiguous with idle), got kind=%q", v.Kind)
 	}
 }
 
