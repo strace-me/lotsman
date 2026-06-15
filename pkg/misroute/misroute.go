@@ -65,7 +65,7 @@ func DefaultConfig() Config {
 		DeadFlowRatioThreshold: 0.5,
 		MinUDPFlows:            4,
 		StalledRatioThreshold:  0.5,
-		MinStallFlows:          4,
+		MinStallFlows:          2,
 	}
 }
 
