@@ -468,6 +468,12 @@ func Generate(services []registry.Service, devices []registry.Device, nodes []su
 	echOK := caps.Supports(FeatureECH)
 	var echStripped bool
 
+	// hy2 gecko obfs is "Since sing-box 1.14.0"; an older target rejects it as an
+	// unknown obfs type (which fails the whole config), so strip it per node and
+	// report once. Salamander is unaffected.
+	geckoOK := caps.Supports(FeatureGeckoObfs)
+	var geckoStripped bool
+
 	// Node outbounds, plus a tag lookup so groups reference real outbounds only.
 	// WireGuard is special: since sing-box 1.11 it is an `endpoints` entry (the
 	// outbound form is deprecated), but its tag is still referenced like an
@@ -520,6 +526,9 @@ func Generate(services []registry.Service, devices []registry.Device, nodes []su
 			if !echOK && stripECH(o) {
 				echStripped = true
 			}
+			if !geckoOK && stripGeckoObfs(o) {
+				geckoStripped = true
+			}
 		}
 		outbounds = append(outbounds, ob)
 		outbounds = append(outbounds, extras...)
@@ -528,6 +537,10 @@ func Generate(services []registry.Service, devices []registry.Device, nodes []su
 	if echStripped {
 		res.SkippedKnobs = append(res.SkippedKnobs,
 			fmt.Sprintf("ech (unsupported on sing-box %s)", caps.Version()))
+	}
+	if geckoStripped {
+		res.SkippedKnobs = append(res.SkippedKnobs,
+			fmt.Sprintf("hy2 gecko obfs (needs sing-box %s+, target %s)", minVersion[FeatureGeckoObfs], caps.Version()))
 	}
 
 	// url-test group per pool (deterministic order).

@@ -167,6 +167,57 @@ func TestGeneratePerServiceSelectors(t *testing.T) {
 	}
 }
 
+// gecko obfs is "Since sing-box 1.14.0": stripped + reported on an older target
+// (so the config stays loadable), kept on 1.14.0+ (LOT/caps gating).
+func TestGeckoObfsVersionGated(t *testing.T) {
+	gecko := mustParse(t, "hysteria2://pw@198.51.100.10:443?sni=x&obfs=gecko&obfs-password=op", subscription.FormatSingleURL)
+	svc := registry.Service{Name: "web", Domains: []string{"x.example"},
+		Chain: []registry.ChainStep{{State: "VPN", StrategyClass: "vpn", StrategyID: "vpn_url_test"}}}
+	nodes := []subscription.Node{gecko}
+	mem := map[string][]subscription.Node{"vpn_url_test": {gecko}}
+
+	geckoType := func(jsonb []byte) any {
+		_, byType, _ := outboundsByTag(t, jsonb)
+		for _, ob := range byType["hysteria2"] {
+			if o, ok := ob["obfs"].(map[string]any); ok {
+				return o["type"]
+			}
+		}
+		return nil
+	}
+
+	// 1.12.17 (no gecko): stripped + reported.
+	old := DefaultOptions()
+	old.TargetVersion = "1.12.17"
+	res, err := Generate([]registry.Service{svc}, nil, nodes, mem, old)
+	if err != nil {
+		t.Fatalf("generate (old): %v", err)
+	}
+	if got := geckoType(res.JSON); got != nil {
+		t.Errorf("1.12.17: gecko obfs must be stripped, got type=%v", got)
+	}
+	reported := false
+	for _, s := range res.SkippedKnobs {
+		if strings.Contains(s, "gecko") {
+			reported = true
+		}
+	}
+	if !reported {
+		t.Errorf("1.12.17: gecko strip not reported in SkippedKnobs=%v", res.SkippedKnobs)
+	}
+
+	// 1.14.0: kept.
+	nw := DefaultOptions()
+	nw.TargetVersion = "1.14.0"
+	res2, err := Generate([]registry.Service{svc}, nil, nodes, mem, nw)
+	if err != nil {
+		t.Fatalf("generate (new): %v", err)
+	}
+	if got := geckoType(res2.JSON); got != "gecko" {
+		t.Errorf("1.14.0: gecko obfs must be kept, got type=%v", got)
+	}
+}
+
 func TestGenerateDomainAndIPRoutes(t *testing.T) {
 	hy2 := mustParse(t, "hysteria2://pw@1.2.3.4:443?sni=x.example", subscription.FormatSingleURL)
 	discord := svc("discord", "vpn_url_test")
