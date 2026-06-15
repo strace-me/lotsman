@@ -524,6 +524,23 @@ func injectMultiplex(ob outbound, m *MultiplexOptions) {
 	ob["multiplex"] = mb
 }
 
+// stripGeckoObfs removes a hysteria2 obfs block of type "gecko" (used when the
+// target sing-box version is < 1.14.0, which rejects it as "unknown obfs type"
+// and would fail the whole config). Salamander/other obfs are left intact.
+// Returns whether it removed one. The node then connects without obfs — broken
+// against a gecko-only server, but the config stays loadable (reported once).
+func stripGeckoObfs(ob outbound) bool {
+	o, ok := ob["obfs"].(outbound)
+	if !ok {
+		return false
+	}
+	if o["type"] == "gecko" {
+		delete(ob, "obfs")
+		return true
+	}
+	return false
+}
+
 // stripECH removes a tls.ech block from an outbound (used when the target
 // sing-box version doesn't support ECH). Returns whether it removed one.
 func stripECH(ob outbound) bool {

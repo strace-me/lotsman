@@ -21,7 +21,7 @@ const (
 	FeatureUTLS        Feature = "utls"         // tls.utls fingerprint mimicry
 	FeatureAnyTLS      Feature = "anytls"       // anytls outbound
 	FeatureFakeIP      Feature = "fakeip"       // dns fakeip
-	FeatureGeckoObfs   Feature = "obfs_gecko"   // hysteria2 gecko obfs — REFUTED/fabricated, never emit
+	FeatureGeckoObfs   Feature = "obfs_gecko"   // hysteria2 gecko obfs (real; Since sing-box 1.14.0) — gated: stripped on older targets
 	FeatureMultiplex   Feature = "multiplex"    // outbound multiplex (smux/yamux/h2mux) + padding + brutal
 	FeatureShadowTLS   Feature = "shadowtls"    // shadowtls v3 outbound (ss detours through it)
 	FeatureWireGuard   Feature = "wireguard"    // wireguard endpoint (the deprecated outbound form is not emitted)
