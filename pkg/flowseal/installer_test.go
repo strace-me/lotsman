@@ -68,6 +68,29 @@ func TestFileInstallerExtractsAndLinks(t *testing.T) {
 	}
 }
 
+// Newer upstream releases wrap everything in a single "<repo>-<tag>/" dir; the
+// installer must strip it so lists/ lands at the root the strategy scripts expect
+// (the 1.9.9c bug that wedged nfqws for days).
+func TestFileInstallerStripsWrapperDir(t *testing.T) {
+	base := t.TempDir()
+	inst := NewFileInstaller(base)
+	raw := makeZip(t, map[string]string{
+		"zapret-discord-youtube-1.9.9c/lists/list-general.txt": "youtube.com\n",
+		"zapret-discord-youtube-1.9.9c/bin/stun.bin":           "PAYLOAD",
+	})
+	if err := inst.Install(context.Background(), Release{Tag: "1.9.9c"}, raw); err != nil {
+		t.Fatalf("install: %v", err)
+	}
+	dir := filepath.Join(base, "flowseal-1.9.9c")
+	// FLAT: lists/list-general.txt at the root, NOT under the wrapper dir.
+	if b, err := os.ReadFile(filepath.Join(dir, "lists/list-general.txt")); err != nil || string(b) != "youtube.com\n" {
+		t.Errorf("flat lists/list-general.txt = %q err=%v (wrapper not stripped)", b, err)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "zapret-discord-youtube-1.9.9c")); !os.IsNotExist(err) {
+		t.Errorf("wrapper dir should be stripped, but it exists")
+	}
+}
+
 func TestUnzipRejectsTraversal(t *testing.T) {
 	dir := t.TempDir()
 	raw := makeZip(t, map[string]string{"../escape.txt": "evil"})
