@@ -72,6 +72,20 @@ func TestPlanDead_RungTwoRejectQUIC(t *testing.T) {
 	}
 }
 
+// A stall is the TSPU IP-throttle: no route remediation can fix it (route toggles
+// don't change the destination IP class). Decide must yield ActionNone so the
+// remctl ladder doesn't loop reject-quic/escalate-node forever (LOT-43); the chain
+// escalation (stall oracle → Brain) handles it instead.
+func TestPlanStalled_NoRouteRemediation(t *testing.T) {
+	v := misroute.Verdict{Service: "youtube", Misrouted: true, Kind: misroute.KindStalled, StalledRatio: 0.9}
+	// Even with CIDRs available, a stall does NOT get reject-quic or ip-fallback.
+	in := Inputs{CIDRs: map[string][]*net.IPNet{"youtube": {cidr(t, "142.250.0.0/15")}}}
+	p := Decide(v, in)
+	if p.Rung != 0 || p.Action != ActionNone {
+		t.Fatalf("stalled rung=%d action=%q, want 0/%s (no route remediation)", p.Rung, p.Action, ActionNone)
+	}
+}
+
 func TestPlanHealthy_None(t *testing.T) {
 	v := misroute.Verdict{Service: "youtube", Misrouted: false, Kind: misroute.KindNone}
 
