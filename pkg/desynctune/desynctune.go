@@ -30,15 +30,77 @@ func StrategyID(args []string) string {
 	return fmt.Sprintf("gen-%08x", h.Sum32())
 }
 
-// Candidates picks which strategies to try this run: hill-climb around a known
-// good seed (Mutate — cheap, targets the LIVE TSPU, finds neighbours not in the
-// catalog) when one is given, else a capped Grid (cold start / broad sweep).
-// gridCap bounds the cold grid's combinatorial blow-up.
+// multiStartK is how many diverse Grid anchors a seeded run hill-climbs from, on
+// top of the seed's own neighbourhood — enough to leave the seed's basin without
+// blowing the run up toward a full cold grid.
+const multiStartK = 6
+
+// Candidates picks which strategies to try this run. With a known-good seed it
+// runs a focused MULTI-START search: the radius-2 neighbourhood of the seed
+// (refine the working point AND cross a conjunctive valley a radius-1 climb can't)
+// UNION a handful of diverse Grid anchors with their radius-1 neighbourhoods (so
+// the search can escape the seed's local basin entirely). Without a seed it's a
+// capped Grid (cold start / broad sweep). gridCap bounds either result.
 func Candidates(e desyncgen.Engine, seed desyncgen.Strategy, gridCap int) []desyncgen.Strategy {
-	if len(seed) > 0 {
-		return desyncgen.Mutate(e, seed)
+	if len(seed) == 0 {
+		return coldCandidates(e, gridCap)
 	}
-	return desyncgen.Grid(e, gridCap)
+	out := []desyncgen.Strategy{seed} // confirm the current recipe still beats baseline
+	out = append(out, desyncgen.MutateN(e, seed, 2)...)
+	anchors := desyncgen.Grid(e, multiStartK)
+	out = append(out, anchors...)
+	for _, a := range anchors {
+		out = append(out, desyncgen.Mutate(e, a)...)
+	}
+	return capDedup(e, out, gridCap)
+}
+
+// coldCandidates is the no-seed path: start from the engine's prior catalog (and
+// each prior's neighbourhood) when it has one, padded with Grid diversity; else a
+// blind Grid. The priors first means the cap keeps the human recipes.
+func coldCandidates(e desyncgen.Engine, gridCap int) []desyncgen.Strategy {
+	sd, ok := e.(desyncgen.Seeder)
+	if !ok || len(sd.Seeds()) == 0 {
+		return desyncgen.Grid(e, gridCap)
+	}
+	var out []desyncgen.Strategy
+	for _, s := range sd.Seeds() {
+		out = append(out, s)
+		out = append(out, desyncgen.Mutate(e, s)...)
+	}
+	out = append(out, desyncgen.Grid(e, gridCap)...) // broad-sweep diversity behind the priors
+	return capDedup(e, out, gridCap)
+}
+
+// capDedup drops render-empty / id-colliding strategies (first-seen order kept),
+// then truncates to gridCap. Order matters: callers put the high-value points
+// (seed neighbourhood, priors) first so the cap keeps the focused core.
+func capDedup(e desyncgen.Engine, in []desyncgen.Strategy, gridCap int) []desyncgen.Strategy {
+	out := dedupStrategies(e, in)
+	if gridCap > 0 && len(out) > gridCap {
+		out = out[:gridCap]
+	}
+	return out
+}
+
+// dedupStrategies drops strategies that render to nothing or collide on id
+// (StrategyID over the rendered args), preserving first-seen order.
+func dedupStrategies(e desyncgen.Engine, in []desyncgen.Strategy) []desyncgen.Strategy {
+	seen := make(map[string]bool, len(in))
+	out := make([]desyncgen.Strategy, 0, len(in))
+	for _, s := range in {
+		args := e.Render(s)
+		if len(args) == 0 {
+			continue
+		}
+		id := StrategyID(args)
+		if seen[id] {
+			continue
+		}
+		seen[id] = true
+		out = append(out, s)
+	}
+	return out
 }
 
 // Result is one tuner pass's outcome for a service.

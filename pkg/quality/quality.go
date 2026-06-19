@@ -18,6 +18,13 @@ type Quality struct {
 	JitterMs float64 // mean inter-sample RTT variation (RFC3550-style)
 	Loss     float64 // failed / total, in [0,1]
 	Samples  int     // total attempts considered
+
+	// Throughput dimension — set only by a sustained-read (burst-download) probe.
+	// A latency-only probe leaves these zero. They exist to catch the TSPU
+	// IP-volume-freeze, where a path connects with LOW loss but GOODPUT collapses
+	// after ~16KB — invisible to loss/latency alone.
+	GoodputKBps float64 // sustained download rate over the read, KiB/s
+	Bytes       int64   // total bytes pulled (0 = froze from the first byte)
 }
 
 // FromRTTs builds Quality from the round-trip times of successful samples (in
@@ -40,6 +47,56 @@ func FromRTTs(okRTTs []float64, attempts int) Quality {
 	q.P95ms = percentile(sorted, 0.95)
 	q.P99ms = percentile(sorted, 0.99)
 	return q
+}
+
+// FromBurst builds Quality from a sustained-read probe: per-request latencies +
+// attempts (loss/tail, as FromRTTs) plus the total bytes pulled and the achieved
+// goodput. Use this for the throughput-aware fitness; goodputKBps is what the
+// freeze gate keys on.
+func FromBurst(okRTTs []float64, attempts int, bytes int64, goodputKBps float64) Quality {
+	q := FromRTTs(okRTTs, attempts)
+	q.Bytes = bytes
+	q.GoodputKBps = goodputKBps
+	return q
+}
+
+// Worst combines per-endpoint qualities into a single worst-case aggregate: max
+// loss, MIN goodput/bytes, max latency tail, min samples. A multi-endpoint probe
+// uses it so a recipe that fixes one endpoint but breaks another is judged by the
+// weakest endpoint — defeating the single-canary Goodhart. Empty input is a zero
+// Quality (no samples → untrusted).
+func Worst(qs ...Quality) Quality {
+	if len(qs) == 0 {
+		return Quality{}
+	}
+	w := qs[0]
+	for _, q := range qs[1:] {
+		if q.Loss > w.Loss {
+			w.Loss = q.Loss
+		}
+		if q.GoodputKBps < w.GoodputKBps {
+			w.GoodputKBps = q.GoodputKBps
+		}
+		if q.Bytes < w.Bytes {
+			w.Bytes = q.Bytes
+		}
+		if q.P50ms > w.P50ms {
+			w.P50ms = q.P50ms
+		}
+		if q.P95ms > w.P95ms {
+			w.P95ms = q.P95ms
+		}
+		if q.P99ms > w.P99ms {
+			w.P99ms = q.P99ms
+		}
+		if q.JitterMs > w.JitterMs {
+			w.JitterMs = q.JitterMs
+		}
+		if q.Samples < w.Samples {
+			w.Samples = q.Samples
+		}
+	}
+	return w
 }
 
 // percentile uses linear interpolation between closest ranks (type 7), the

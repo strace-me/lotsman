@@ -61,3 +61,25 @@ func TestAllFailed(t *testing.T) {
 		t.Errorf("all-failed: loss=%.2f p99=%.1f, want 1.0/0", q.Loss, q.P99ms)
 	}
 }
+
+func TestFromBurstCarriesThroughput(t *testing.T) {
+	q := FromBurst([]float64{40, 50, 60}, 3, 96*1024, 250.0)
+	if q.Bytes != 96*1024 || q.GoodputKBps != 250.0 {
+		t.Errorf("throughput not carried: bytes=%d goodput=%v", q.Bytes, q.GoodputKBps)
+	}
+	if q.Loss != 0 || q.P95ms == 0 {
+		t.Errorf("latency dimension lost: loss=%v p95=%v", q.Loss, q.P95ms)
+	}
+}
+
+func TestWorstTakesWeakestEndpoint(t *testing.T) {
+	a := Quality{Loss: 0.0, GoodputKBps: 500, Bytes: 100000, P95ms: 30, Samples: 10}
+	b := Quality{Loss: 0.4, GoodputKBps: 2, Bytes: 2048, P95ms: 200, Samples: 6} // a frozen/broken endpoint
+	w := Worst(a, b)
+	if w.Loss != 0.4 || w.GoodputKBps != 2 || w.Bytes != 2048 || w.P95ms != 200 || w.Samples != 6 {
+		t.Errorf("worst-case aggregate wrong: %+v", w)
+	}
+	if got := Worst(); got != (Quality{}) {
+		t.Errorf("empty Worst should be zero, got %+v", got)
+	}
+}

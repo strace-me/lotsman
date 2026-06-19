@@ -49,31 +49,89 @@ type Engine interface {
 	Render(Strategy) []string
 }
 
-// Grid returns candidate strategies as the cartesian product of every non-empty
-// axis's Values. With cap > 0 the result is truncated to the first cap
-// combinations (a deterministic bound against the combinatorial blow-up — the
-// tuner can sample or prioritise axes later); cap <= 0 means no limit. The empty
-// strategy is returned when there are no varying axes.
+// Seeder is an OPTIONAL engine capability: a catalog of known-good strategies
+// (hand-tuned community/live recipes decomposed into this engine's axes). When an
+// engine implements it, the tuner starts a COLD search from these priors instead
+// of a blind Grid — the human recipe is the strong prior a blind sweep can't
+// rediscover in a flat, deceptive landscape.
+type Seeder interface {
+	Seeds() []Strategy
+}
+
+// Grid returns candidate strategies sampled from the cartesian product of every
+// non-empty axis's Values. With cap <= 0 it returns the full product. With cap > 0
+// and a product larger than cap it returns cap strategies sampled EVENLY across
+// the product's index space (a deterministic, low-discrepancy bound against the
+// combinatorial blow-up) — NOT the first cap combinations, which would collapse
+// onto the first axis's leading values and hide whole techniques from the search.
+// The empty strategy is returned when there are no varying axes.
 func Grid(e Engine, cap int) []Strategy {
-	out := []Strategy{{}}
+	axes := make([]Axis, 0, len(e.Axes()))
+	total := 1
 	for _, ax := range e.Axes() {
 		if len(ax.Values) == 0 {
 			continue
 		}
-		next := make([]Strategy, 0, len(out)*len(ax.Values))
-		for _, base := range out {
-			for _, v := range ax.Values {
-				s := clone(base)
-				s[ax.Name] = v
-				next = append(next, s)
-			}
+		axes = append(axes, ax)
+		total *= len(ax.Values)
+	}
+	if len(axes) == 0 {
+		return []Strategy{{}}
+	}
+
+	// Full product, or cap indices sampled low-discrepancy across [0,total). A
+	// plain stride (k*total/n) resonates with the axis periods and can starve an
+	// axis (a stride of 3 over a radix-3 axis only ever hits one value); a Weyl
+	// sequence with a step coprime to total avoids that and spreads evenly.
+	if cap <= 0 || cap >= total {
+		out := make([]Strategy, 0, total)
+		for k := 0; k < total; k++ {
+			out = append(out, decode(axes, k))
 		}
-		if cap > 0 && len(next) > cap {
-			next = next[:cap]
-		}
-		out = next
+		return out
+	}
+	step := weylStep(total)
+	out := make([]Strategy, 0, cap)
+	for k := 0; k < cap; k++ {
+		out = append(out, decode(axes, (k*step)%total))
 	}
 	return out
+}
+
+// weylStep picks a stride coprime to total near total/φ (the golden ratio), so
+// {k*step mod total} is a low-discrepancy permutation of the product indices.
+func weylStep(total int) int {
+	step := int(float64(total) * 0.6180339887)
+	if step < 1 {
+		step = 1
+	}
+	for gcd(step, total) != 1 {
+		step++
+		if step >= total {
+			return 1 // coprime to everything; total is tiny
+		}
+	}
+	return step
+}
+
+func gcd(a, b int) int {
+	for b != 0 {
+		a, b = b, a%b
+	}
+	return a
+}
+
+// decode turns a flat product index into a Strategy via mixed-radix over axes
+// (the last axis varies fastest), so consecutive indices differ minimally and an
+// evenly-strided sample covers every axis.
+func decode(axes []Axis, idx int) Strategy {
+	s := make(Strategy, len(axes))
+	for i := len(axes) - 1; i >= 0; i-- {
+		vals := axes[i].Values
+		s[axes[i].Name] = vals[idx%len(vals)]
+		idx /= len(vals)
+	}
+	return s
 }
 
 // Mutate returns the one-axis neighbourhood of seed: for each axis, the candidate
@@ -96,6 +154,60 @@ func Mutate(e Engine, seed Strategy) []Strategy {
 			out = append(out, s)
 		}
 	}
+	return out
+}
+
+// MutateN returns the neighbourhood of seed within Hamming radius `radius` over
+// the axes: every strategy that changes 1..radius DISTINCT axes, each to one of
+// that axis's one-step neighbour values. radius<=1 is exactly Mutate. Radius 2 is
+// what lets a one-shot A/B escape a CONJUNCTIVE valley — an optimum two axes away
+// from the seed where every single-axis step looks worse, so a radius-1 climb
+// stalls. Results are de-duplicated; the seed itself is never returned.
+func MutateN(e Engine, seed Strategy, radius int) []Strategy {
+	if radius <= 1 {
+		return Mutate(e, seed)
+	}
+	type move struct{ axis, val string }
+	var perAxis [][]move
+	for _, ax := range e.Axes() {
+		if len(ax.Values) == 0 {
+			continue
+		}
+		cur, has := seed[ax.Name]
+		var ms []move
+		for _, v := range neighbourValues(ax, cur, has, indexOf(ax.Values, cur)) {
+			ms = append(ms, move{ax.Name, v})
+		}
+		if len(ms) > 0 {
+			perAxis = append(perAxis, ms)
+		}
+	}
+	var out []Strategy
+	seen := map[string]bool{}
+	var rec func(start int, acc []move)
+	rec = func(start int, acc []move) {
+		if len(acc) > 0 {
+			s := clone(seed)
+			key := ""
+			for _, m := range acc {
+				s[m.axis] = m.val
+				key += m.axis + "=" + m.val + ";"
+			}
+			if !seen[key] {
+				seen[key] = true
+				out = append(out, s)
+			}
+		}
+		if len(acc) == radius {
+			return
+		}
+		for i := start; i < len(perAxis); i++ {
+			for _, m := range perAxis[i] {
+				rec(i+1, append(acc, m))
+			}
+		}
+	}
+	rec(0, nil)
 	return out
 }
 
