@@ -65,8 +65,17 @@ func unzip(raw []byte, dir string) error {
 	if err != nil {
 		return fmt.Errorf("flowseal: open zip: %w", err)
 	}
+	// Newer upstream releases wrap everything in a single top-level dir
+	// (e.g. "zapret-discord-youtube-1.9.9c/lists/…"); strip it so lists/ lands at
+	// the root the strategy scripts (`$L=current/lists`) expect. Flat archives are
+	// left untouched (root == "").
+	root := commonZipRoot(zr.File)
 	for _, f := range zr.File {
-		dest := filepath.Join(dir, f.Name)
+		name := strings.TrimPrefix(f.Name, root)
+		if name == "" { // the wrapper dir entry itself
+			continue
+		}
+		dest := filepath.Join(dir, name)
 		// zip-slip guard: dest must stay within dir.
 		if !strings.HasPrefix(dest, filepath.Clean(dir)+string(os.PathSeparator)) && dest != filepath.Clean(dir) {
 			return fmt.Errorf("flowseal: unsafe zip path %q", f.Name)
@@ -85,6 +94,29 @@ func unzip(raw []byte, dir string) error {
 		}
 	}
 	return nil
+}
+
+// commonZipRoot returns the single top-level directory shared by EVERY entry
+// (with a trailing slash), or "" when entries are already flat or span multiple
+// top-level names. Used to strip a GitHub-style "<repo>-<tag>/" wrapper.
+func commonZipRoot(files []*zip.File) string {
+	root := ""
+	for _, f := range files {
+		i := strings.IndexByte(f.Name, '/')
+		if i < 0 {
+			return "" // a file at the very top → not a single-wrapper archive
+		}
+		if comp := f.Name[:i]; comp == ".." || comp == "." || comp == "" {
+			return "" // not a real wrapper dir — leave the zip-slip guard to catch it
+		}
+		top := f.Name[:i+1]
+		if root == "" {
+			root = top
+		} else if top != root {
+			return "" // multiple top-level dirs → don't strip
+		}
+	}
+	return root
 }
 
 func extractFile(f *zip.File, dest string) error {
