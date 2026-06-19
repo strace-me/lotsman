@@ -87,6 +87,17 @@ func Decide(v misroute.Verdict, in Inputs) Plan {
 
 	cidrs := in.CIDRs[v.Service]
 
+	// A stall is the TSPU IP-throttle: only a foreign-egress chain escalation
+	// (stall oracle → failed active probe → Brain) can move off it. A route toggle
+	// (reject-quic) or node-escalation placeholder cannot fix an IP-keyed throttle,
+	// and re-deciding one every pass just loops on an unfixable condition (the
+	// observed reject-quic/escalate-node incident storm). Emit no route remediation;
+	// defer to the chain escalation (LOT-43).
+	if v.Kind == misroute.KindStalled {
+		return Plan{Service: v.Service, Rung: 0, Action: ActionNone,
+			Reason: "stalled: TSPU IP-throttle — handled by foreign-egress chain escalation, no route remediation"}
+	}
+
 	if v.Kind == misroute.KindLeak && len(cidrs) > 0 {
 		return Plan{
 			Service: v.Service,
