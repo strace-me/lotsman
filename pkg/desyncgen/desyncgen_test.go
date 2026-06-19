@@ -55,6 +55,46 @@ func TestGridCap(t *testing.T) {
 	}
 }
 
+// A capped grid must SAMPLE the space, not collapse onto the first axis's first
+// values: the old per-axis truncation (next[:cap]) dropped whole high-order axis
+// values (e.g. only method=fake survived), so the search never saw split2/
+// multisplit. Coverage matters more than which 5 points — assert every value of
+// every axis is still represented when the cap allows it.
+func TestGridCapCoversEveryAxisValue(t *testing.T) {
+	g := Grid(eng(), 6) // 6 >= max axis cardinality (3), so full coverage is possible
+	if len(g) != 6 {
+		t.Fatalf("capped grid = %d, want 6", len(g))
+	}
+	for _, ax := range eng().Axes() {
+		for _, want := range ax.Values {
+			seen := false
+			for _, s := range g {
+				if s[ax.Name] == want {
+					seen = true
+					break
+				}
+			}
+			if !seen {
+				t.Errorf("capped grid never sampled %s=%s (axis collapsed)", ax.Name, want)
+			}
+		}
+	}
+}
+
+// Determinism: same engine + cap → identical sample (the KB tracks strategies by
+// id, so the sweep must be reproducible across runs).
+func TestGridCapDeterministic(t *testing.T) {
+	a, b := Grid(eng(), 7), Grid(eng(), 7)
+	if len(a) != len(b) {
+		t.Fatalf("non-deterministic length %d vs %d", len(a), len(b))
+	}
+	for i := range a {
+		if a[i]["method"]+a[i]["pos"]+a[i]["ttl"] != b[i]["method"]+b[i]["pos"]+b[i]["ttl"] {
+			t.Errorf("sample %d differs between runs: %v vs %v", i, a[i], b[i])
+		}
+	}
+}
+
 func TestGridSkipsEmptyAxis(t *testing.T) {
 	e := fakeEngine{axes: []Axis{
 		{Name: "method", Kind: Categorical, Values: []string{"fake", "split2"}},
@@ -107,6 +147,37 @@ func TestMutateUnknownCurrentOffersAll(t *testing.T) {
 	got := Mutate(eng(), seed)
 	if ttls := neighborsOf(got, seed, "ttl"); strings.Join(ttls, ",") != "3,5" {
 		t.Errorf("absent ordinal axis should offer all values, got %v", ttls)
+	}
+}
+
+// MutateN radius 2 must contain points that change TWO axes at once — the ones a
+// radius-1 climb can never reach when they sit across a conjunctive valley.
+func TestMutateRadius2CrossesValley(t *testing.T) {
+	seed := Strategy{"method": "fake", "pos": "2", "ttl": "3"}
+	// A target two one-step moves from the seed: method->split2 AND ttl->5.
+	target := Strategy{"method": "split2", "pos": "2", "ttl": "5"}
+	key := func(s Strategy) string { return s["method"] + "|" + s["pos"] + "|" + s["ttl"] }
+
+	r1 := map[string]bool{}
+	for _, s := range Mutate(eng(), seed) {
+		r1[key(s)] = true
+	}
+	if r1[key(target)] {
+		t.Fatal("precondition: radius-1 should NOT reach a 2-axis target")
+	}
+
+	r2 := map[string]bool{}
+	for _, s := range MutateN(eng(), seed, 2) {
+		r2[key(s)] = true
+	}
+	if !r2[key(target)] {
+		t.Error("radius-2 must reach the 2-axis target (split2,2,5)")
+	}
+	// radius 2 is a superset of radius 1.
+	for k := range r1 {
+		if !r2[k] {
+			t.Errorf("radius-2 missing radius-1 neighbour %s", k)
+		}
 	}
 }
 

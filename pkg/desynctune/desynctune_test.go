@@ -124,6 +124,48 @@ func TestCandidatesSeedMutatesElseGrids(t *testing.T) {
 	}
 }
 
+// A seeded run is multi-start: it must include points that change 2+ axes from
+// the seed (escaping its basin / crossing a conjunctive valley), not just the
+// radius-1 neighbourhood the old Candidates produced.
+func TestCandidatesMultiStartEscapesSeedBasin(t *testing.T) {
+	e := zapret.NfqwsEngine{}
+	seed := desyncgen.Strategy{"method": "multisplit", "split_pos": "2", "seqovl": "0", "ttl": "0", "fooling": "none", "fake_tls": "none", "repeats": "1"}
+	axes := []string{"method", "split_pos", "seqovl", "ttl", "fooling", "fake_tls", "repeats"}
+	far := 0
+	for _, s := range Candidates(e, seed, 1000) {
+		diff := 0
+		for _, a := range axes {
+			if s[a] != seed[a] {
+				diff++
+			}
+		}
+		if diff >= 2 {
+			far++
+		}
+	}
+	if far == 0 {
+		t.Error("multi-start seeded candidates should include points 2+ axes from the seed")
+	}
+}
+
+// A cold (no-seed) run must seed from the engine's prior catalog, not a blind
+// Grid — the human recipes are the priors the sweep can't rediscover. Assert a
+// documented recipe is present in the cold candidate set.
+func TestColdCandidatesIncludePriors(t *testing.T) {
+	e := zapret.NfqwsEngine{}
+	want := strings.Join(e.Render(e.Seeds()[1]), " ") // the ALT3 fake-SNI-decoy prior
+	found := false
+	for _, s := range Candidates(e, nil, 1000) {
+		if strings.Join(e.Render(s), " ") == want {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Errorf("cold candidates missing prior recipe %q", want)
+	}
+}
+
 func TestCandidatesGridRespectsCap(t *testing.T) {
 	e := zapret.NfqwsEngine{}
 	if got := Candidates(e, nil, 5); len(got) > 5 {
