@@ -191,3 +191,39 @@ func TestTuneServiceReturnsWinnerArgs(t *testing.T) {
 		t.Errorf("winner args = %q, want %q", strings.Join(res.Args, " "), winArgs)
 	}
 }
+
+// End-to-end: the WHOLE real pipeline (cold Candidates seeded from the engine's
+// priors -> Tune A/B -> throughput-aware Decide) must SELECT a planted optimum.
+// Baseline (no desync) and every wrong recipe "freeze" (collapsed goodput); only
+// the planted winner sustains throughput. No data plane, no real traffic — the
+// apply just records the current args and the probe is a synthetic fitness oracle.
+// This is the safe proof that the search now finds a hand-recipe-class point.
+func TestTuneEndToEndSelectsPlantedOptimum(t *testing.T) {
+	e := zapret.NfqwsEngine{}
+	winner := e.Seeds()[1] // the ALT3 fake-SNI-decoy prior — guaranteed in the cold set
+	winArgs := strings.Join(e.Render(winner), " ")
+
+	var current string
+	apply := func(_ context.Context, args []string) error {
+		current = strings.Join(args, " ") // "" for the no-desync baseline
+		return nil
+	}
+	probe := func(_ context.Context) quality.Quality {
+		if current == winArgs {
+			return quality.FromBurst([]float64{30, 30, 30, 30, 30}, 5, 64<<10, 400) // restored
+		}
+		return quality.FromBurst([]float64{30, 30, 30, 30, 30}, 5, 1<<10, 2) // frozen: low goodput
+	}
+
+	cands := Candidates(e, nil, 300) // cold start from priors
+	w, v, err := Tune(context.Background(), e, cands, apply, probe, 0, tester.ThroughputConfig())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if v.Outcome != tester.OutcomeRecipe {
+		t.Fatalf("pipeline should select a recipe, got %s (%s)", v.Outcome, v.Reason)
+	}
+	if got := strings.Join(e.Render(w), " "); got != winArgs {
+		t.Errorf("selected %q, want the planted optimum %q", got, winArgs)
+	}
+}
