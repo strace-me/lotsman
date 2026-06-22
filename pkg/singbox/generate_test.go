@@ -537,7 +537,7 @@ func TestFakeIPKnob(t *testing.T) {
 func TestHy2PortHoppingAndBrutal(t *testing.T) {
 	// Node declaring port-hopping (mport range) + brutal bandwidth.
 	hop := mustParse(t, "hysteria2://pw@1.2.3.4:443?sni=x&mport=20000-30000&hop_interval=20s&upmbps=50&downmbps=100", subscription.FormatSingleURL)
-	// Plain node (like fastvpn) — must be unaffected.
+	// Plain node (like vpn-c) — must be unaffected.
 	plain := mustParse(t, "hysteria2://pw@5.6.7.8:443?sni=y", subscription.FormatSingleURL)
 
 	res, err := Generate(nil, nil, []subscription.Node{hop, plain},

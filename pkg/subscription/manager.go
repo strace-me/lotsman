@@ -208,7 +208,7 @@ func (m *Manager) Load(ctx context.Context, decls []Declaration) (nodes []Node, 
 				errs = append(errs, fmt.Errorf("subscription %q: fetch: %w", d.Name, err))
 				continue
 			}
-			// A flaky upstream (e.g. acme) can return HTTP 200 with an empty or
+			// A flaky upstream (e.g. vpn-a) can return HTTP 200 with an empty or
 			// whitespace-only body. For a FETCHED subscription that is an error,
 			// not "0 nodes" — surface it so the reconcile anti-churn guard catches
 			// it. Inline proto:// declarations are the node itself, never empty.

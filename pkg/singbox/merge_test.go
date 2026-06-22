@@ -15,10 +15,10 @@ const existingConfig = `{
   "log": {"level": "info"},
   "inbounds": [{"type": "tproxy", "tag": "tproxy-in"}],
   "outbounds": [
-    {"type": "selector", "tag": "vpn", "outbounds": ["vpn-pool", "fastvpn-nl", "stealthsurf"], "default": "vpn-pool"},
-    {"type": "urltest", "tag": "vpn-pool", "outbounds": ["fastvpn-nl", "stealthsurf"]},
-    {"type": "hysteria2", "tag": "fastvpn-nl", "server": "1.2.3.4", "server_port": 443},
-    {"type": "hysteria2", "tag": "stealthsurf", "server": "5.6.7.8", "server_port": 443},
+    {"type": "selector", "tag": "vpn", "outbounds": ["vpn-pool", "vpn-c-nl", "vpn-d"], "default": "vpn-pool"},
+    {"type": "urltest", "tag": "vpn-pool", "outbounds": ["vpn-c-nl", "vpn-d"]},
+    {"type": "hysteria2", "tag": "vpn-c-nl", "server": "1.2.3.4", "server_port": 443},
+    {"type": "hysteria2", "tag": "vpn-d", "server": "5.6.7.8", "server_port": 443},
     {"type": "direct", "tag": "direct"}
   ],
   "route": {"final": "direct", "rules": [
@@ -100,7 +100,7 @@ func findOutbound(obs []map[string]any, tag string) map[string]any {
 
 func TestMergeAddsPoolsAndPreservesExisting(t *testing.T) {
 	groups := []NodeGroup{
-		{PoolName: "acme-pool", Nodes: []subscription.Node{
+		{PoolName: "vpn-a-pool", Nodes: []subscription.Node{
 			vlessNode("a.example.com", 8443, "AlmatyKZ"),
 			vlessNode("b.example.com", 8443, "AmsterdamNL"),
 		}},
@@ -112,37 +112,37 @@ func TestMergeAddsPoolsAndPreservesExisting(t *testing.T) {
 	if res.NodeCount != 2 {
 		t.Errorf("NodeCount = %d, want 2", res.NodeCount)
 	}
-	if len(res.Pools) != 1 || res.Pools[0] != "acme-pool" {
-		t.Errorf("Pools = %v, want [acme-pool]", res.Pools)
+	if len(res.Pools) != 1 || res.Pools[0] != "vpn-a-pool" {
+		t.Errorf("Pools = %v, want [vpn-a-pool]", res.Pools)
 	}
 
 	obs := parseOutbounds(t, res.JSON)
 
 	// hy2 nodes + vpn-pool + direct preserved.
-	for _, tag := range []string{"fastvpn-nl", "stealthsurf", "vpn-pool", "direct"} {
+	for _, tag := range []string{"vpn-c-nl", "vpn-d", "vpn-pool", "direct"} {
 		if findOutbound(obs, tag) == nil {
 			t.Errorf("preserved outbound %q missing after merge", tag)
 		}
 	}
-	// acme-pool group exists and is a urltest with 2 members.
-	bp := findOutbound(obs, "acme-pool")
+	// vpn-a-pool group exists and is a urltest with 2 members.
+	bp := findOutbound(obs, "vpn-a-pool")
 	if bp == nil {
-		t.Fatal("acme-pool not added")
+		t.Fatal("vpn-a-pool not added")
 	}
 	if bp["type"] != "urltest" {
-		t.Errorf("acme-pool type = %v, want urltest", bp["type"])
+		t.Errorf("vpn-a-pool type = %v, want urltest", bp["type"])
 	}
 	if mem, _ := bp["outbounds"].([]any); len(mem) != 2 {
-		t.Errorf("acme-pool members = %v, want 2", bp["outbounds"])
+		t.Errorf("vpn-a-pool members = %v, want 2", bp["outbounds"])
 	}
-	// vpn selector now includes acme-pool AND still has its old members.
+	// vpn selector now includes vpn-a-pool AND still has its old members.
 	sel := findOutbound(obs, "vpn")
 	mem, _ := sel["outbounds"].([]any)
 	got := map[string]bool{}
 	for _, m := range mem {
 		got[m.(string)] = true
 	}
-	for _, want := range []string{"vpn-pool", "fastvpn-nl", "stealthsurf", "acme-pool"} {
+	for _, want := range []string{"vpn-pool", "vpn-c-nl", "vpn-d", "vpn-a-pool"} {
 		if !got[want] {
 			t.Errorf("vpn selector missing %q; has %v", want, mem)
 		}
@@ -150,7 +150,7 @@ func TestMergeAddsPoolsAndPreservesExisting(t *testing.T) {
 }
 
 func TestMergeIsIdempotent(t *testing.T) {
-	groups := []NodeGroup{{PoolName: "acme-pool", Nodes: []subscription.Node{
+	groups := []NodeGroup{{PoolName: "vpn-a-pool", Nodes: []subscription.Node{
 		vlessNode("a.example.com", 8443, "AlmatyKZ"),
 	}}}
 	first, err := Merge([]byte(existingConfig), groups, MergeOptions{})
@@ -163,27 +163,27 @@ func TestMergeIsIdempotent(t *testing.T) {
 	}
 	obs := parseOutbounds(t, second.JSON)
 
-	// acme-pool appears exactly once.
+	// vpn-a-pool appears exactly once.
 	count := 0
 	for _, m := range obs {
-		if m["tag"] == "acme-pool" {
+		if m["tag"] == "vpn-a-pool" {
 			count++
 		}
 	}
 	if count != 1 {
-		t.Errorf("acme-pool appears %d times after double merge, want 1", count)
+		t.Errorf("vpn-a-pool appears %d times after double merge, want 1", count)
 	}
-	// vpn selector lists acme-pool exactly once.
+	// vpn selector lists vpn-a-pool exactly once.
 	sel := findOutbound(obs, "vpn")
 	mem, _ := sel["outbounds"].([]any)
 	bp := 0
 	for _, m := range mem {
-		if m == "acme-pool" {
+		if m == "vpn-a-pool" {
 			bp++
 		}
 	}
 	if bp != 1 {
-		t.Errorf("vpn selector lists acme-pool %d times, want 1; has %v", bp, mem)
+		t.Errorf("vpn selector lists vpn-a-pool %d times, want 1; has %v", bp, mem)
 	}
 }
 
@@ -196,7 +196,7 @@ func TestMergeErrorsWhenSelectorMissing(t *testing.T) {
 }
 
 func TestMergePrimaryFallbackUDP(t *testing.T) {
-	groups := []NodeGroup{{PoolName: "acme-pool", Nodes: []subscription.Node{
+	groups := []NodeGroup{{PoolName: "vpn-a-pool", Nodes: []subscription.Node{
 		vlessNode("a.example.com", 8443, "AlmatyKZ"),
 	}}}
 	res, err := Merge([]byte(existingConfig), groups, MergeOptions{UDPMode: UDPPrimaryFallback})
@@ -213,13 +213,13 @@ func TestMergePrimaryFallbackUDP(t *testing.T) {
 	for _, m := range mem {
 		got[m.(string)] = true
 	}
-	for _, want := range []string{"fastvpn-nl", "stealthsurf", "acme-pool"} {
+	for _, want := range []string{"vpn-c-nl", "vpn-d", "vpn-a-pool"} {
 		if !got[want] {
 			t.Errorf("vpn-udp missing %q; has %v", want, mem)
 		}
 	}
 	// native nodes come before the vless pool (fallback ordering).
-	if mem[len(mem)-1] != "acme-pool" {
+	if mem[len(mem)-1] != "vpn-a-pool" {
 		t.Errorf("expected vless pool last in vpn-udp, got %v", mem)
 	}
 	// a network:udp rule was inserted, pointing at vpn-udp, with the union of
@@ -249,7 +249,7 @@ func TestMergePrimaryFallbackUDP(t *testing.T) {
 }
 
 func TestMergeSplitUDPExcludesVLESS(t *testing.T) {
-	groups := []NodeGroup{{PoolName: "acme-pool", Nodes: []subscription.Node{
+	groups := []NodeGroup{{PoolName: "vpn-a-pool", Nodes: []subscription.Node{
 		vlessNode("a.example.com", 8443, "AlmatyKZ"),
 	}}}
 	res, err := Merge([]byte(existingConfig), groups, MergeOptions{UDPMode: UDPSplit})
@@ -261,14 +261,14 @@ func TestMergeSplitUDPExcludesVLESS(t *testing.T) {
 		t.Fatal("vpn-udp not created")
 	}
 	for _, m := range udp["outbounds"].([]any) {
-		if m == "acme-pool" {
+		if m == "vpn-a-pool" {
 			t.Errorf("split mode must not put VLESS pool in vpn-udp; has %v", udp["outbounds"])
 		}
 	}
 }
 
 func TestMergeUnifiedNoUDPGroup(t *testing.T) {
-	groups := []NodeGroup{{PoolName: "acme-pool", Nodes: []subscription.Node{
+	groups := []NodeGroup{{PoolName: "vpn-a-pool", Nodes: []subscription.Node{
 		vlessNode("a.example.com", 8443, "AlmatyKZ"),
 	}}}
 	res, err := Merge([]byte(existingConfig), groups, MergeOptions{UDPMode: UDPUnified})
@@ -286,7 +286,7 @@ func TestMergeUnifiedNoUDPGroup(t *testing.T) {
 }
 
 func TestMergeUDPRuleIdempotent(t *testing.T) {
-	groups := []NodeGroup{{PoolName: "acme-pool", Nodes: []subscription.Node{
+	groups := []NodeGroup{{PoolName: "vpn-a-pool", Nodes: []subscription.Node{
 		vlessNode("a.example.com", 8443, "AlmatyKZ"),
 	}}}
 	first, _ := Merge([]byte(existingConfig), groups, MergeOptions{})

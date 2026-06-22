@@ -47,7 +47,7 @@ const (
 
 // NodeGroup is a set of nodes that should become one url-test pool.
 type NodeGroup struct {
-	PoolName string // the url-test group's tag (e.g. "demo-pool")
+	PoolName string // the url-test group's tag (e.g. "vpn-b-pool")
 	Nodes    []subscription.Node
 }
 

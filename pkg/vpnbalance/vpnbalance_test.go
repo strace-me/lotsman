@@ -46,10 +46,10 @@ func (f *fakeAPI) SetSelector(_ context.Context, selector, target string) error 
 func newFake(now string, delays map[string]int) *fakeAPI {
 	return &fakeAPI{
 		info: map[string]dataplane.ProxyInfo{
-			"vpn":         {Type: "Selector", All: []string{"vpn-pool", "fastvpn-nl", "stealthsurf"}},
+			"vpn":         {Type: "Selector", All: []string{"vpn-pool", "vpn-c-nl", "vpn-d"}},
 			"vpn-pool":    {Type: "URLTest"},
-			"fastvpn-nl":   {Type: "Hysteria2"},
-			"stealthsurf": {Type: "Hysteria2"},
+			"vpn-c-nl":   {Type: "Hysteria2"},
+			"vpn-d": {Type: "Hysteria2"},
 		},
 		delays: delays,
 		now:    now,
@@ -59,24 +59,24 @@ func newFake(now string, delays map[string]int) *fakeAPI {
 func quietLog() *slog.Logger { return slog.New(slog.NewTextHandler(io.Discard, nil)) }
 
 func TestRebalanceSwitchesOffDeadNode(t *testing.T) {
-	// selector stuck on the dead stealthsurf; fastvpn-nl is alive.
-	f := newFake("stealthsurf", map[string]int{"fastvpn-nl": 148})
+	// selector stuck on the dead vpn-d; vpn-c-nl is alive.
+	f := newFake("vpn-d", map[string]int{"vpn-c-nl": 148})
 	b := New(f, "vpn", "https://x/204", 3, balancer.ProfileFor("general"), false, quietLog())
 
 	if err := b.Rebalance(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	if f.now != "fastvpn-nl" {
-		t.Fatalf("now=%q, want fastvpn-nl", f.now)
+	if f.now != "vpn-c-nl" {
+		t.Fatalf("now=%q, want vpn-c-nl", f.now)
 	}
-	if len(f.sets) != 1 || f.sets[0] != "fastvpn-nl" {
-		t.Fatalf("sets=%v, want [fastvpn-nl]", f.sets)
+	if len(f.sets) != 1 || f.sets[0] != "vpn-c-nl" {
+		t.Fatalf("sets=%v, want [vpn-c-nl]", f.sets)
 	}
 }
 
 func TestRebalanceNoSwitchWhenBestAlreadyActive(t *testing.T) {
-	// both alive, fastvpn-nl faster and already selected -> no PUT.
-	f := newFake("fastvpn-nl", map[string]int{"fastvpn-nl": 50, "stealthsurf": 200})
+	// both alive, vpn-c-nl faster and already selected -> no PUT.
+	f := newFake("vpn-c-nl", map[string]int{"vpn-c-nl": 50, "vpn-d": 200})
 	b := New(f, "vpn", "https://x/204", 3, balancer.ProfileFor("general"), false, quietLog())
 
 	if err := b.Rebalance(context.Background()); err != nil {
@@ -89,7 +89,7 @@ func TestRebalanceNoSwitchWhenBestAlreadyActive(t *testing.T) {
 
 func TestRebalanceAllDownNoSwitch(t *testing.T) {
 	// every node dead -> hold, don't thrash the selector.
-	f := newFake("stealthsurf", map[string]int{})
+	f := newFake("vpn-d", map[string]int{})
 	b := New(f, "vpn", "https://x/204", 2, balancer.ProfileFor("general"), false, quietLog())
 
 	if err := b.Rebalance(context.Background()); err != nil {
@@ -102,7 +102,7 @@ func TestRebalanceAllDownNoSwitch(t *testing.T) {
 
 func TestRebalanceSkipsNestedGroups(t *testing.T) {
 	// vpn-pool (URLTest) must never be probed or pinned.
-	f := newFake("fastvpn-nl", map[string]int{"fastvpn-nl": 50, "stealthsurf": 60})
+	f := newFake("vpn-c-nl", map[string]int{"vpn-c-nl": 50, "vpn-d": 60})
 	if _, ok := f.delays["vpn-pool"]; ok {
 		t.Fatal("test setup error")
 	}
@@ -110,7 +110,7 @@ func TestRebalanceSkipsNestedGroups(t *testing.T) {
 	if err := b.Rebalance(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	// best concrete node is fastvpn-nl (already active) -> no switch, and it never
+	// best concrete node is vpn-c-nl (already active) -> no switch, and it never
 	// tried to pin vpn-pool.
 	for _, s := range f.sets {
 		if s == "vpn-pool" {

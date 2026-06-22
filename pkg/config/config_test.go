@@ -20,8 +20,8 @@ services:
       - { state: VPN, class: vpn, strategy_id: vpn_url_test }
 
 subscriptions:
-  - { name: demo, url: "https://example/sub", format: auto, tags: [normal], enabled: true }
-  - { name: liberty, url: "https://example/wl", format: clash, tags: [emergency, slow], enabled: true }
+  - { name: vpn-b, url: "https://example/sub", format: auto, tags: [normal], enabled: true }
+  - { name: vpn-e, url: "https://example/wl", format: clash, tags: [emergency, slow], enabled: true }
 
 pools:
   vpn_url_test:
@@ -59,7 +59,7 @@ func TestParseValid(t *testing.T) {
 		t.Fatalf("subs = %d, want 2", len(cfg.Subscriptions))
 	}
 	if cfg.Subscriptions[1].Tags[0] != "emergency" {
-		t.Errorf("liberty tags = %v", cfg.Subscriptions[1].Tags)
+		t.Errorf("vpn-e tags = %v", cfg.Subscriptions[1].Tags)
 	}
 
 	if _, ok := cfg.Pools.Pools["vpn_url_test"]; !ok {

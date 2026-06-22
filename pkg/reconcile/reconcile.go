@@ -124,7 +124,7 @@ func (r *Reconciler) Reconcile(ctx context.Context) error {
 	// (LOT-29). Only with a baseline: a genuine first-ever apply (lastNodes==0) must
 	// not be blocked or retried. If still degraded after the retries, skip and keep
 	// the last-good config — the same safety the in-tick guard gives mid-run (the
-	// acme subscription intermittently returns 0 nodes even on an error-free fetch,
+	// vpn-a subscription intermittently returns 0 nodes even on an error-free fetch,
 	// which would otherwise empty the VPN pool and drop every live connection).
 	if r.lastNodes > 0 && r.degraded(nodes, errs) {
 		retries, backoff := r.FetchRetries, r.FetchBackoff
@@ -313,7 +313,7 @@ func (r *Reconciler) restart(ctx context.Context) error {
 // volatileKeys are config fields the VPN provider rotates for the same nodes
 // (same servers/uuids/order) without any real change. Comparing them byte-for-
 // byte makes reconcile re-apply + restart sing-box on cosmetic churn (LOT-1).
-// REALITY short_id is rotated by the `acme` provider every few minutes.
+// REALITY short_id is rotated by the `vpn-a` provider every few minutes.
 var volatileKeys = map[string]bool{
 	"short_id": true,
 }

@@ -167,7 +167,7 @@ func TestManagerInlineNodeNoFetch(t *testing.T) {
 	// must be used inline (no fetch) and still yield the node.
 	m := NewManager(fakeFetcher{})
 	decls := []Declaration{{
-		Name:    "fastvpn",
+		Name:    "vpn-c",
 		URL:     "hysteria2://pw@203.0.113.20:443?sni=nl3.example&obfs=salamander",
 		Format:  FormatSingleURL,
 		Tags:    []string{"normal"},
@@ -250,23 +250,23 @@ func TestManagerTagsAndMerges(t *testing.T) {
 }
 
 func TestManagerEmptyFetchIsError(t *testing.T) {
-	// acme-style flake: HTTP 200 with an empty body. The fetched sub must
+	// vpn-a-style flake: HTTP 200 with an empty body. The fetched sub must
 	// surface an error (for the anti-churn guard) and contribute 0 nodes, while
 	// a sibling good fetched sub still yields its node and an inline node URL
 	// still yields its single node with no error.
 	ff := fakeFetcher{data: map[string][]byte{
-		"sub://acme": []byte("   \n\t "), // whitespace-only -> empty
+		"sub://vpn-a": []byte("   \n\t "), // whitespace-only -> empty
 		"sub://good":  []byte("vless://u@1.1.1.1:443#a"),
 	}}
 	decls := []Declaration{
-		{Name: "acme", URL: "sub://acme", Format: FormatV2rayPlain, Tags: []string{"normal"}, Enabled: true},
+		{Name: "vpn-a", URL: "sub://vpn-a", Format: FormatV2rayPlain, Tags: []string{"normal"}, Enabled: true},
 		{Name: "good", URL: "sub://good", Format: FormatV2rayPlain, Tags: []string{"normal"}, Enabled: true},
 		{Name: "inline", URL: "hysteria2://pw@2.2.2.2:443?sni=x&obfs=salamander", Format: FormatSingleURL, Tags: []string{"normal"}, Enabled: true},
 	}
 
 	nodes, errs := NewManager(ff).Load(context.Background(), decls)
 	if len(errs) != 1 {
-		t.Fatalf("got %d errors, want 1 (the empty acme sub): %v", len(errs), errs)
+		t.Fatalf("got %d errors, want 1 (the empty vpn-a sub): %v", len(errs), errs)
 	}
 	// The good fetched sub and the inline node both survive.
 	if _, ok := findNode(nodes, "1.1.1.1"); !ok {
@@ -325,14 +325,14 @@ func TestManagerCapturesUserinfo(t *testing.T) {
 	hdr := http.Header{}
 	hdr.Set("Subscription-Userinfo", "upload=10; download=20; total=100; expire=1740268800")
 	m := NewManager(fakeHeaderFetcher{body: []byte("hysteria2://p@2.2.2.2:443#b"), header: hdr})
-	decls := []Declaration{{Name: "acme", URL: "sub://x", Format: FormatV2rayPlain, Enabled: true}}
+	decls := []Declaration{{Name: "vpn-a", URL: "sub://x", Format: FormatV2rayPlain, Enabled: true}}
 
 	if _, errs := m.Load(context.Background(), decls); len(errs) != 0 {
 		t.Fatalf("load errs: %v", errs)
 	}
-	ui, ok := m.Userinfo()["acme"]
+	ui, ok := m.Userinfo()["vpn-a"]
 	if !ok {
-		t.Fatal("userinfo not captured for acme")
+		t.Fatal("userinfo not captured for vpn-a")
 	}
 	if ui.Used() != 30 || ui.Total != 100 {
 		t.Errorf("used=%d total=%d, want 30/100", ui.Used(), ui.Total)
@@ -347,7 +347,7 @@ func TestManagerCapturesUserinfo(t *testing.T) {
 func TestManagerNoUserinfoFromPlainFetcher(t *testing.T) {
 	ff := fakeFetcher{data: map[string][]byte{"sub://x": []byte("hysteria2://p@2.2.2.2:443#b")}}
 	m := NewManager(ff)
-	decls := []Declaration{{Name: "acme", URL: "sub://x", Format: FormatV2rayPlain, Enabled: true}}
+	decls := []Declaration{{Name: "vpn-a", URL: "sub://x", Format: FormatV2rayPlain, Enabled: true}}
 
 	if _, errs := m.Load(context.Background(), decls); len(errs) != 0 {
 		t.Fatalf("load errs: %v", errs)

@@ -13,28 +13,28 @@
 # NOTE: this is a committed EXAMPLE — use placeholders only, NEVER real creds.
 # The live config with real subscription URLs / hy2 passwords lives on the router
 # at /etc/lotsman/r5s.yaml (outside the repo).
-# Fetch subscriptions THROUGH the VPN tunnel (LOT-28). The acme mirror is flaky
+# Fetch subscriptions THROUGH the VPN tunnel (LOT-28). The vpn-a mirror is flaky
 # to reach from the RU network directly (returns 0/10/50 nodes by mood), which
 # empties the pool and restarts sing-box (dropped Discord logins). Routing the
 # subscription host through a foreign node makes the fetch reliable. Needs
 # -probe-proxy (the socks inbound) so the box's own fetch enters sing-box to be
 # routed; the generator emits a route rule for each FETCHED subscription host ->
 # this pool. vpn_url_test contains the always-on inline hy2 nodes, so the fetch
-# bootstraps even when the acme pull itself is empty. Empty = direct fetch.
+# bootstraps even when the vpn-a pull itself is empty. Empty = direct fetch.
 subscription_via_pool: vpn_url_test
 
 subscriptions:
-  - { name: acme, url: "https://YOUR-PANEL.example/s/SUBSCRIPTION-TOKEN", format: auto, tags: [normal], enabled: true }
+  - { name: vpn-a, url: "https://YOUR-PANEL.example/s/SUBSCRIPTION-TOKEN", format: auto, tags: [normal], enabled: true }
   # A single paid hysteria2 node declared inline (the url IS the node — no fetch).
   # UDP-native -> backs vpn_url_test_udp.
-  - { name: fastvpn, url: "hysteria2://PASSWORD@HOST:443?sni=SNI&obfs=salamander&obfs-password=OBFS-PASSWORD", format: single_url, tags: [normal], enabled: true }
+  - { name: vpn-c, url: "hysteria2://PASSWORD@HOST:443?sni=SNI&obfs=salamander&obfs-password=OBFS-PASSWORD", format: single_url, tags: [normal], enabled: true }
   # Our own server — hy2+salamander on a non-443 UDP port (TSPU drops UDP/443/QUIC,
   # other UDP ports pass). Self-signed cert (no domain) -> insecure=1. UDP-native.
-  - { name: operator-de, url: "hysteria2://PASSWORD@HOST:2096/?obfs=salamander&obfs-password=OBFS-PASSWORD&sni=SNI&insecure=1", format: single_url, tags: [normal], enabled: true }
+  - { name: de-host-de, url: "hysteria2://PASSWORD@HOST:2096/?obfs=salamander&obfs-password=OBFS-PASSWORD&sni=SNI&insecure=1", format: single_url, tags: [normal], enabled: true }
   # Additional subscription sources — placeholders, enable after filling a real URL.
-  - { name: demo, url: "https://YOUR-PANEL.example/s/DEMO-TOKEN", format: auto, tags: [normal], enabled: false }
-  - { name: liberty, url: "https://YOUR-PANEL.example/s/LIBERTY-TOKEN", format: auto, tags: [normal], enabled: false }
-  - { name: tunnel-out, url: "https://YOUR-PANEL.example/s/TUNNEL-OUT-TOKEN", format: auto, tags: [normal], enabled: false }
+  - { name: vpn-b, url: "https://YOUR-PANEL.example/s/vpn-b-TOKEN", format: auto, tags: [normal], enabled: false }
+  - { name: vpn-e, url: "https://YOUR-PANEL.example/s/vpn-e-TOKEN", format: auto, tags: [normal], enabled: false }
+  - { name: vpn-f, url: "https://YOUR-PANEL.example/s/vpn-f-TOKEN", format: auto, tags: [normal], enabled: false }
 
 pools:
   # countries_exclude: [ru] keeps RF-blocked services off RU-exit nodes (a RU exit
@@ -187,7 +187,7 @@ hostlists:
       - https://example.invalid/gaming-launchers.txt
     min_keep_ratio: 0.5
 
-# The working hysteria2 node (fastvpn-nl) is currently a manual outbound in the
+# The working hysteria2 node (vpn-c-nl) is currently a manual outbound in the
 # router's sing-box config, NOT a subscription. To put it under vpn_url_test_udp
 # (so UDP-sensitive services actually use it) the daemon needs inline-node support
 # + hysteria2 salamander-obfs in the generator. Details to declare it (from the
