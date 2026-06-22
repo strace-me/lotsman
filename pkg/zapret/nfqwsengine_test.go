@@ -89,6 +89,37 @@ func TestNfqwsEngineExpressesRealRecipes(t *testing.T) {
 	}
 }
 
+// The expanded vocabulary must render the new axes: multi-cut split-pos lists,
+// IP-frag (L3), and fakedsplit-mod — grounded in SlenderSolo/zapret-manager.
+func TestNfqwsEngineExpandedAxes(t *testing.T) {
+	e := NfqwsEngine{}
+	got := e.Render(desyncgen.Strategy{
+		axMethod: "multidisorder", axSplit: "method+2,midsld", axIPFrag: "32", axFakedMod: "altorder=1",
+	})
+	set := map[string]bool{}
+	for _, a := range got {
+		set[a] = true
+	}
+	for _, want := range []string{
+		"--dpi-desync=multidisorder", "--dpi-desync-split-pos=method+2,midsld",
+		"--dpi-desync-ipfrag2=32", "--dpi-desync-fakedsplit-mod=altorder=1",
+	} {
+		if !set[want] {
+			t.Errorf("expanded render missing %q in %v", want, got)
+		}
+	}
+}
+
+// The LEAD seed must be a per-packet-RANDOMIZED fake (rnd) — the anti-memorization
+// default — not a static fake, so a cold search starts from the burn-resistant point.
+func TestNfqwsEngineLeadSeedIsRandomized(t *testing.T) {
+	e := NfqwsEngine{}
+	lead := strings.Join(e.Render(e.Seeds()[0]), " ")
+	if !strings.Contains(lead, "fake-tls-mod=rnd") {
+		t.Errorf("lead seed should be a randomized (rnd) fake, got %q", lead)
+	}
+}
+
 func TestNfqwsEngineNoMethodRendersNothing(t *testing.T) {
 	if got := (NfqwsEngine{}).Render(desyncgen.Strategy{axSplit: "2"}); got != nil {
 		t.Errorf("no method -> nil, got %v", got)
@@ -103,7 +134,7 @@ func TestNfqwsEngineDrivesGenerator(t *testing.T) {
 	}
 	// Mutate a working seed: every neighbour renders to valid nfqws tokens and
 	// differs from the seed's render.
-	seed := desyncgen.Strategy{axMethod: "multisplit", axSplit: "2", axSeqovl: "652", axTTL: offTTL, axFooling: offFooling, axFakeTLS: offFakeTLS, axFakeTLSMod: offFakeTLSMod, axFakeQUIC: offFakeQUIC, axRepeats: offRepeats}
+	seed := desyncgen.Strategy{axMethod: "multisplit", axSplit: "2", axSeqovl: "652", axTTL: offTTL, axFooling: offFooling, axFakeTLS: offFakeTLS, axFakeTLSMod: offFakeTLSMod, axFakeQUIC: offFakeQUIC, axFakedMod: offFakedMod, axIPFrag: offIPFrag, axRepeats: offRepeats}
 	base := strings.Join(e.Render(seed), " ")
 	neigh := desyncgen.Mutate(e, seed)
 	if len(neigh) == 0 {
