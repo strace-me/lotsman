@@ -17,9 +17,18 @@ In M0 everything runs in one in-process daemon (`lotsmand`); the Lotsman/Sapper
 split is mechanical (event contracts already separate the components) and happens
 when standalone Sapper is actually needed.
 
-Status: **pre-release, local only (not on GitHub yet).** Go 1.26, MIT-intended.
+Status: **pre-release, local only (not on GitHub yet).** Go 1.26, GPLv3.
 Builds to a static ARM64 binary (no CGO). The full intelligence pipeline is
 validated against the real R5S in dry-run.
+
+## License
+
+Copyright (C) 2026 strace-me.
+
+Lotsman is free software: you can redistribute it and/or modify it under the
+terms of the **GNU General Public License v3.0** as published by the Free
+Software Foundation. See [LICENSE](LICENSE). It is distributed WITHOUT ANY
+WARRANTY; see the license for details.
 
 ## Docs
 
