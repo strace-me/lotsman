@@ -86,3 +86,30 @@ func TestComposeDropsMalformedDomains(t *testing.T) {
 		t.Errorf("malformed/shell-metachar domain leaked into shell args: %s", got)
 	}
 }
+
+func TestValidateDetectsDomainConflict(t *testing.T) {
+	blocks := []Block{
+		{Service: "youtube", Domains: []string{"youtube.com", "googlevideo.com"}, Recipe: recipe("--dpi-desync=multisplit")},
+		{Service: "youtube-stream", Domains: []string{"googlevideo.com"}, Recipe: recipe("--dpi-desync=fake")}, // re-claims googlevideo.com
+		{Service: "discord", Domains: []string{"discord.com"}, Recipe: recipe("--dpi-desync=fake")},
+	}
+	conflicts := Validate(blocks)
+	if len(conflicts) != 1 {
+		t.Fatalf("want 1 conflict, got %d: %+v", len(conflicts), conflicts)
+	}
+	c := conflicts[0]
+	if c.Domain != "googlevideo.com" || len(c.Services) != 2 || c.Services[0] != "youtube" || c.Services[1] != "youtube-stream" {
+		t.Errorf("conflict = %+v, want googlevideo.com claimed by [youtube youtube-stream] in order", c)
+	}
+}
+
+func TestValidateCleanWhenDisjoint(t *testing.T) {
+	blocks := []Block{
+		{Service: "youtube", Domains: []string{"youtube.com"}, Recipe: recipe("--dpi-desync=multisplit")},
+		{Service: "discord", Domains: []string{"discord.com"}, Recipe: recipe("--dpi-desync=fake")},
+		{Service: "empty", Domains: []string{"x.com"}, Recipe: recipe()}, // no recipe -> not emitted -> ignored
+	}
+	if c := Validate(blocks); len(c) != 0 {
+		t.Errorf("disjoint blocks should validate clean, got %+v", c)
+	}
+}

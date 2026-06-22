@@ -65,6 +65,45 @@ func Compose(blocks []Block) []string {
 	return out
 }
 
+// Conflict is a domain claimed by MORE THAN ONE block. nfqws applies the first
+// matching `--new` profile and ignores the rest, so a domain in two blocks means
+// the later block's recipe is silently DEAD for it (the bol-van "one fake per
+// filter / declaration-order" hazard — zapret #1543/#1146). When per-domain
+// splitting emits several blocks for one service, the composer must not let two of
+// them fight over a domain.
+type Conflict struct {
+	Domain   string
+	Services []string // the blocks claiming it, in declaration (first-match) order
+}
+
+// Validate reports cross-block domain conflicts: any domain that appears in more
+// than one composed block (only blocks that actually emit — non-empty recipe — are
+// considered). Deterministic, order-preserving. An empty result means the block set
+// composes cleanly; a non-empty result is a coherence bug the caller should log /
+// reject before applying, because nfqws would silently drop the later recipes.
+func Validate(blocks []Block) []Conflict {
+	claims := map[string][]string{}
+	var order []string
+	for _, b := range blocks {
+		if len(b.Recipe.NfqwsArgs) == 0 {
+			continue
+		}
+		for _, d := range validDomains(b.Domains) {
+			if _, seen := claims[d]; !seen {
+				order = append(order, d)
+			}
+			claims[d] = append(claims[d], b.Service)
+		}
+	}
+	var out []Conflict
+	for _, d := range order {
+		if svcs := claims[d]; len(svcs) > 1 {
+			out = append(out, Conflict{Domain: d, Services: svcs})
+		}
+	}
+	return out
+}
+
 // validDomains keeps only well-formed domains (aggregate.ValidDomain), preserving
 // order. The shell-sink guard for Compose.
 func validDomains(in []string) []string {
