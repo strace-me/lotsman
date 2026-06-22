@@ -150,3 +150,30 @@ func TestNfqwsEngineDrivesGenerator(t *testing.T) {
 		}
 	}
 }
+
+// RawSeeds are fixed-point recipes rendered verbatim (no axis processing).
+func TestNfqwsEngineRawSeeds(t *testing.T) {
+	e := NfqwsEngine{}
+	raws := e.RawSeeds()
+	if len(raws) < 10 {
+		t.Fatalf("expected a catalog of raw recipes, got %d", len(raws))
+	}
+	// Each raw seed renders to exactly its arg tokens, and is a valid desync.
+	for _, s := range raws {
+		got := strings.Join(e.Render(s), " ")
+		if !strings.HasPrefix(got, "--dpi-desync=") {
+			t.Errorf("raw seed didn't render verbatim: %q", got)
+		}
+	}
+	// A specific known recipe round-trips.
+	want := "--dpi-desync=multidisorder --dpi-desync-split-pos=method+2,midsld"
+	found := false
+	for _, s := range raws {
+		if strings.Join(e.Render(s), " ") == want {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("raw catalog missing %q", want)
+	}
+}
