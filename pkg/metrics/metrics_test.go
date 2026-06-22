@@ -68,7 +68,7 @@ func TestServeHTTPRendersAllSections(t *testing.T) {
 	})
 	c.SetSubscriptionSnapshot(func() map[string]subscription.Userinfo {
 		return map[string]subscription.Userinfo{
-			"acme": {Upload: 30, Download: 70, Total: 1000}, // 10% used, no expiry
+			"vpn-a": {Upload: 30, Download: 70, Total: 1000}, // 10% used, no expiry
 		}
 	})
 	c.ObserveProbe("youtube", true, 12)
@@ -103,9 +103,9 @@ func TestServeHTTPRendersAllSections(t *testing.T) {
 	mustContain(t, body, `lotsman_service_remediation_proposed{service="youtube",action="reject-quic"} 1`)
 
 	// Subscription quota/expiry (LOT-7): 100/1000 used = 0.1; no expiry -> -1 sentinel.
-	mustContain(t, body, `lotsman_subscription_fraction_used{subscription="acme"} 0.1000`)
-	mustContain(t, body, `lotsman_subscription_days_until_expire{subscription="acme"} -1.00`)
-	mustContain(t, body, `lotsman_subscription_used_bytes{subscription="acme"} 100`)
+	mustContain(t, body, `lotsman_subscription_fraction_used{subscription="vpn-a"} 0.1000`)
+	mustContain(t, body, `lotsman_subscription_days_until_expire{subscription="vpn-a"} -1.00`)
+	mustContain(t, body, `lotsman_subscription_used_bytes{subscription="vpn-a"} 100`)
 }
 
 // TestServeHTTPOmitsOptionalSectionsWhenUnset: with only the required Brain+KB

@@ -455,7 +455,7 @@ func TestReconcileSkipsDegradedNodeSet(t *testing.T) {
 	}
 }
 
-// LOT-27: the acme subscription intermittently returns 0 nodes on a SUCCESSFUL
+// LOT-27: the vpn-a subscription intermittently returns 0 nodes on a SUCCESSFUL
 // (error-free) fetch; applying it restarts sing-box into a node-less config and
 // drops every live connection (Discord gateway etc.). The dramatic-drop clause
 // must skip it even though there is no fetch error.
@@ -465,7 +465,7 @@ func TestReconcileSkipsNodeCollapseWithoutError(t *testing.T) {
 	if err := r.Reconcile(context.Background()); err != nil {
 		t.Fatalf("first reconcile: %v", err)
 	}
-	// Error-free fetch returning zero nodes (the acme flap) → must skip.
+	// Error-free fetch returning zero nodes (the vpn-a flap) → must skip.
 	r.Loader = fakeLoader{nodes: nil}
 	run.calls = nil
 	if err := r.Reconcile(context.Background()); err != nil {

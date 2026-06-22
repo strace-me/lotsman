@@ -100,7 +100,7 @@ type Options struct {
 
 	// SubViaHosts/SubViaPool route the subscription-endpoint hosts through a VPN
 	// pool instead of final:direct (LOT-28), so a subscription refresh egresses
-	// abroad — the flaky `acme` mirror is unreliable to reach from the RU network
+	// abroad — the flaky `vpn-a` mirror is unreliable to reach from the RU network
 	// directly. A domain_suffix rule for these hosts -> SubViaPool is emitted at the
 	// top of the domain tier. Opt-in and fail-safe: if SubViaPool is empty, the
 	// pool is empty, or no hosts are given, NO rule is emitted (byte-identical to

@@ -300,7 +300,7 @@ func hysteria2Outbound(n subscription.Node, tag string) (outbound, error) {
 	}
 	// Port hopping + Brutal CC, pass-through from the node if it declares them
 	// (1.12.17-valid: server_ports since 1.11, up/down_mbps base). A node without
-	// them (e.g. the single fastvpn key) is unaffected — these are opt-in per node.
+	// them (e.g. the single vpn-c key) is unaffected — these are opt-in per node.
 	ports, hop, up, down := hy2Extras(n)
 	if len(ports) > 0 {
 		ob["server_ports"] = ports
