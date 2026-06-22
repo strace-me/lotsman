@@ -58,6 +58,16 @@ type Seeder interface {
 	Seeds() []Strategy
 }
 
+// RawSeeder is an OPTIONAL engine capability: a catalog of FIXED-POINT recipes —
+// full pre-baked arg strings from a community library (e.g. SlenderSolo's
+// strategies.txt). Unlike Seeds (axis points the search Mutates around), these are
+// tested AS-IS and never mutated: they carry flag combinations the axis model may
+// not fully express, so they widen the cold-start candidate set with proven points
+// the search can then explore around.
+type RawSeeder interface {
+	RawSeeds() []Strategy
+}
+
 // Grid returns candidate strategies sampled from the cartesian product of every
 // non-empty axis's Values. With cap <= 0 it returns the full product. With cap > 0
 // and a product larger than cap it returns cap strategies sampled EVENLY across

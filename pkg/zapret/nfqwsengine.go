@@ -1,6 +1,14 @@
 package zapret
 
-import "github.com/strace-me/lotsman/pkg/desyncgen"
+import (
+	"strings"
+
+	"github.com/strace-me/lotsman/pkg/desyncgen"
+)
+
+// rawAxis carries a complete pre-baked nfqws arg string (a fixed-point raw recipe);
+// when present, Render passes it through verbatim and ignores the other axes.
+const rawAxis = "__raw"
 
 // NfqwsEngine is the nfqws (zapret) profile for the desync generator (LOT-31
 // v7b): it declares nfqws's DPI-desync parameter space as axes and renders a
@@ -125,10 +133,63 @@ func (NfqwsEngine) Seeds() []desyncgen.Strategy {
 	}
 }
 
+// rawRecipes is a curated set of proven, fixed-point nfqws desync techniques —
+// the technique portion only (no --filter/--hostlist, added at compose time). They
+// cover the families a battle-tested community library enumerates (credit:
+// SlenderSolo/zapret-manager strategies.txt + bol-van/zapret docs) and exist as
+// cold-start priors the search tests as-is and explores around. NOT vendored
+// wholesale — a representative spread of public flag combinations.
+var rawRecipes = []string{
+	// multisplit / multidisorder with single + multi-cut split positions
+	"--dpi-desync=multisplit --dpi-desync-split-pos=method+2",
+	"--dpi-desync=multisplit --dpi-desync-split-pos=midsld",
+	"--dpi-desync=multisplit --dpi-desync-split-pos=method+2,midsld",
+	"--dpi-desync=multisplit --dpi-desync-split-pos=1,midsld,sniext+1",
+	"--dpi-desync=multidisorder --dpi-desync-split-pos=method+2",
+	"--dpi-desync=multidisorder --dpi-desync-split-pos=midsld",
+	"--dpi-desync=multidisorder --dpi-desync-split-pos=method+2,midsld",
+	// multisplit with sequence-overlap (push real SNI past the reassembly window)
+	"--dpi-desync=multisplit --dpi-desync-split-seqovl=652 --dpi-desync-split-pos=1",
+	"--dpi-desync=multisplit --dpi-desync-split-seqovl=336 --dpi-desync-split-pos=1",
+	// fake with short TTL / fooling variants
+	"--dpi-desync=fake --dpi-desync-ttl=1",
+	"--dpi-desync=fake --dpi-desync-ttl=5",
+	"--dpi-desync=fake --dpi-desync-fooling=badseq",
+	"--dpi-desync=fake --dpi-desync-fooling=badseq --dpi-desync-badseq-increment=2",
+	"--dpi-desync=fake --dpi-desync-fooling=datanoack",
+	"--dpi-desync=fake --dpi-desync-fooling=ts",
+	"--dpi-desync=fake --dpi-desync-fooling=md5sig",
+	// fakedsplit (single-position faked interleave) + altorder
+	"--dpi-desync=fakedsplit --dpi-desync-ttl=1 --dpi-desync-split-pos=method+2",
+	"--dpi-desync=fakedsplit --dpi-desync-ttl=1 --dpi-desync-split-pos=midsld",
+	"--dpi-desync=fakedsplit --dpi-desync-ttl=1 --dpi-desync-split-pos=midsld --dpi-desync-fakedsplit-mod=altorder=1",
+	"--dpi-desync=fakedsplit --dpi-desync-fooling=badseq --dpi-desync-split-pos=midsld",
+	"--dpi-desync=fakeddisorder --dpi-desync-ttl=1 --dpi-desync-split-pos=midsld",
+	// TLS: randomized fake ClientHello with a domestic decoy SNI (anti-memorization)
+	"--dpi-desync=fake,multisplit --dpi-desync-fake-tls-mod=rnd,dupsid,sni=ya.ru --dpi-desync-split-pos=1 --dpi-desync-fooling=ts",
+	"--dpi-desync=fake,hostfakesplit --dpi-desync-fake-tls-mod=rnd,dupsid,sni=vk.com --dpi-desync-fooling=ts",
+	// QUIC/443: fake QUIC Initial, repeated
+	"--dpi-desync=fake --dpi-desync-fake-quic=quic_initial_www_google_com.bin --dpi-desync-repeats=6",
+	"--dpi-desync=fake --dpi-desync-fake-quic=quic_initial_www_google_com.bin --dpi-desync-repeats=11",
+}
+
+// RawSeeds returns the fixed-point recipe catalog as raw strategies (tested as-is,
+// never mutated). Implements desyncgen.RawSeeder.
+func (NfqwsEngine) RawSeeds() []desyncgen.Strategy {
+	out := make([]desyncgen.Strategy, len(rawRecipes))
+	for i, r := range rawRecipes {
+		out[i] = desyncgen.Strategy{rawAxis: r}
+	}
+	return out
+}
+
 // Render turns a Strategy into nfqws desync tokens. method is required (an empty
 // strategy renders nothing); each optional knob is emitted only when set to a
 // non-off value. Order is stable (method first, then knobs in axis order).
 func (NfqwsEngine) Render(s desyncgen.Strategy) []string {
+	if raw := s[rawAxis]; raw != "" {
+		return strings.Fields(raw) // fixed-point recipe: pass through verbatim
+	}
 	m := s[axMethod]
 	if m == "" {
 		return nil // no method -> not a valid desync strategy

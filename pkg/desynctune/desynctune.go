@@ -55,18 +55,23 @@ func Candidates(e desyncgen.Engine, seed desyncgen.Strategy, gridCap int) []desy
 	return capDedup(e, out, gridCap)
 }
 
-// coldCandidates is the no-seed path: start from the engine's prior catalog (and
-// each prior's neighbourhood) when it has one, padded with Grid diversity; else a
-// blind Grid. The priors first means the cap keeps the human recipes.
+// coldCandidates is the no-seed path. Order (priors first, so the cap keeps them):
+// axis-based Seeds + each one's neighbourhood (the search Mutates around them),
+// then RawSeeds (fixed-point community recipes, tested AS-IS — never mutated),
+// then Grid diversity. Falls back to a blind Grid when the engine offers no priors.
 func coldCandidates(e desyncgen.Engine, gridCap int) []desyncgen.Strategy {
-	sd, ok := e.(desyncgen.Seeder)
-	if !ok || len(sd.Seeds()) == 0 {
-		return desyncgen.Grid(e, gridCap)
-	}
 	var out []desyncgen.Strategy
-	for _, s := range sd.Seeds() {
-		out = append(out, s)
-		out = append(out, desyncgen.Mutate(e, s)...)
+	if sd, ok := e.(desyncgen.Seeder); ok {
+		for _, s := range sd.Seeds() {
+			out = append(out, s)
+			out = append(out, desyncgen.Mutate(e, s)...)
+		}
+	}
+	if rs, ok := e.(desyncgen.RawSeeder); ok {
+		out = append(out, rs.RawSeeds()...) // fixed points: added, not mutated
+	}
+	if len(out) == 0 {
+		return desyncgen.Grid(e, gridCap)
 	}
 	out = append(out, desyncgen.Grid(e, gridCap)...) // broad-sweep diversity behind the priors
 	return capDedup(e, out, gridCap)

@@ -227,3 +227,20 @@ func TestTuneEndToEndSelectsPlantedOptimum(t *testing.T) {
 		t.Errorf("selected %q, want the planted optimum %q", got, winArgs)
 	}
 }
+
+// Cold candidates must include the engine's fixed-point RawSeeds (proven community
+// recipes tested as-is), alongside the axis-based priors.
+func TestColdCandidatesIncludeRawRecipes(t *testing.T) {
+	e := zapret.NfqwsEngine{}
+	want := strings.Join(e.Render(e.RawSeeds()[0]), " ")
+	found := false
+	for _, s := range Candidates(e, nil, 2000) {
+		if strings.Join(e.Render(s), " ") == want {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Errorf("cold candidates missing raw recipe %q", want)
+	}
+}
