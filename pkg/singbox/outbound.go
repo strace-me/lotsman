@@ -13,12 +13,26 @@ package singbox
 import (
 	"encoding/json"
 	"fmt"
+	"hash/fnv"
 	"net/url"
 	"strconv"
 	"strings"
 
 	"github.com/strace-me/lotsman/pkg/subscription"
 )
+
+// pickUTLS chooses a node's uTLS fingerprint: when a pool is given, a deterministic
+// draw keyed on the node id (so the node is STABLE across regenerations but the
+// fleet is DIVERSE — diversity-with-consistency); otherwise the single default.
+// Empty pool AND empty single => "" (uTLS off).
+func pickUTLS(nodeID, single string, pool []string) string {
+	if len(pool) == 0 {
+		return single
+	}
+	h := fnv.New32a()
+	h.Write([]byte(nodeID))
+	return pool[h.Sum32()%uint32(len(pool))]
+}
 
 // outbound is a sing-box outbound as a generic map (sing-box's native shape).
 type outbound = map[string]any

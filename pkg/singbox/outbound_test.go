@@ -20,3 +20,36 @@ func TestOutboundTagShortIDNoPanic(t *testing.T) {
 		t.Errorf("long id: tag %q must end with -012345 (first 6)", got)
 	}
 }
+
+func TestPickUTLSDiversityWithConsistency(t *testing.T) {
+	pool := []string{"chrome", "firefox", "edge", "safari"}
+	// Consistent: same node id -> same fingerprint across calls (stable per node).
+	if pickUTLS("node-A", "", pool) != pickUTLS("node-A", "", pool) {
+		t.Error("same node id must map to the same fingerprint")
+	}
+	// Diverse: across a set of ids, more than one fingerprint is used.
+	seen := map[string]bool{}
+	for _, id := range []string{"n1", "n2", "n3", "n4", "n5", "n6", "n7", "n8"} {
+		fp := pickUTLS(id, "", pool)
+		inPool := false
+		for _, p := range pool {
+			if p == fp {
+				inPool = true
+			}
+		}
+		if !inPool {
+			t.Errorf("picked %q not in pool", fp)
+		}
+		seen[fp] = true
+	}
+	if len(seen) < 2 {
+		t.Errorf("pool draw not diverse across the fleet: only %v", seen)
+	}
+	// Fallback: empty pool -> the single default; both empty -> "".
+	if pickUTLS("x", "chrome", nil) != "chrome" {
+		t.Error("empty pool should fall back to the single fingerprint")
+	}
+	if pickUTLS("x", "", nil) != "" {
+		t.Error("no pool and no single -> off")
+	}
+}

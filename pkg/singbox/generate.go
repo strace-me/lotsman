@@ -81,6 +81,7 @@ type Options struct {
 	SocksProbeListen string                 // socks "probe-in" inbound host:port (empty = none); lets the box probe via the LAN path
 	PoolOpts         map[string]PoolOptions // per-pool url-test tuning (interval/idle_timeout); nil = defaults
 	UTLSFingerprint  string                 // default tls.utls fingerprint for TCP TLS outbounds lacking one (e.g. "chrome"); "" = off
+	UTLSPool         []string               // diversity-with-consistency: when set, each node draws a fingerprint from this vetted pool deterministically by node ID (consistent per node, diverse across the fleet) instead of all sharing UTLSFingerprint. Avoids "the whole fleet is one fingerprint → that fingerprint becomes the tool signature" without per-connection flipping (which uTLS warns is itself suspicious). Empty = use UTLSFingerprint for all.
 	TargetVersion    string                 // sing-box version to target (e.g. "1.12.17"); gates version-specific knobs. "" = baseline
 	FakeIP           *FakeIPOptions         // emit a fakeip DNS section (nil = off)
 	Multiplex        *MultiplexOptions      // default outbound multiplex for TCP proxies (nil = off)
@@ -448,10 +449,17 @@ func Generate(services []registry.Service, devices []registry.Device, nodes []su
 	// uTLS is version-gated: drop the default fingerprint (and report it) if the
 	// target sing-box does not support utls, rather than emit an invalid field.
 	utlsFP := opts.UTLSFingerprint
-	if utlsFP != "" && !caps.Supports(FeatureUTLS) {
-		res.SkippedKnobs = append(res.SkippedKnobs,
-			fmt.Sprintf("utls fingerprint %q (unsupported on sing-box %s)", utlsFP, caps.Version()))
-		utlsFP = ""
+	utlsPool := opts.UTLSPool
+	if (utlsFP != "" || len(utlsPool) > 0) && !caps.Supports(FeatureUTLS) {
+		if utlsFP != "" {
+			res.SkippedKnobs = append(res.SkippedKnobs,
+				fmt.Sprintf("utls fingerprint %q (unsupported on sing-box %s)", utlsFP, caps.Version()))
+		}
+		if len(utlsPool) > 0 {
+			res.SkippedKnobs = append(res.SkippedKnobs,
+				fmt.Sprintf("utls fingerprint pool (unsupported on sing-box %s)", caps.Version()))
+		}
+		utlsFP, utlsPool = "", nil
 	}
 
 	// multiplex is version-gated the same way: drop the default mux block (and
@@ -518,8 +526,12 @@ func Generate(services []registry.Service, devices []registry.Device, nodes []su
 		// Knob injection applies to the primary and any siblings (each self-guards
 		// by outbound type), so e.g. the shadowtls camouflage TLS gets the uTLS
 		// fingerprint too while the chained ss is left untouched by multiplex.
+		// Diversity-with-consistency: each node's fingerprint is pinned by its ID, so
+		// the node is stable across regenerations but the fleet is varied. All of a
+		// node's siblings share its fingerprint (computed once, here).
+		fp := pickUTLS(n.ID, utlsFP, utlsPool)
 		for _, o := range append([]outbound{ob}, extras...) {
-			injectUTLS(o, utlsFP)
+			injectUTLS(o, fp)
 			injectMultiplex(o, mux)
 			// A node that declared ech keeps it only if the target supports it;
 			// otherwise strip it (reported once) rather than emit a rejected field.
