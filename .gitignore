@@ -16,3 +16,12 @@
 
 # agent worktrees (ephemeral)
 .claude/worktrees/
+
+# coverage / scratch artifacts (must not ship)
+cover.out
+*.out
+# stray office docs + their lock files
+*.docx
+~$*
+# release draft scratch
+README.public-draft.md

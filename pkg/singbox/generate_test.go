@@ -446,7 +446,7 @@ func TestTLSFragmentKnob(t *testing.T) {
 }
 
 func TestAnyTLSOutbound(t *testing.T) {
-	n := mustParse(t, "anytls://pw123@192.0.2.11:8443?sni=www.bing.com&insecure=1#DE-anytls", subscription.FormatSingleURL)
+	n := mustParse(t, "anytls://pw123@192.0.2.50:8443?sni=www.bing.com&insecure=1#DE-anytls", subscription.FormatSingleURL)
 	if n.Protocol != "anytls" {
 		t.Fatalf("protocol = %q, want anytls", n.Protocol)
 	}
@@ -459,7 +459,7 @@ func TestAnyTLSOutbound(t *testing.T) {
 		t.Fatalf("anytls outbound not emitted (skipped=%v)", res.Skipped)
 	}
 	ob := byType["anytls"][0]
-	if ob["password"] != "pw123" || ob["server"] != "192.0.2.11" {
+	if ob["password"] != "pw123" || ob["server"] != "192.0.2.50" {
 		t.Errorf("anytls outbound = %v", ob)
 	}
 	tls := ob["tls"].(map[string]any)
@@ -469,7 +469,7 @@ func TestAnyTLSOutbound(t *testing.T) {
 }
 
 func TestTUICOutbound(t *testing.T) {
-	link := "tuic://72df3c80-b7f8-c614-20bd-9b78b1b34f70:secretpw@192.0.2.11:2097/?congestion_control=bbr&alpn=h3&sni=www.bing.com&allow_insecure=1&udp_relay_mode=native#DE-tuic"
+	link := "tuic://72df3c80-b7f8-c614-20bd-9b78b1b34f70:secretpw@192.0.2.50:2097/?congestion_control=bbr&alpn=h3&sni=www.bing.com&allow_insecure=1&udp_relay_mode=native#DE-tuic"
 	n := mustParse(t, link, subscription.FormatSingleURL)
 	if n.Protocol != "tuic" || !n.Caps.UDPNative {
 		t.Fatalf("tuic node = proto %q udp %v", n.Protocol, n.Caps.UDPNative)

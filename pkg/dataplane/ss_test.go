@@ -9,9 +9,9 @@ import (
 // addr carries a %eth0 zone; named port :https; retrans token present on one,
 // absent on another).
 const ssSample = `Recv-Q Send-Q     Local Address:Port          Peer Address:Port
-0      0      5.228.149.75%eth0:53138        82.202.140.29:8443
+0      0      192.0.2.10%eth0:53138        198.51.100.20:8443
 	 cubic wscale:7,7 rto:210 rtt:23.5/11.2 ato:40 mss:1448 data_segs_out:200 retrans:0/6 rcv_space:14480
-0      0         46.235.189.154:https        192.168.1.141:41580
+0      0         192.0.2.11:https        192.168.1.141:41580
 	 cubic wscale:10,7 rto:220 rtt:10.449/3.875 mss:1448 data_segs_out:8 minrtt:3.497 rcv_wnd:73088
 `
 
@@ -22,8 +22,8 @@ func TestParseSS(t *testing.T) {
 	}
 
 	a := conns[0]
-	if a.Peer != "82.202.140.29:8443" { // last addr token, despite no State column
-		t.Errorf("peer = %q, want 82.202.140.29:8443", a.Peer)
+	if a.Peer != "198.51.100.20:8443" { // last addr token, despite no State column
+		t.Errorf("peer = %q, want 198.51.100.20:8443", a.Peer)
 	}
 	if math.Abs(a.RTTms-23.5) > 0.01 || math.Abs(a.RTTVarMs-11.2) > 0.01 {
 		t.Errorf("rtt = %.1f/%.1f, want 23.5/11.2", a.RTTms, a.RTTVarMs)
