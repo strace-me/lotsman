@@ -14,3 +14,8 @@ docs/DESIGN-*.md                export-ignore
 
 .github/workflows/claude.yml    export-ignore
 .claude/                        export-ignore
+
+# Personal VPS server-ops tooling (Xray/sing-box server admin) — not part of the
+# router control-plane product, and discloses the operator's server layout.
+panel                           export-ignore
+build/                          export-ignore
