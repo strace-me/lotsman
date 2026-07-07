@@ -94,6 +94,44 @@ proxies:
 	if nodes[0].Protocol != ProtoHysteria2 || !nodes[0].Caps.UDPNative {
 		t.Errorf("node0 = %s udp=%v, want hysteria2 udp=true", nodes[0].Protocol, nodes[0].Caps.UDPNative)
 	}
+	if nodes[0].Native {
+		t.Error("clash node must not be Native (Raw uses clash field names)")
+	}
+}
+
+func TestParsePortOutOfRange(t *testing.T) {
+	// A single out-of-range URL yields no valid node.
+	for _, u := range []string{
+		"trojan://pw@9.9.9.9:65536#x",
+		"hysteria2://pw@9.9.9.9:99999#x",
+		"vless://u@9.9.9.9:0#x",
+	} {
+		if _, err := Parse([]byte(u), FormatSingleURL, "t"); err == nil {
+			t.Errorf("%q: want error for out-of-range port", u)
+		}
+	}
+	// A bad port must not sink the rest of the pull (parser contract).
+	mixed := "trojan://pw@9.9.9.9:65536#bad\nvless://u@1.2.3.4:443#good\n"
+	nodes, err := Parse([]byte(mixed), FormatV2rayPlain, "t")
+	if err != nil {
+		t.Fatalf("mixed: %v", err)
+	}
+	if len(nodes) != 1 || nodes[0].Port != 443 {
+		t.Fatalf("mixed: want 1 good node on :443, got %d nodes", len(nodes))
+	}
+	// Clash and sing-box out-of-range ports are dropped, the good node kept.
+	clash := "proxies:\n  - { name: bad, type: hysteria2, server: 5.6.7.8, port: 70000, password: pw }\n  - { name: ok, type: hysteria2, server: 5.6.7.8, port: 443, password: pw }\n"
+	if ns, _ := Parse([]byte(clash), FormatClash, "t"); len(ns) != 1 || ns[0].Port != 443 {
+		t.Errorf("clash: want 1 node on :443, got %d", len(ns))
+	}
+	sb := `{"outbounds":[{"type":"hysteria2","tag":"bad","server":"5.6.7.8","server_port":70000},{"type":"hysteria2","tag":"ok","server":"5.6.7.8","server_port":443}]}`
+	if ns, _ := Parse([]byte(sb), FormatSingbox, "t"); len(ns) != 1 || ns[0].Port != 443 {
+		t.Errorf("singbox: want 1 node on :443, got %d", len(ns))
+	}
+	// vmess out-of-range port errors.
+	if _, err := Parse([]byte("vmess://"+b64(`{"add":"3.3.3.3","port":"65536","ps":"x"}`)), FormatSingleURL, "t"); err == nil {
+		t.Error("vmess: want error for out-of-range port")
+	}
 }
 
 func TestParseSingbox(t *testing.T) {
@@ -111,6 +149,9 @@ func TestParseSingbox(t *testing.T) {
 	}
 	if nodes[0].Server != "5.6.7.8" || nodes[0].Port != 443 {
 		t.Errorf("got %s:%d, want 5.6.7.8:443", nodes[0].Server, nodes[0].Port)
+	}
+	if !nodes[0].Native {
+		t.Error("sing-box node must be Native (Raw is a native outbound)")
 	}
 }
 

@@ -43,9 +43,14 @@ type Node struct {
 	Server      string
 	Port        int
 	Raw         string
-	Caps        Caps
-	Tags        []string
-	Country     string // ISO-3166 alpha-2, lower-case, parsed from the flag emoji in DisplayName ("" = unknown)
+	// Native marks a node whose Raw is already a valid sing-box outbound object
+	// (from FormatSingbox), so the generator can emit it verbatim. Nodes from
+	// other formats (e.g. Clash, whose Raw uses different field names) must go
+	// through the protocol-specific builders instead.
+	Native  bool
+	Caps    Caps
+	Tags    []string
+	Country string // ISO-3166 alpha-2, lower-case, parsed from the flag emoji in DisplayName ("" = unknown)
 }
 
 // capsForProtocol returns the static capability guess for a protocol. UDP
