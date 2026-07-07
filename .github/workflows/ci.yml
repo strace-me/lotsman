@@ -1,6 +1,9 @@
 name: CI
 on:
-  workflow_dispatch:   # manual only (solo+local dev: tests run locally). Trigger: gh workflow run ci.yml
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:   # also runnable manually: gh workflow run ci.yml
 
 jobs:
   test:
@@ -11,6 +14,8 @@ jobs:
         with:
           go-version-file: go.mod
           cache: true
+      - name: gofmt
+        run: test -z "$(gofmt -l .)" || { gofmt -l .; echo "run: gofmt -w ."; exit 1; }
       - name: build
         run: go build ./...
       - name: vet

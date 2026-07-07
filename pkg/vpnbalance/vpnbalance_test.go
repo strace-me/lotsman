@@ -46,10 +46,10 @@ func (f *fakeAPI) SetSelector(_ context.Context, selector, target string) error 
 func newFake(now string, delays map[string]int) *fakeAPI {
 	return &fakeAPI{
 		info: map[string]dataplane.ProxyInfo{
-			"vpn":         {Type: "Selector", All: []string{"vpn-pool", "vpn-c-nl", "vpn-d"}},
-			"vpn-pool":    {Type: "URLTest"},
-			"vpn-c-nl":   {Type: "Hysteria2"},
-			"vpn-d": {Type: "Hysteria2"},
+			"vpn":      {Type: "Selector", All: []string{"vpn-pool", "vpn-c-nl", "vpn-d"}},
+			"vpn-pool": {Type: "URLTest"},
+			"vpn-c-nl": {Type: "Hysteria2"},
+			"vpn-d":    {Type: "Hysteria2"},
 		},
 		delays: delays,
 		now:    now,

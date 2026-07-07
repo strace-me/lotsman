@@ -1,0 +1,16 @@
+# Internal-only files: kept in THIS (private) repo but excluded from the public
+# release. `git archive` honours export-ignore, so the public tree can be built
+# in one step with no leaky history and none of these files:
+#
+#   git archive HEAD | tar -x -C /path/to/public-tree
+#   (cd /path/to/public-tree && git init && git add -A && git commit -m "Initial public release")
+#
+# Keep this list in sync whenever an internal-only doc or tooling file is added.
+
+docs/ISSUES.md                  export-ignore
+docs/AUDIT.md                   export-ignore
+docs/RELEASE-CHECKLIST.draft.md export-ignore
+docs/DESIGN-*.md                export-ignore
+
+.github/workflows/claude.yml    export-ignore
+.claude/                        export-ignore

@@ -34,7 +34,7 @@ func TestGenerateNftByteIdenticalToLive(t *testing.T) {
 func TestGenerateNftSortsSetsCanonically(t *testing.T) {
 	m := DefaultModel()
 	m.LocalCIDRs = []string{"192.168.0.0/16", "10.0.0.0/8", "172.16.0.0/12", "127.0.0.0/8"} // shuffled
-	m.LoopBypassIPs = []string{"203.0.113.20", "198.51.100.10"}                            // reversed
+	m.LoopBypassIPs = []string{"203.0.113.20", "198.51.100.10"}                             // reversed
 	if got := string(GenerateNft(m)); got != liveSingboxTable {
 		t.Errorf("shuffled model must still render canonical order:\n%s", got)
 	}
