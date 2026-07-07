@@ -16,6 +16,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"fmt"
 	"log/slog"
@@ -527,7 +528,7 @@ func main() {
 			log.Info("per-service node ranker enabled (advisory)", "dry_run", *dryRun)
 		}
 		if rc != nil {
-			pr.Add(periodic.Task{Name: "singbox-reconcile", Interval: *checkInterval, RunAtStart: true, Fn: rc.Reconcile})
+			pr.Add(periodic.Task{Name: "singbox-reconcile", Interval: *checkInterval, RunAtStart: true, Fn: reconcileMaintenance(rc)})
 			log.Info("sing-box config reconcile enabled", "path", *singboxConfig, "dry_run", *dryRun)
 		}
 		if *zapretCompose && conf != nil {
@@ -660,7 +661,9 @@ func main() {
 		mc.SetMisrouteSnapshot(func() []misroute.Verdict {
 			eyeMu.Lock()
 			defer eyeMu.Unlock()
-			return verdicts
+			// Copy: the caller (/metrics) sorts the result in place, and mutating
+			// the shared backing array would race the stall oracle's locked read.
+			return append([]misroute.Verdict(nil), verdicts...)
 		})
 		// LOT-43: feed the throttle-stall signal to the probe engine. A header-only
 		// probe can't see the TSPU IP-throttle freeze; the eye can. When a service is
@@ -690,7 +693,9 @@ func main() {
 		mc.SetRemediationSnapshot(func() []remediate.Plan {
 			eyeMu.Lock()
 			defer eyeMu.Unlock()
-			return plans
+			// Copy: the caller (/metrics) sorts the result in place (same reason
+			// as the misroute snapshot above).
+			return append([]remediate.Plan(nil), plans...)
 		})
 
 		// Armed remediation controller (LOT-18b), GATED behind -remediate (default
@@ -1079,6 +1084,20 @@ func countHostlistLines(path string) int {
 // newRulesetsUpdater builds the Track-A updater: required tags are every
 // rule-set tag the services reference; on a real swap it triggers the reconciler
 // (re-validate via sing-box check + apply) if one is configured.
+// reconcileMaintenance wraps rc.Reconcile for a maintenance caller (the periodic
+// ticker, the rule-set updater's OnApplied): a LOT-35 deferral (ErrDeferred) is a
+// benign no-op — nothing was applied and the pending diff retries next tick. Only
+// the armed remediation commit observes ErrDeferred directly, so it can stay idle
+// instead of entering canary on a config that never landed.
+func reconcileMaintenance(rc *reconcile.Reconciler) func(context.Context) error {
+	return func(ctx context.Context) error {
+		if err := rc.Reconcile(ctx); err != nil && !errors.Is(err, reconcile.ErrDeferred) {
+			return err
+		}
+		return nil
+	}
+}
+
 func newRulesetsUpdater(reg *registry.Registry, rc *reconcile.Reconciler, repo, pin, dir, sbBin string, autobump bool, minRatio float64, dryRun bool, log *slog.Logger) *rulesets.Updater {
 	seen := map[string]bool{}
 	var required []string
@@ -1092,7 +1111,7 @@ func newRulesetsUpdater(reg *registry.Registry, rc *reconcile.Reconciler, repo, 
 	}
 	var onApplied func(context.Context) error
 	if rc != nil {
-		onApplied = rc.Reconcile
+		onApplied = reconcileMaintenance(rc)
 	}
 	return &rulesets.Updater{
 		Repo: repo, Required: required, LiveDir: dir, Pin: pin, AutoBump: autobump,
