@@ -9,8 +9,11 @@
 // key: "client|192.168.1.50|discord" vs "household|discord". Pure logic; time
 // is injected.
 //
-// Deferred (LOT-12): build-ahead, tested but not wired into runtime VPN-node
-// selection yet. Wire it when sticky-per-client/household node pinning lands.
+// Status: Spread is LIVE — pkg/singbox.Generate calls it for LOT-23 per-client
+// node spreading, on the live reconcile path. The sticky-store half (Store,
+// Resolve, Get, Forget, Prune) is DEFERRED (LOT-12): build-ahead and tested but
+// not wired into runtime node selection yet — wire it when sticky-per-client /
+// household node pinning lands.
 package affinity
 
 import (

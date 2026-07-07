@@ -2,7 +2,8 @@
 
 Dense per-package index of the Lotsman repo. Read this to rehydrate the whole
 architecture without grepping source. For prose, see
-[ARCHITECTURE.md](ARCHITECTURE.md); for open work [ISSUES.md](ISSUES.md).
+[ARCHITECTURE.md](ARCHITECTURE.md); for direction, see [ROADMAP.md](ROADMAP.md)
+and the GitHub issue tracker.
 
 ## What it is
 
@@ -66,12 +67,12 @@ the component split is mechanical (event contracts already separate them).
 - `pkg/quality` — connection-quality metrics (p50/p95/p99 tail, jitter, loss) from RTT samples or passive tcp_info; one vocabulary for both. [Quality, FromRTTs]
 - `pkg/balancer` — rank VPN nodes/pools by quality with per-category weights (voice=jitter/loss, gaming=tail, streaming=bw). [Weights, ProfileFor, Candidate]
 - `pkg/vpnbalance` — actively health-check concrete nodes behind a selector (Clash /delay), rank via balancer, repoint to best live node (fixes url-test sticking to a dead pick). [Rebalance]
-- `pkg/scoring` — kb.Stats → single comparable number, weighted per category (latency alone misleads).
-- `pkg/affinity` — sticky outbound assignments per (client/household, service) with TTL so balancing doesn't reset multi-connection sessions. [Store, Resolve]
-- `pkg/ttl` — estimate hops-to-DPI for accurate fake-packet TTL (--dpi-desync-ttl); traceroute parser fallback, math pure.
+- `pkg/scoring` — kb.Stats → single comparable number, weighted per category (latency alone misleads). **DEFERRED: build-ahead, not wired.**
+- `pkg/affinity` — `Spread` is LIVE: deterministic per-client node spreading (LOT-23), called by `singbox.Generate`. The sticky-store half (`Store`/`Resolve` with TTL) is DEFERRED. [Spread (live), Store/Resolve (deferred)]
+- `pkg/ttl` — estimate hops-to-DPI for accurate fake-packet TTL (--dpi-desync-ttl); traceroute parser fallback, math pure. **DEFERRED: build-ahead, not wired.**
 - `pkg/noderank` — pick the best concrete VPN node FOR A SERVICE and pin its selector; narrows by exit country BEFORE probing (never pins a blocked service to a RU exit). [noderank.New]
-- `pkg/selector` — choose which strategy to try next: prefer the class addressing the detected block type (tspu) + best learned score (KB). [Candidate]
-- `pkg/tuner` — decision core of the "auto" knob mode: A/B OFF vs ON → keep ON only if it measurably helps (significance margin + hysteresis); pure.
+- `pkg/selector` — choose which strategy to try next: prefer the class addressing the detected block type (tspu) + best learned score (KB). **DEFERRED: superseded in practice by brain+kb; build-ahead reference.** [Candidate]
+- `pkg/tuner` — decision core of the "auto" knob mode: A/B OFF vs ON → keep ON only if it measurably helps (significance margin + hysteresis); pure. **DEFERRED: build-ahead, not wired.**
 
 ### Self-heal (LOT-15..34 epic)
 - `pkg/observe` — passive "eye" (LOT-15): read sing-box /connections, compute per-service real-traffic metrics in Go; OBSERVE only (surfaces misrouting: flow that should ride sel-<svc> but went direct). [observe.New]
@@ -85,12 +86,13 @@ the component split is mechanical (event contracts already separate them).
 
 ### Generator / discovery / tester (Sapper)
 - `pkg/desyncgen` — LOT-31/v7 engine-AGNOSTIC core: model desync param space as Axes; produce candidate Strategies via Grid (cold sweep) or Mutate (one-axis neighbours of a working seed). Add an engine = supply Axis set + Render. [Axis, Strategy, Engine]
-- `pkg/desynctune` — LOT-31 v7c tuner: turn generated strategies into an A/B, ask tester which beats the no-desync baseline against the live service. Apply + probe injected. [Candidates, StrategyID]
+- `pkg/desynctune` — LOT-31 v7c tuner: turn generated strategies into an A/B, ask tester which beats the no-desync baseline against the live service. Apply + probe injected. **BUILD-AHEAD: the generator/tuner arm (desynctune/tester/burstprobe + zapret.NfqwsEngine) is not wired into the daemon yet (v7 tuner epic).** [Candidates, StrategyID]
 - `pkg/blockcheck` — Sapper discovery arm: drive zapret blockcheck.sh, parse working strategies (SUMMARY + "working strategy found"); ParseEnumerated harvests the full tried search space. [ParseSummary, ParseEnumerated, Dedup, Result]
 - `pkg/domainscan` — "which domains of a rule actually work from the box?" probe each over the box's own (nfqws-traversing) path; pure Verdict (only timeout/reset = DPI block). [Classify, Verdict]
 - `pkg/strategycat` — curated structured catalog of zapret/nfqws desync recipes (one `--new` block each); sourced from Flowseal/StressOzz, dedup by normalized args. [catalog.yaml]
 - `pkg/stunprobe` — measure a UDP "voice" path via STUN Binding Requests (voice is raw UDP you can't curl; STUN is what nfqws `--filter-l7=stun` mangles).
-- `pkg/tester` — decision core of the zapret strategy tester; an ADVISOR to the zapret rung (Brain owns the ladder, applier owns the data plane). [Probe]
+- `pkg/tester` — decision core of the zapret strategy tester; an ADVISOR to the zapret rung (Brain owns the ladder, applier owns the data plane). **BUILD-AHEAD: not wired yet (v7 tuner epic).** [Probe]
+- `pkg/burstprobe` — sustained-read (throughput) probe feeding tester's throughput fitness: pulls real content past the ~16KB TSPU freeze cliff and reports worst-case goodput across endpoints. READ-only; http.Client injected. **BUILD-AHEAD: not wired yet (v7 tuner epic).** [Probe]
 
 ### Ops / persistence / maintenance
 - `pkg/metrics` — Prometheus text exposition on /metrics (NetData-scrapeable): Brain positions, KB EWMA, observed probe-outcome counts; no external lib. [metrics.New]
@@ -124,21 +126,24 @@ Regenerate: `go list -f '{{.ImportPath}} {{join .Imports " "}}' ./... | sed -E '
 ```
 aggregate: subscription          applier: events executor          balancer: quality
 blockcheck: strategy             brain: anomaly audit events policy registry strategy
-coherence: registry strategy     config: aggregate dataplane pools registry strategy subscription zapret
+burstprobe: quality              coherence: registry strategy
+config: aggregate dataplane pools registry strategy subscription zapret
 dataplane: events quality stunprobe   desynctune: desyncgen tester   executor: dataplane registry strategy
-flowseal: subscription           kb: strategy                       metrics: brain misroute observe remediate
-misroute: observe                nfqwsgen: strategycat              noderank: balancer dataplane quality
-pathhealth: dataplane registry strategy   policy: anomaly           pools: subscription
-probing: dataplane events faillog kb registry   reconcile: executor pools registry singbox subscription
+flowseal: subscription           kb: strategy
+metrics: brain misroute noderank observe remediate subscription
+misroute: observe                nfqwsgen: aggregate strategycat    noderank: balancer dataplane quality
+observe: registry                pathhealth: dataplane registry strategy   policy: anomaly
+pools: subscription              probing: dataplane events faillog kb registry
+reconcile: executor pools registry singbox subscription
 registry: strategy               remctl: incident misroute remediate singbox   remediate: iplearn misroute
-rulesets: aggregate              scoring: kb   singbox: pools registry subscription   stunprobe: quality
-tester: quality                  tspu: strategy   vpnbalance: balancer dataplane quality
+rulesets: aggregate              scoring: kb   singbox: affinity pools registry subscription   stunprobe: quality
+tester: quality                  tspu: strategy   tuner: quality   vpnbalance: balancer dataplane quality
 zapret: desyncgen strategy       zapretgen: registry strategy strategycat zapret zaptune
 zaptune: nfqwsgen registry strategy strategycat
 ```
 (leaf, no intra-deps: adaptive affinity anomaly audit bypasslearn capture correlate damper desyncgen
-domainscan enginehealth events faillog incident iplearn observe periodic selector state strategy
-strategycat subscription quality ttl tuner). `cmd/lotsmand` wires ~all; `cmd/lotsmanctl` = blockcheck
+domainscan enginehealth events faillog incident iplearn periodic selector state strategy
+strategycat subscription quality ttl). `cmd/lotsmand` wires ~all; `cmd/lotsmanctl` = blockcheck
 coherence config dataplane domainscan registry singbox strategy subscription.
 
 **Anti-duplication rule:** before writing a new helper, grep the target pkg + check this graph — if a
@@ -148,5 +153,4 @@ pkg already does it (e.g. composition→zaptune/nfqwsgen, NAT-sensitive classify
 ## Other durable state
 
 - [docs/ARCHITECTURE.md](ARCHITECTURE.md) — prose architecture, state machine, routing model.
-- [docs/ISSUES.md](ISSUES.md) — open work / LOT-* tracker. Plus DESIGN-*.md for per-epic specs.
-- `memory/lotsman-state.md` (auto-memory) — current snapshot: HEAD, what's landed/deployed/pending, next steps.
+- [docs/ROADMAP.md](ROADMAP.md) — direction and what's not wired yet; open work lives in the GitHub issue tracker.
