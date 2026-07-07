@@ -16,6 +16,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
@@ -100,6 +101,14 @@ const (
 	defaultFetchRetries = 3
 	defaultFetchBackoff = 2 * time.Second
 )
+
+// ErrDeferred is returned by Reconcile when a config change validated but was
+// deliberately NOT applied because a live voice/RTC flow is in progress (LOT-35):
+// the apply is postponed to a later tick. A caller that treats a commit as an
+// applied remediation (the armed controller) MUST distinguish this from success —
+// nothing was written — so it stays idle and retries instead of entering canary
+// on a config that never landed. Maintenance callers treat it as a benign no-op.
+var ErrDeferred = errors.New("reconcile: apply deferred (active voice/RTC flow)")
 
 // Reconcile runs one pass. It is safe to call on a ticker; it is a no-op when
 // the desired config already matches the live file. Calls are serialized (LOT-13):
@@ -210,7 +219,9 @@ func (r *Reconciler) Reconcile(ctx context.Context) error {
 			os.Remove(tmp)
 			r.Log.Info("reconcile: deferring sing-box restart, active voice/RTC flow in progress (retry next tick)",
 				"service", svc, "nodes", len(nodes))
-			return nil
+			// Signal "not applied" (not success): the armed controller must not
+			// treat this as an applied remediation and enter canary (LOT-35 fix).
+			return ErrDeferred
 		}
 	}
 

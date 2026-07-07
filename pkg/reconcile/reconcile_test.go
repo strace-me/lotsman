@@ -268,9 +268,11 @@ func TestReconcileDefersRestartDuringActiveVoice(t *testing.T) {
 	active := true
 	r.ActiveRealtimeUDP = func(context.Context) (string, bool) { return "discord", active }
 
-	// Pass 1: a live call is in progress → validate but defer the restart.
-	if err := r.Reconcile(context.Background()); err != nil {
-		t.Fatalf("reconcile (deferred): %v", err)
+	// Pass 1: a live call is in progress → validate but defer the restart. The
+	// deferral is signalled as ErrDeferred (not nil) so the armed controller does
+	// not mistake it for an applied remediation and enter canary (LOT-35 fix).
+	if err := r.Reconcile(context.Background()); !errors.Is(err, ErrDeferred) {
+		t.Fatalf("reconcile (deferred): want ErrDeferred, got %v", err)
 	}
 	if !run.ran("check") {
 		t.Error("deferred apply should still validate with sing-box check")
