@@ -42,8 +42,8 @@ func parseURL(raw, source string) (Node, error) {
 			host, port = h, p
 		}
 	}
-	if host == "" || port == 0 {
-		return Node{}, fmt.Errorf("missing host/port in %q", raw)
+	if host == "" || !validPort(port) {
+		return Node{}, fmt.Errorf("missing/invalid host:port in %q", raw)
 	}
 
 	n := Node{
@@ -98,8 +98,8 @@ func parseVMess(b64, raw, source string) (Node, error) {
 		return Node{}, fmt.Errorf("vmess json: %w", err)
 	}
 	port := asInt(v.Port)
-	if v.Add == "" || port == 0 {
-		return Node{}, fmt.Errorf("vmess missing add/port")
+	if v.Add == "" || !validPort(port) {
+		return Node{}, fmt.Errorf("vmess missing/invalid add/port")
 	}
 	n := Node{
 		Protocol:    ProtoVMess,
@@ -144,3 +144,9 @@ func portInt(s string) int {
 	n, _ := strconv.Atoi(s)
 	return n
 }
+
+// validPort reports whether p is a usable TCP/UDP port (1..65535). Parsers use
+// it to drop a node with a missing or out-of-range port rather than carry the
+// bad value into a generated config, where an invalid server_port would fail
+// sing-box validation for the whole node set.
+func validPort(p int) bool { return p >= 1 && p <= 65535 }

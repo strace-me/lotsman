@@ -985,3 +985,70 @@ func TestPerClientSpread(t *testing.T) {
 		}
 	}
 }
+
+// A Clash-format hysteria2 proxy must be emitted as a VALID sing-box outbound
+// (server_port + nested tls), not passed through with Clash field names (port,
+// top-level sni/skip-cert-verify), which sing-box would reject — poisoning the
+// whole config for every other node.
+func TestGenerateClashHysteria2(t *testing.T) {
+	n := mustParse(t, "proxies:\n  - { name: \"DE\", type: hysteria2, server: 198.51.100.10, port: 443, password: secret, sni: magic.example, skip-cert-verify: true }\n", subscription.FormatClash)
+	nodes := []subscription.Node{n}
+	res, err := Generate(
+		[]registry.Service{svc("youtube", "vpn_url_test", "geosite-youtube")},
+		nil, nodes,
+		map[string][]subscription.Node{"vpn_url_test": {n}},
+		DefaultOptions(),
+	)
+	if err != nil {
+		t.Fatalf("generate: %v", err)
+	}
+	if len(res.Skipped) != 0 {
+		t.Fatalf("skipped = %v, want none", res.Skipped)
+	}
+	_, byType, _ := outboundsByTag(t, res.JSON)
+	if len(byType["hysteria2"]) != 1 {
+		t.Fatalf("hysteria2 outbounds = %d, want 1", len(byType["hysteria2"]))
+	}
+	ob := byType["hysteria2"][0]
+	if ob["server_port"] != float64(443) || ob["server"] != "198.51.100.10" || ob["password"] != "secret" {
+		t.Errorf("server/port/password = %v/%v/%v", ob["server"], ob["server_port"], ob["password"])
+	}
+	if _, has := ob["port"]; has {
+		t.Error("emitted Clash field 'port' (must be server_port)")
+	}
+	if _, has := ob["sni"]; has {
+		t.Error("emitted Clash top-level 'sni' (must be tls.server_name)")
+	}
+	tls, ok := ob["tls"].(map[string]any)
+	if !ok {
+		t.Fatalf("no tls block: %v", ob["tls"])
+	}
+	if tls["server_name"] != "magic.example" || tls["insecure"] != true {
+		t.Errorf("tls = %v, want server_name=magic.example insecure=true", tls)
+	}
+}
+
+// A single passwordless hysteria2 node must be SKIPPED (reported), not abort the
+// whole generation — otherwise one bad node in a subscription blocks config for
+// every good node.
+func TestGeneratePasswordlessHy2Skipped(t *testing.T) {
+	good := mustParse(t, "hysteria2://secret@198.51.100.10:443#good", subscription.FormatSingleURL)
+	bad := mustParse(t, "hysteria2://203.0.113.5:443#nopw", subscription.FormatSingleURL) // no userinfo => no password
+	nodes := []subscription.Node{good, bad}
+	res, err := Generate(
+		[]registry.Service{svc("youtube", "vpn_url_test", "geosite-youtube")},
+		nil, nodes,
+		map[string][]subscription.Node{"vpn_url_test": {good, bad}},
+		DefaultOptions(),
+	)
+	if err != nil {
+		t.Fatalf("generate must not abort on one bad node: %v", err)
+	}
+	_, byType, _ := outboundsByTag(t, res.JSON)
+	if len(byType["hysteria2"]) != 1 {
+		t.Errorf("hysteria2 outbounds = %d, want 1 (bad node skipped)", len(byType["hysteria2"]))
+	}
+	if len(res.Skipped) != 1 || res.Skipped[0].Protocol != subscription.ProtoHysteria2 {
+		t.Errorf("Skipped = %v, want the one passwordless hy2", res.Skipped)
+	}
+}

@@ -117,7 +117,7 @@ func parseClash(data []byte, source string) ([]Node, error) {
 			Port:        asInt(p["port"]),
 			DisplayName: asString(p["name"]),
 		}
-		if n.Server == "" || n.Port == 0 || n.Protocol == "" {
+		if n.Server == "" || !validPort(n.Port) || n.Protocol == "" {
 			continue
 		}
 		raw, _ := json.Marshal(p)
@@ -147,11 +147,12 @@ func parseSingbox(data []byte, source string) ([]Node, error) {
 			Port:        asInt(o["server_port"]),
 			DisplayName: asString(o["tag"]),
 		}
-		if n.Server == "" || n.Port == 0 {
+		if n.Server == "" || !validPort(n.Port) {
 			continue
 		}
 		raw, _ := json.Marshal(o)
 		n.Raw = string(raw)
+		n.Native = true // Raw is a native sing-box outbound: emit it verbatim
 		n.finalize(source)
 		out = append(out, n)
 	}

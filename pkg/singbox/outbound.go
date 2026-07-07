@@ -59,8 +59,10 @@ func nodeOutbound(n subscription.Node) (outbound, []outbound, error) {
 	tag := outboundTag(n)
 
 	// Native sing-box source: Raw already is an outbound object; reuse it and
-	// force a stable tag.
-	if looksJSON(n.Raw) {
+	// force a stable tag. Only for FormatSingbox nodes — Clash JSON also lands
+	// in Raw but uses different field names (port vs server_port, top-level sni
+	// vs tls.server_name), so it must go through the protocol builders below.
+	if n.Native && looksJSON(n.Raw) {
 		var ob outbound
 		if err := json.Unmarshal([]byte(n.Raw), &ob); err == nil {
 			if t, _ := ob["type"].(string); t != "" {
@@ -298,7 +300,10 @@ func hysteria2Outbound(n subscription.Node, tag string) (outbound, error) {
 	}
 	password, sni := hy2Secrets(n)
 	if password == "" {
-		return nil, fmt.Errorf("hysteria2 node %s: no password found", n.ID)
+		// Skip (report) rather than abort: a plain error here would sink the
+		// whole config generation for every other node too. Matches the other
+		// builders' handling of an unusable node.
+		return nil, SkipError{NodeID: n.ID, Protocol: n.Protocol}
 	}
 	ob["password"] = password
 	tls := outbound{"enabled": true}
