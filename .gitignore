@@ -23,5 +23,3 @@ cover.out
 # stray office docs + their lock files
 *.docx
 ~$*
-# release draft scratch
-README.public-draft.md
