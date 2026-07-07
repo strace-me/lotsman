@@ -1,4 +1,4 @@
-# Example lotsman config. Real deployment lives in /etc/smart-routing/ and is
+# Example lotsman config. Real deployment lives in /etc/lotsman/ and is
 # not committed. Subscription URLs here are placeholders — they will fail to
 # fetch (logged as warnings), which is fine for a config-path smoke test.
 

@@ -469,7 +469,7 @@ func TestAnyTLSOutbound(t *testing.T) {
 }
 
 func TestTUICOutbound(t *testing.T) {
-	link := "tuic://72df3c80-b7f8-c614-20bd-9b78b1b34f70:secretpw@192.0.2.50:2097/?congestion_control=bbr&alpn=h3&sni=www.bing.com&allow_insecure=1&udp_relay_mode=native#DE-tuic"
+	link := "tuic://11111111-2222-3333-4444-555555555555:secretpw@192.0.2.50:2097/?congestion_control=bbr&alpn=h3&sni=www.bing.com&allow_insecure=1&udp_relay_mode=native#DE-tuic"
 	n := mustParse(t, link, subscription.FormatSingleURL)
 	if n.Protocol != "tuic" || !n.Caps.UDPNative {
 		t.Fatalf("tuic node = proto %q udp %v", n.Protocol, n.Caps.UDPNative)
@@ -483,7 +483,7 @@ func TestTUICOutbound(t *testing.T) {
 		t.Fatalf("tuic outbound not emitted (skipped=%v)", res.Skipped)
 	}
 	ob := byType["tuic"][0]
-	if ob["uuid"] != "72df3c80-b7f8-c614-20bd-9b78b1b34f70" || ob["password"] != "secretpw" {
+	if ob["uuid"] != "11111111-2222-3333-4444-555555555555" || ob["password"] != "secretpw" {
 		t.Errorf("tuic creds = uuid %v pw %v", ob["uuid"], ob["password"])
 	}
 	if ob["congestion_control"] != "bbr" || ob["udp_relay_mode"] != "native" {
