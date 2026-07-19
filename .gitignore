@@ -23,3 +23,7 @@ cover.out
 # stray office docs + their lock files
 *.docx
 ~$*
+
+# installed third-party agent skills (reproducible via npx, must not ship to public)
+.claude/skills/
+.agents/
