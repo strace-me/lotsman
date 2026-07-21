@@ -106,6 +106,9 @@ func New(conf *config.Config, box ProxyCore, opts Options, log *slog.Logger) *Co
 // autonomy loop (brain + applier + prober). It returns once everything is
 // running; call Stop to tear down.
 func (c *Core) Start(ctx context.Context) error {
+	if err := c.preflight(); err != nil {
+		return err
+	}
 	c.bus = events.NewBus()
 	c.kb = kb.New()
 
@@ -304,10 +307,7 @@ func (c *Core) generate(ctx context.Context) ([]byte, error) {
 		opts.TproxyPort = 0
 		opts.SocksProbeListen = c.opts.ProxyListen
 	} else {
-		opts.Tun = c.opts.Tun
-		if opts.Tun == nil {
-			opts.Tun = &singbox.TunOptions{MTU: 9000, Address: []string{"172.19.0.1/30"}, Stack: "system", AutoRoute: true}
-		}
+		opts.Tun = c.tunOptions()
 		if c.opts.ProbeProxy != "" {
 			opts.SocksProbeListen = c.opts.ProbeProxy
 		}
@@ -318,6 +318,16 @@ func (c *Core) generate(ctx context.Context) ([]byte, error) {
 		return nil, err
 	}
 	return res.JSON, nil
+}
+
+// tunOptions is the ingress this client would claim in tun mode — the caller's
+// choice, or a default. preflight and generate must agree on it, so it lives in
+// one place.
+func (c *Core) tunOptions() *singbox.TunOptions {
+	if c.opts.Tun != nil {
+		return c.opts.Tun
+	}
+	return &singbox.TunOptions{MTU: 9000, Address: []string{"172.19.0.1/30"}, Stack: "system", AutoRoute: true}
 }
 
 // ensureRuleSets provisions the .srs files this config's services reference. The
