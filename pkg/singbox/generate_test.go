@@ -1139,3 +1139,40 @@ func TestGeneratePasswordlessHy2Skipped(t *testing.T) {
 		t.Errorf("Skipped = %v, want the one passwordless hy2", res.Skipped)
 	}
 }
+
+func TestTunExcludesLocalDiscovery(t *testing.T) {
+	// A tun that swallows multicast breaks every neighbour-discovery protocol on
+	// the machine — LocalSend, mDNS, printer and cast discovery — and does so
+	// ASYMMETRICALLY: the host keeps hearing its neighbours on the physical link
+	// while its own announcements vanish into the tunnel. That reads as a firewall
+	// fault, not a routing one, which is why it has to be excluded by default.
+	n := mustParse(t, "anytls://pw@192.0.2.50:8443?sni=x&insecure=1#DE", subscription.FormatSingleURL)
+	opts := DefaultOptions()
+	opts.Tun = &TunOptions{
+		Address:       []string{"172.19.0.1/30"},
+		AutoRoute:     true,
+		ExcludeRoutes: []string{"224.0.0.0/4", "ff00::/8"},
+	}
+	res, err := Generate(nil, nil, []subscription.Node{n}, map[string][]subscription.Node{}, opts)
+	if err != nil {
+		t.Fatalf("generate: %v", err)
+	}
+	var cfg map[string]any
+	if err := json.Unmarshal(res.JSON, &cfg); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	tun := cfg["inbounds"].([]any)[0].(map[string]any)
+	ex, ok := tun["route_exclude_address"].([]any)
+	if !ok || len(ex) != 2 || ex[0] != "224.0.0.0/4" {
+		t.Errorf("route_exclude_address = %v, want the multicast ranges", tun["route_exclude_address"])
+	}
+
+	// Omitted when unset, so the router's tproxy config is untouched.
+	opts.Tun.ExcludeRoutes = nil
+	res2, _ := Generate(nil, nil, []subscription.Node{n}, map[string][]subscription.Node{}, opts)
+	var cfg2 map[string]any
+	json.Unmarshal(res2.JSON, &cfg2)
+	if _, present := cfg2["inbounds"].([]any)[0].(map[string]any)["route_exclude_address"]; present {
+		t.Error("no excludes must mean no key at all")
+	}
+}

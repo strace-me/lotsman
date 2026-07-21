@@ -74,6 +74,9 @@ func inbounds(opts Options) []any {
 		if opts.Tun.Stack != "" {
 			tun["stack"] = opts.Tun.Stack
 		}
+		if len(opts.Tun.ExcludeRoutes) > 0 {
+			tun["route_exclude_address"] = opts.Tun.ExcludeRoutes
+		}
 		in = []any{tun}
 	} else if opts.TproxyPort != 0 {
 		in = []any{map[string]any{
@@ -194,6 +197,20 @@ type FakeIPOptions struct {
 // track sing-box's tun inbound and must be validated against the pinned 1.14
 // schema before the client ships.
 type TunOptions struct {
+	// ExcludeRoutes are destinations auto_route must NOT pull into the tunnel.
+	//
+	// Without them a client breaks every LAN protocol that relies on multicast the
+	// moment it starts: the machine keeps RECEIVING its neighbours' announcements
+	// on the physical link, but its own go out the tun and vanish. The symptom is
+	// maddening precisely because it is asymmetric — this host sees everyone and
+	// nobody sees it — and it looks like a firewall problem rather than a routing
+	// one. Diagnosed in the field on a laptop where LocalSend discovery failed in
+	// exactly that shape while sing-box was up.
+	//
+	// Routing rules inside sing-box (ip_is_private -> direct) do NOT prevent this:
+	// they decide where traffic goes once it is already in the tunnel, whereas
+	// auto_route decides what enters it in the first place.
+	ExcludeRoutes []string
 	InterfaceName string   // "" = sing-box default (tunN)
 	MTU           int      // 0 = sing-box default
 	Address       []string // tun addresses in CIDR form, e.g. ["172.19.0.1/30"]. Verified against sing-box 1.13.14: the legacy inet4_address/inet6_address fields were deprecated in 1.10.0 and REMOVED in 1.12.0 — emitting them is fatal.
