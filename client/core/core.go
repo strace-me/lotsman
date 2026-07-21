@@ -12,7 +12,6 @@ import (
 	"time"
 
 	"github.com/strace-me/lotsman/client/platform/nfqws"
-	"github.com/strace-me/lotsman/client/platform/probe"
 	"github.com/strace-me/lotsman/client/platform/rulesets"
 	"github.com/strace-me/lotsman/pkg/applier"
 	"github.com/strace-me/lotsman/pkg/audit"
@@ -189,7 +188,7 @@ func (c *Core) Start(ctx context.Context) error {
 	// Rung-aware: an INACTIVE vpn rung cannot be measured through the selector (the
 	// traffic would follow the active rung and credit the wrong one), so those are
 	// measured with a Clash delay test of the pool instead.
-	rp := probe.New(mp, c.clash, c.reg, "", 5*time.Second)
+	rp := dataplane.NewRungProber(mp, c.clash, c.reg, "", 0)
 
 	mc := metrics.New(c.brain.Snapshot, c.kb.Snapshot)
 	eng := probing.New(c.bus, rp, c.brain, c.reg, c.kb, mc, faillog.Nop{}, c.opts.Interval, c.log)
