@@ -24,7 +24,6 @@ import (
 	"sync"
 	"time"
 
-	"github.com/strace-me/lotsman/pkg/executor"
 	"github.com/strace-me/lotsman/pkg/pools"
 	"github.com/strace-me/lotsman/pkg/registry"
 	"github.com/strace-me/lotsman/pkg/singbox"
@@ -35,6 +34,15 @@ import (
 // implements it; abstracted so the reconciler is testable without network.
 type Loader interface {
 	Load(ctx context.Context, decls []subscription.Declaration) ([]subscription.Node, []error)
+}
+
+// Runner runs a system command (the sing-box `check` and the init-script
+// restart). Declared here — structurally identical to executor.Runner, which
+// the daemon still satisfies via executor.ExecRunner — so this package stays off
+// os/exec and can build for mobile targets that reuse its structure/coherence
+// logic (executor imports os/exec, which gomobile rejects).
+type Runner interface {
+	Run(ctx context.Context, name string, args ...string) error
 }
 
 // Reconciler regenerates and (in real mode) applies the sing-box config.
@@ -50,7 +58,7 @@ type Reconciler struct {
 	BackupDir  string // where pre-apply backups go ("" = no backup)
 	DryRun     bool   // true = compute + validate + log, never write/restart
 
-	Runner     executor.Runner
+	Runner     Runner
 	SingboxBin string                     // binary for `<bin> check -c <path>` (e.g. "sing-box")
 	RestartCmd []string                   // name + args, e.g. ["/etc/init.d/sing-box","restart"]
 	Alive      func(context.Context) bool // post-restart health (nil = skip the check)
