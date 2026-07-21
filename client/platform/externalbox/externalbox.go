@@ -11,6 +11,7 @@ import (
 	"log/slog"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"sync"
 
 	"github.com/strace-me/lotsman/client/core"
@@ -35,6 +36,11 @@ var _ core.ProxyCore = (*Box)(nil)
 func New(bin, configPath string, log *slog.Logger) *Box {
 	if bin == "" {
 		bin = "sing-box"
+	}
+	// Absolute so the pid file and the -c argument keep meaning the same thing
+	// after a service manager starts us from a different directory.
+	if abs, err := filepath.Abs(configPath); err == nil {
+		configPath = abs
 	}
 	return &Box{bin: bin, configPath: configPath, pidFile: configPath + ".pid", log: log}
 }
