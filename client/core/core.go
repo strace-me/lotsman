@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net"
+	"path/filepath"
 	"runtime"
 	"sync"
 	"time"
@@ -114,6 +115,13 @@ func New(conf *config.Config, box ProxyCore, opts Options, log *slog.Logger) *Co
 	if opts.Interval == 0 {
 		opts.Interval = 10 * time.Second
 	}
+	// nfqws resolves relative paths against ITS working directory, which is
+	// whatever launched the service — under systemd that is not where the operator
+	// ran the command. A relative hostlist or payload path therefore works when
+	// tested by hand and silently fails to load once installed, taking the desync
+	// with it and saying nothing.
+	opts.HostlistDir = absDir(opts.HostlistDir)
+	opts.ZapretFiles = absDir(opts.ZapretFiles)
 	return &Core{conf: conf, reg: conf.Registry, box: box, opts: opts, log: log}
 }
 
@@ -568,6 +576,19 @@ func tunnelIPs(nodes []subscription.Node, log *slog.Logger) []string {
 		}
 	}
 	return out
+}
+
+// absDir makes a non-empty path absolute, leaving it alone if that is not
+// possible — a best-effort improvement must not turn into a startup failure.
+func absDir(p string) string {
+	if p == "" {
+		return p
+	}
+	abs, err := filepath.Abs(p)
+	if err != nil {
+		return p
+	}
+	return abs
 }
 
 func randomSecret() (string, error) {
