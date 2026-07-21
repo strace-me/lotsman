@@ -468,6 +468,93 @@ func TestAnyTLSOutbound(t *testing.T) {
 	}
 }
 
+func TestTunInbound(t *testing.T) {
+	n := mustParse(t, "anytls://pw@192.0.2.50:8443?sni=www.bing.com&insecure=1#DE", subscription.FormatSingleURL)
+	nodes := []subscription.Node{n}
+	mem := map[string][]subscription.Node{}
+
+	inboundsOf := func(js []byte) []any {
+		t.Helper()
+		var cfg map[string]any
+		if err := json.Unmarshal(js, &cfg); err != nil {
+			t.Fatalf("unmarshal: %v", err)
+		}
+		in, _ := cfg["inbounds"].([]any)
+		return in
+	}
+
+	// Router default (Tun nil): tproxy inbound, unchanged — the rest of the golden
+	// suite guards byte-identity.
+	res, err := Generate(nil, nil, nodes, mem, DefaultOptions())
+	if err != nil {
+		t.Fatalf("generate: %v", err)
+	}
+	if in := inboundsOf(res.JSON); len(in) == 0 || in[0].(map[string]any)["type"] != "tproxy" {
+		t.Fatalf("default ingress must be tproxy, got %v", in)
+	}
+
+	// Client (Tun set): a tun inbound with auto_route and — critically — NO fd field
+	// (libbox openTun / desktop auto_route supply the fd, never the config).
+	opts := DefaultOptions()
+	opts.Tun = &TunOptions{MTU: 9000, Address: []string{"172.19.0.1/30"}, Stack: "system", AutoRoute: true}
+	res2, err := Generate(nil, nil, nodes, mem, opts)
+	if err != nil {
+		t.Fatalf("generate: %v", err)
+	}
+	in := inboundsOf(res2.JSON)
+	if len(in) == 0 {
+		t.Fatalf("no inbounds emitted")
+	}
+	tun := in[0].(map[string]any)
+	if tun["type"] != "tun" || tun["auto_route"] != true || tun["mtu"].(float64) != 9000 {
+		t.Errorf("tun inbound = %v", tun)
+	}
+	if _, hasFD := tun["file_descriptor"]; hasFD {
+		t.Errorf("tun config must NOT carry a file_descriptor: %v", tun)
+	}
+}
+
+func TestClashAPISecret(t *testing.T) {
+	n := mustParse(t, "anytls://pw123@192.0.2.50:8443?sni=www.bing.com&insecure=1#DE", subscription.FormatSingleURL)
+	nodes := []subscription.Node{n}
+	mem := map[string][]subscription.Node{}
+
+	clashOf := func(js []byte) map[string]any {
+		t.Helper()
+		var cfg map[string]any
+		if err := json.Unmarshal(js, &cfg); err != nil {
+			t.Fatalf("unmarshal: %v", err)
+		}
+		exp, _ := cfg["experimental"].(map[string]any)
+		ca, _ := exp["clash_api"].(map[string]any)
+		if ca == nil {
+			t.Fatalf("no experimental.clash_api in config")
+		}
+		return ca
+	}
+
+	// Empty secret (the router default) must omit the key entirely, so the emitted
+	// config stays byte-identical to today — the rest of the golden suite guards that.
+	res, err := Generate(nil, nil, nodes, mem, DefaultOptions())
+	if err != nil {
+		t.Fatalf("generate: %v", err)
+	}
+	if ca := clashOf(res.JSON); ca["secret"] != nil {
+		t.Errorf("empty ClashAPISecret must omit secret, got %v", ca["secret"])
+	}
+
+	// Set: emitted as the Bearer token clients authenticate the loopback API with.
+	opts := DefaultOptions()
+	opts.ClashAPISecret = "s3cr3t-token"
+	res2, err := Generate(nil, nil, nodes, mem, opts)
+	if err != nil {
+		t.Fatalf("generate: %v", err)
+	}
+	if ca := clashOf(res2.JSON); ca["secret"] != "s3cr3t-token" {
+		t.Errorf("clash_api.secret = %v, want s3cr3t-token", ca["secret"])
+	}
+}
+
 func TestTUICOutbound(t *testing.T) {
 	link := "tuic://11111111-2222-3333-4444-555555555555:secretpw@192.0.2.50:2097/?congestion_control=bbr&alpn=h3&sni=www.bing.com&allow_insecure=1&udp_relay_mode=native#DE-tuic"
 	n := mustParse(t, link, subscription.FormatSingleURL)
