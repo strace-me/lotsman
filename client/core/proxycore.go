@@ -19,6 +19,10 @@ type ProxyCore interface {
 	Start(ctx context.Context, configJSON []byte) error
 	// Reload swaps in a new config (a structure change), restarting as needed.
 	Reload(ctx context.Context, configJSON []byte) error
+	// Restart re-reads the config already on disk. The reconciler owns the file
+	// swap (it validates, backs up and can roll back), so it needs a restart that
+	// does NOT rewrite what it just placed there.
+	Restart(ctx context.Context) error
 	// Stop tears the instance down.
 	Stop(ctx context.Context) error
 	// Alive reports whether sing-box is currently up.

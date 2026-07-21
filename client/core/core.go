@@ -58,10 +58,12 @@ type Options struct {
 	// Desync (zapret/nfqws) — Linux only, and only when the config actually has
 	// zapret chain steps. NFQUEUE needs root, which this service already has for
 	// the tun, so it costs nothing extra where it works at all.
-	NfqwsBin   string // nfqws binary ("" = "nfqws" on PATH)
-	SingboxBin string // sing-box binary, used to decompile rule-sets into domains ("" = "sing-box")
-	QNum       int    // NFQUEUE queue number (0 = 200, matching the router)
-	WAN        string // egress interface for the nft rules ("" = autodetect the default route)
+	NfqwsBin      string        // nfqws binary ("" = "nfqws" on PATH)
+	SingboxBin    string        // sing-box binary, used to decompile rule-sets into domains ("" = "sing-box")
+	SingboxConfig string        // path of the live sing-box config the reconciler swaps
+	RefreshEvery  time.Duration // how often to re-fetch subscriptions and reconcile (0 = never)
+	QNum          int           // NFQUEUE queue number (0 = 200, matching the router)
+	WAN           string        // egress interface for the nft rules ("" = autodetect the default route)
 
 	// DesyncExclude are extra destinations nfqws must never touch, on top of this
 	// client's own nodes — the servers of any OTHER tunnel sharing this host.
@@ -211,7 +213,13 @@ func (c *Core) Start(ctx context.Context) error {
 	c.mu.Lock()
 	c.cancel = cancel
 	c.mu.Unlock()
-	for _, run := range []func(context.Context){c.brain.Run, ap.Run, eng.Run} {
+	runners := []func(context.Context){c.brain.Run, ap.Run, eng.Run}
+	if c.opts.RefreshEvery > 0 && c.opts.SingboxConfig != "" {
+		rc := c.newReconciler()
+		runners = append(runners, func(rctx context.Context) { c.refreshLoop(rctx, rc, c.opts.RefreshEvery) })
+		c.log.Info("subscription refresh enabled", "every", c.opts.RefreshEvery)
+	}
+	for _, run := range runners {
 		c.wg.Add(1)
 		go func(fn func(context.Context)) {
 			defer c.wg.Done()
@@ -283,25 +291,11 @@ func (c *Core) RenderConfig(ctx context.Context) ([]byte, error) {
 	return c.generate(ctx)
 }
 
-// generate fetches subscription nodes and renders the client sing-box config
-// (tun ingress + the mandatory Clash secret), reusing the daemon's exact path.
-func (c *Core) generate(ctx context.Context) ([]byte, error) {
-	if err := c.ensureRuleSets(ctx); err != nil {
-		return nil, err
-	}
-	mgr := subscription.NewManager(subscription.NewHTTPFetcher())
-	nodes, errs := mgr.Load(ctx, c.conf.Subscriptions)
-	for _, e := range errs {
-		c.log.Warn("subscription load issue", "err", e)
-	}
-	memberships := c.conf.Pools.Memberships(nodes)
-	c.tunnelIPs = tunnelIPs(nodes, c.log)
-
-	services := make([]registry.Service, 0, len(c.reg.Services))
-	for _, s := range c.reg.Services {
-		services = append(services, s)
-	}
-
+// singboxOptions is the generator configuration this client runs with. Both the
+// startup render and the reconciler must use the SAME options — a divergence
+// would make every reconcile see a spurious diff and restart sing-box forever,
+// and a regenerated Clash secret would lock this client out of its own box.
+func (c *Core) singboxOptions() singbox.Options {
 	opts := singbox.DefaultOptions()
 	opts.ClashAPIListen = c.opts.ClashListen
 	opts.ClashAPISecret = c.secret
@@ -323,6 +317,30 @@ func (c *Core) generate(ctx context.Context) ([]byte, error) {
 			opts.SocksProbeListen = c.opts.ProbeProxy
 		}
 	}
+
+	return opts
+}
+
+// generate fetches subscription nodes and renders the client sing-box config
+// (tun ingress + the mandatory Clash secret), reusing the daemon's exact path.
+func (c *Core) generate(ctx context.Context) ([]byte, error) {
+	if err := c.ensureRuleSets(ctx); err != nil {
+		return nil, err
+	}
+	mgr := subscription.NewManager(subscription.NewHTTPFetcher())
+	nodes, errs := mgr.Load(ctx, c.conf.Subscriptions)
+	for _, e := range errs {
+		c.log.Warn("subscription load issue", "err", e)
+	}
+	memberships := c.conf.Pools.Memberships(nodes)
+	c.tunnelIPs = tunnelIPs(nodes, c.log)
+
+	services := make([]registry.Service, 0, len(c.reg.Services))
+	for _, s := range c.reg.Services {
+		services = append(services, s)
+	}
+
+	opts := c.singboxOptions()
 
 	res, err := singbox.Generate(services, c.conf.Devices, nodes, memberships, opts)
 	if err != nil {

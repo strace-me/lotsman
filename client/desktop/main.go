@@ -36,6 +36,7 @@ func main() {
 		desyncExclude = flag.String("desync-exclude", "", "comma-separated IPs/CIDRs the desync must never touch (the servers of another VPN sharing this host)")
 		desyncForce   = flag.Bool("desync-force", false, "arm the desync even though another tunnel is present on this host")
 		proxyListen   = flag.String("proxy", "", "PROXY MODE: run sing-box on this socks address instead of capturing the system with a tun (no root needed, nothing intercepted)")
+		refreshEvery  = flag.Duration("refresh-interval", 5*time.Minute, "how often to re-fetch subscriptions and reconcile the config (0 = never)")
 		controlSock   = flag.String("control-socket", "", "unix socket for the local control API (empty = default under the runtime dir)")
 		printConfig   = flag.Bool("print-config", false, "generate the sing-box config from -config, print it, and exit (no sing-box needed)")
 	)
@@ -70,17 +71,19 @@ func main() {
 
 	box := externalbox.New(*singboxBin, *singboxCfg, log)
 	c := core.New(conf, box, core.Options{
-		ClashListen: *clashListen,
-		Interval:    *interval,
-		KBFile:      *kbFile,
-		ProbeProxy:  *probeProxy,
-		RuleSetDir:  *ruleSetDir,
-		NfqwsBin:    *nfqwsBin,
-		SingboxBin:  *singboxBin,
-		QNum:        *qnum,
-		WAN:         *wan,
-		ProxyListen: *proxyListen,
-		DesyncForce: *desyncForce,
+		ClashListen:   *clashListen,
+		Interval:      *interval,
+		KBFile:        *kbFile,
+		ProbeProxy:    *probeProxy,
+		RuleSetDir:    *ruleSetDir,
+		NfqwsBin:      *nfqwsBin,
+		SingboxBin:    *singboxBin,
+		SingboxConfig: *singboxCfg,
+		RefreshEvery:  *refreshEvery,
+		QNum:          *qnum,
+		WAN:           *wan,
+		ProxyListen:   *proxyListen,
+		DesyncForce:   *desyncForce,
 		DesyncExclude: func() []string {
 			if *desyncExclude == "" {
 				return nil
