@@ -18,6 +18,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"net"
 	"os"
 	"os/exec"
 	"runtime"
@@ -179,4 +180,37 @@ func ParseDefaultRouteIface(out string) string {
 		}
 	}
 	return ""
+}
+
+// tunnelPrefixes are the interface names VPN data planes conventionally take.
+var tunnelPrefixes = []string{"tun", "tap", "wg", "ppp", "utun", "nordlynx", "proton"}
+
+// ForeignTunnels lists tunnel interfaces already present on the host. Called
+// before this client creates its own, so anything found belongs to somebody else.
+//
+// It matters because the desync cannot tell a foreign tunnel's packets from
+// ordinary traffic: sing-box's auto_route installs NO host route for its servers
+// (verified — it uses policy rules and binds its own egress instead), so the
+// peers of another VPN are not discoverable from the routing table, and nfqws
+// would happily mangle the very packets carrying somebody's tunnel. That failure
+// is silent: their VPN just degrades.
+func ForeignTunnels() []string {
+	ifaces, err := net.Interfaces()
+	if err != nil {
+		return nil
+	}
+	var out []string
+	for _, ifc := range ifaces {
+		if ifc.Flags&net.FlagLoopback != 0 || ifc.Flags&net.FlagUp == 0 {
+			continue
+		}
+		name := strings.ToLower(ifc.Name)
+		for _, p := range tunnelPrefixes {
+			if strings.HasPrefix(name, p) {
+				out = append(out, ifc.Name)
+				break
+			}
+		}
+	}
+	return out
 }
