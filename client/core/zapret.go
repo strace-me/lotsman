@@ -27,6 +27,7 @@ type zapretExec struct {
 	engine  *nfqws.Engine
 	recipes []strategycat.Recipe
 	pick    zaptune.Picker            // ranks candidate recipes (KB-learned, catalog order as tiebreak)
+	files   string                    // zapret payload dir, for resolving .bin references
 	active  func() []registry.Service // services CURRENTLY on a zapret rung
 	resolve zaptune.Resolver
 	log     *slog.Logger
@@ -56,7 +57,9 @@ func (z *zapretExec) Enable(ctx context.Context, service, _ string) error {
 			"uncovered", plan.Uncovered, "service", service)
 		return nil
 	}
-	if err := z.engine.Apply(ctx, plan.Args); err != nil {
+	// nfqws resolves a bare payload name against ITS working directory, which is
+	// ours rather than the zapret installation's.
+	if err := z.engine.Apply(ctx, absolutizePayloads(plan.Args, z.files)); err != nil {
 		return err
 	}
 	z.log.Info("zapret: desync applied", "services", len(active), "chosen", plan.Chosen)

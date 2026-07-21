@@ -59,6 +59,7 @@ type Options struct {
 	// zapret chain steps. NFQUEUE needs root, which this service already has for
 	// the tun, so it costs nothing extra where it works at all.
 	NfqwsBin      string        // nfqws binary ("" = "nfqws" on PATH)
+	ZapretFiles   string        // dir holding zapret's fake payload .bin files ("" = skip the availability check)
 	SingboxBin    string        // sing-box binary, used to decompile rule-sets into domains ("" = "sing-box")
 	SingboxConfig string        // path of the live sing-box config the reconciler swaps
 	RefreshEvery  time.Duration // how often to re-fetch subscriptions and reconcile (0 = never)
@@ -458,15 +459,18 @@ func (c *Core) newZapretExec(ctx context.Context) executor.StrategyExecutor {
 	c.log.Info("desync rung enabled", "engine", "nfqws", "wan", wan, "qnum", qnum, "excluded_tunnels", len(excluded))
 
 	return &zapretExec{
-		clash:   c.clash,
-		engine:  c.zap,
-		recipes: append(strategycat.Load(), zaptune.RecipesFromDefinitions(c.conf.Strategies)...),
+		clash:  c.clash,
+		engine: c.zap,
+		recipes: usablePayloadRecipes(
+			append(strategycat.Load(), zaptune.RecipesFromDefinitions(c.conf.Strategies)...),
+			c.opts.ZapretFiles, c.log),
 		// Rank recipes by what has actually worked for this service. A cold KB scores
 		// every candidate at the prior, so this degrades to catalog order — the same
 		// choice the seed picker makes — and sharpens only as outcomes accumulate.
 		pick: zaptune.KBPicker(func(service, recipeID string) float64 {
 			return c.kb.Stats(service, recipeID).Success
 		}),
+		files:   c.opts.ZapretFiles,
 		active:  c.zapretServices,
 		resolve: rulesets.NewResolver(c.opts.SingboxBin, c.opts.RuleSetDir, c.log).Resolve,
 		log:     c.log,
