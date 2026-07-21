@@ -593,3 +593,20 @@ func TestReconcileRetriesStayDegradedThenSkips(t *testing.T) {
 		t.Errorf("persistently degraded fetch must skip after retries, calls=%v", run.calls)
 	}
 }
+
+func TestReconcileDoesNotWidenConfigPermissions(t *testing.T) {
+	// The config carries the Clash-API secret and every node credential. A client
+	// creates it 0600; the first reconcile must not hand it to every local user.
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.json")
+	if err := os.WriteFile(path, []byte("{}"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if got := configMode(path); got != 0o600 {
+		t.Errorf("configMode = %o, want 0600 inherited from the live file", got)
+	}
+	// With nothing to inherit from, keep the router's historical mode.
+	if got := configMode(filepath.Join(dir, "absent.json")); got != 0o644 {
+		t.Errorf("configMode(absent) = %o, want 0644", got)
+	}
+}

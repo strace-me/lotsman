@@ -202,7 +202,7 @@ func (r *Reconciler) Reconcile(ctx context.Context) error {
 
 	// Validate before touching anything — never apply a config sing-box rejects.
 	tmp := r.ConfigPath + ".lotsman-tmp"
-	if err := os.WriteFile(tmp, desired, 0o644); err != nil {
+	if err := os.WriteFile(tmp, desired, configMode(r.ConfigPath)); err != nil {
 		return fmt.Errorf("reconcile: write tmp: %w", err)
 	}
 	if err := r.check(ctx, tmp); err != nil {
@@ -274,6 +274,17 @@ func (r *Reconciler) setLastNodes(n int) {
 	}
 }
 
+// configMode inherits the live config's permissions. The file carries the
+// Clash-API secret and every node credential, so a client that deliberately
+// created it 0600 must not have it silently widened by a reconcile. 0644 only
+// when there is no file to learn from, matching the router's historical mode.
+func configMode(path string) os.FileMode {
+	if fi, err := os.Stat(path); err == nil {
+		return fi.Mode().Perm()
+	}
+	return 0o644
+}
+
 // apply swaps tmp into place with a backup, restarts sing-box, and rolls back to
 // the previous config if sing-box does not come back alive.
 func (r *Reconciler) apply(ctx context.Context, tmp string, live []byte) error {
@@ -304,7 +315,7 @@ func (r *Reconciler) rollback(ctx context.Context, live []byte, cause error) err
 	if len(live) == 0 {
 		return fmt.Errorf("reconcile: %w; no backup to roll back to", cause)
 	}
-	if err := os.WriteFile(r.ConfigPath, live, 0o644); err != nil {
+	if err := os.WriteFile(r.ConfigPath, live, configMode(r.ConfigPath)); err != nil {
 		return fmt.Errorf("reconcile: %w; ROLLBACK WRITE FAILED: %v", cause, err)
 	}
 	if err := r.restart(ctx); err != nil {

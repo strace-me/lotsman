@@ -51,15 +51,23 @@ func recipeCoversPort(r strategycat.Recipe, port int) bool {
 	if port == 0 {
 		return true
 	}
+	// Both transports must be read. Looking only at --filter-tcp let a UDP-only
+	// (QUIC) recipe through the gate as "unfiltered", and it was then judged by a
+	// TCP probe it cannot possibly affect — the very mistake this function exists
+	// to prevent.
 	filtered := false
 	for _, a := range r.NfqwsArgs {
-		spec, ok := strings.CutPrefix(a, "--filter-tcp=")
-		if !ok {
-			continue
-		}
-		filtered = true
-		if portSpecCovers(spec, port) {
-			return true
+		for _, prefix := range []string{"--filter-tcp=", "--filter-udp="} {
+			spec, ok := strings.CutPrefix(a, prefix)
+			if !ok {
+				continue
+			}
+			filtered = true
+			// A TCP probe can only be affected by a TCP filter; a recipe scoped to UDP
+			// is unfalsifiable by it regardless of the port numbers matching.
+			if prefix == "--filter-tcp=" && portSpecCovers(spec, port) {
+				return true
+			}
 		}
 	}
 	return !filtered

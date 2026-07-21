@@ -4,6 +4,8 @@ import (
 	"context"
 	"log/slog"
 	"testing"
+
+	"github.com/strace-me/lotsman/pkg/registry"
 )
 
 type recorded struct {
@@ -14,6 +16,8 @@ type recorded struct {
 
 func execWithCanary(probeOK bool, rec *recorded) *zapretExec {
 	return &zapretExec{
+		// Still on the rung, so a verdict is legitimate.
+		active: func() []registry.Service { return []registry.Service{{Name: "youtube"}, {Name: "discord"}} },
 		canary: func(context.Context, string) bool { return probeOK },
 		record: func(service, recipe string, ok bool) {
 			rec.service, rec.recipe, rec.ok = service, recipe, ok
@@ -69,9 +73,28 @@ func TestCanarySkipsServicesItDidNotCompose(t *testing.T) {
 	}
 }
 
+func TestCanarySkipsAServiceThatLeftTheRung(t *testing.T) {
+	// The third consecutive failure escalates the service off the desync rung on
+	// the very tick that spawned this judge. Probing 3s later then measures the
+	// tunnel it moved to, and recording that would file a SUCCESS for the recipe
+	// whose failures caused the escalation — promoting the loser.
+	var rec recorded
+	z := execWithCanary(true, &rec)
+	z.active = func() []registry.Service { return []registry.Service{{Name: "discord"}} }
+
+	z.judge(context.Background(), "youtube", map[string]string{"youtube": "r"})
+
+	if rec.calls != 0 {
+		t.Error("a service no longer on the rung must not be judged — the probe measures whatever it moved to")
+	}
+}
+
 func TestCanaryIsInertWithoutAProbe(t *testing.T) {
 	var rec recorded
-	z := &zapretExec{record: func(string, string, bool) { rec.calls++ }, log: slog.New(slog.DiscardHandler)}
+	z := &zapretExec{
+		active: func() []registry.Service { return []registry.Service{{Name: "youtube"}} },
+		record: func(string, string, bool) { rec.calls++ }, log: slog.New(slog.DiscardHandler),
+	}
 
 	z.judge(context.Background(), "youtube", map[string]string{"youtube": "r"})
 
