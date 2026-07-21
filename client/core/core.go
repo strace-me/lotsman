@@ -60,6 +60,7 @@ type Options struct {
 	// the tun, so it costs nothing extra where it works at all.
 	NfqwsBin      string        // nfqws binary ("" = "nfqws" on PATH)
 	ZapretFiles   string        // dir holding zapret's fake payload .bin files ("" = skip the availability check)
+	HostlistDir   string        // dir for per-service nfqws hostlist files ("" = inline domains into argv, which forces an engine restart on every membership change)
 	SingboxBin    string        // sing-box binary, used to decompile rule-sets into domains ("" = "sing-box")
 	SingboxConfig string        // path of the live sing-box config the reconciler swaps
 	RefreshEvery  time.Duration // how often to re-fetch subscriptions and reconcile (0 = never)
@@ -472,12 +473,13 @@ func (c *Core) newZapretExec(ctx context.Context) executor.StrategyExecutor {
 		pick: zaptune.KBPicker(func(service, recipeID string) float64 {
 			return c.kb.Stats(service, recipeID).Success
 		}),
-		files:   c.opts.ZapretFiles,
-		canary:  c.canaryProbe,
-		record:  func(service, recipe string, ok bool) { c.kb.RecordOutcome(service, recipe, ok, 0) },
-		active:  c.zapretServices,
-		resolve: rulesets.NewResolver(c.opts.SingboxBin, c.opts.RuleSetDir, c.log).Resolve,
-		log:     c.log,
+		files:     c.opts.ZapretFiles,
+		hostlists: c.opts.HostlistDir,
+		canary:    c.canaryProbe,
+		record:    func(service, recipe string, ok bool) { c.kb.RecordOutcome(service, recipe, ok, 0) },
+		active:    c.zapretServices,
+		resolve:   rulesets.NewResolver(c.opts.SingboxBin, c.opts.RuleSetDir, c.log).Resolve,
+		log:       c.log,
 	}
 }
 

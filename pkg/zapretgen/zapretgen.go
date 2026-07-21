@@ -108,7 +108,7 @@ func New(services []registry.Service, position func(string) int, recipes []strat
 // data plane in this slice.
 func (r *Reconciler) Reconcile(ctx context.Context) error {
 	active := r.zapretActive()
-	plan := zaptune.Compose(active, r.recipes, r.pick, r.resolve)
+	plan := zaptune.Compose(active, r.recipes, r.pick, r.resolve, "")
 
 	if !plan.Covered {
 		// Nothing to compose, or recipes don't cover every active service -> keep the
