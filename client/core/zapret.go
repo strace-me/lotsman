@@ -26,6 +26,7 @@ type zapretExec struct {
 	clash   *dataplane.ClashClient
 	engine  *nfqws.Engine
 	recipes []strategycat.Recipe
+	pick    zaptune.Picker            // ranks candidate recipes (KB-learned, catalog order as tiebreak)
 	active  func() []registry.Service // services CURRENTLY on a zapret rung
 	resolve zaptune.Resolver
 	log     *slog.Logger
@@ -46,7 +47,7 @@ func (z *zapretExec) Enable(ctx context.Context, service, _ string) error {
 	if len(active) == 0 {
 		return nil
 	}
-	plan := zaptune.Compose(active, z.recipes, zaptune.FirstPicker, z.resolve)
+	plan := zaptune.Compose(active, z.recipes, z.pick, z.resolve)
 	if !plan.Covered {
 		// Composing a PARTIAL strategy is worse than composing none: a service whose
 		// rule_set domains could not be resolved would be desynced for only its
