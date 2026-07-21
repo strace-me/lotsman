@@ -88,8 +88,15 @@ func NewMultiProberProxy(specs map[string]ServiceProbe, proxyAddr string) *Multi
 	}
 	m.dialer = &socks5Dialer{proxy: proxyAddr, timeout: m.timeout}
 	m.http.Client = &http.Client{
-		Timeout:   5 * time.Second,
-		Transport: &http.Transport{DialContext: m.dialer.DialContext},
+		Timeout: 5 * time.Second,
+		// DisableKeepAlives is REQUIRED, not a tuning knob: sing-box routes per
+		// CONNECTION, so a pooled connection keeps the outbound it was opened with.
+		// Reusing one across a selector flip makes the probe report the PREVIOUS
+		// path — observed live as a dead VPN node reporting healthy 26ms replies
+		// forever after the brain had escalated away from it, which then triggered a
+		// false silent-recovery back onto the dead node. A health probe must open a
+		// fresh connection so it measures the route that is in force right now.
+		Transport: &http.Transport{DialContext: m.dialer.DialContext, DisableKeepAlives: true},
 	}
 	return m
 }
