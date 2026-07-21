@@ -1,0 +1,182 @@
+// Package nfqws runs the zapret nfqws desync engine on a Linux desktop: it
+// installs the NFQUEUE nft rules, launches nfqws as a managed child process, and
+// tears both down on stop.
+//
+// The router does the same job through a generated shell launcher + an "active"
+// symlink + procd (pkg/zapret, pkg/executor.NewZapret). A desktop client owns the
+// process directly instead, which also lets it pass the composed strategy as an
+// argv SLICE rather than a /bin/sh command line — removing the shell-injection
+// surface the script path has to defend against when it inlines rule_set-derived
+// domains.
+//
+// The nft ruleset itself is NOT reinvented here: it is rendered by
+// zapret.GenerateNft, the same function the router's init script uses, so both
+// deployments queue identical traffic to identical queue numbers.
+package nfqws
+
+import (
+	"context"
+	"fmt"
+	"log/slog"
+	"os"
+	"os/exec"
+	"runtime"
+	"slices"
+	"strings"
+	"sync"
+
+	"github.com/strace-me/lotsman/pkg/zapret"
+)
+
+// Engine owns one nfqws instance and its nft table.
+type Engine struct {
+	bin     string
+	inst    zapret.Instance
+	nftOpts zapret.NftOptions
+	log     *slog.Logger
+
+	mu       sync.Mutex
+	cmd      *exec.Cmd
+	lastArgs []string
+	armed    bool // nft table installed
+}
+
+// New returns an Engine for one nfqws instance. bin "" resolves nfqws on PATH.
+func New(bin string, inst zapret.Instance, nftOpts zapret.NftOptions, log *slog.Logger) *Engine {
+	if bin == "" {
+		bin = "nfqws"
+	}
+	return &Engine{bin: bin, inst: inst, nftOpts: nftOpts, log: log}
+}
+
+// Apply installs the nft rules (idempotent) and (re)starts nfqws with args — the
+// argv produced by nfqwsgen.Compose. Re-applying the SAME args is a no-op: a
+// restart drops the desync mid-flow, so it must only happen on a real change.
+func (e *Engine) Apply(ctx context.Context, args []string) error {
+	if runtime.GOOS != "linux" {
+		return fmt.Errorf("nfqws: NFQUEUE desync requires Linux (running on %s)", runtime.GOOS)
+	}
+	if len(args) == 0 {
+		return fmt.Errorf("nfqws: empty strategy (nothing to desync)")
+	}
+	e.mu.Lock()
+	defer e.mu.Unlock()
+
+	if e.cmd != nil && slices.Equal(e.lastArgs, args) {
+		return nil // already running this exact strategy
+	}
+	if err := e.installNftLocked(ctx); err != nil {
+		return err
+	}
+	e.stopProcessLocked()
+
+	full := append([]string{fmt.Sprintf("--qnum=%d", e.inst.QNum)}, args...)
+	cmd := exec.Command(e.bin, full...)
+	cmd.Stdout, cmd.Stderr = os.Stdout, os.Stderr
+	if err := cmd.Start(); err != nil {
+		return fmt.Errorf("nfqws: start %s: %w", e.bin, err)
+	}
+	e.cmd = cmd
+	e.lastArgs = slices.Clone(args)
+	go func() {
+		err := cmd.Wait()
+		e.mu.Lock()
+		if e.cmd == cmd {
+			e.cmd = nil
+			e.lastArgs = nil
+		}
+		e.mu.Unlock()
+		if err != nil {
+			e.log.Warn("nfqws exited", "err", err)
+		}
+	}()
+	e.log.Info("nfqws applied", "qnum", e.inst.QNum, "blocks", strings.Count(strings.Join(args, " "), "--new"))
+	return nil
+}
+
+// Stop kills nfqws and removes the nft table, leaving the host as it was found.
+func (e *Engine) Stop(ctx context.Context) error {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	e.stopProcessLocked()
+	if !e.armed {
+		return nil
+	}
+	// Best-effort: a missing table is not an error, but a LEFT-BEHIND table would
+	// silently keep queueing packets to a queue nobody reads, which black-holes
+	// traffic. Report the failure loudly.
+	if err := run(ctx, "nft", "delete", "table", e.nftOpts.Table); err != nil {
+		e.log.Error("nfqws: could not remove nft table — traffic may still be queued", "table", e.nftOpts.Table, "err", err)
+		return fmt.Errorf("nfqws: delete nft table: %w", err)
+	}
+	e.armed = false
+	return nil
+}
+
+// installNftLocked (re)installs this instance's nft table. Caller holds e.mu.
+func (e *Engine) installNftLocked(ctx context.Context) error {
+	if e.armed {
+		return nil
+	}
+	rules := zapret.GenerateNft([]zapret.Instance{e.inst}, e.nftOpts)
+	// Drop a stale table from a previous run first; absence is fine.
+	_ = run(ctx, "nft", "delete", "table", e.nftOpts.Table)
+	cmd := exec.CommandContext(ctx, "nft", "-f", "-")
+	cmd.Stdin = strings.NewReader(rules)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		return fmt.Errorf("nfqws: install nft rules: %w: %s", err, out)
+	}
+	e.armed = true
+	e.log.Info("nfqws nft rules installed", "table", e.nftOpts.Table, "wan", e.nftOpts.WAN, "qnum", e.inst.QNum)
+	return nil
+}
+
+// stopProcessLocked kills the child if running. Caller holds e.mu.
+func (e *Engine) stopProcessLocked() {
+	if e.cmd != nil && e.cmd.Process != nil {
+		_ = e.cmd.Process.Kill()
+		e.cmd = nil
+		e.lastArgs = nil
+	}
+}
+
+func run(ctx context.Context, name string, args ...string) error {
+	if out, err := exec.CommandContext(ctx, name, args...).CombinedOutput(); err != nil {
+		return fmt.Errorf("%s %s: %w: %s", name, strings.Join(args, " "), err, strings.TrimSpace(string(out)))
+	}
+	return nil
+}
+
+// DetectWAN returns the interface carrying the default route — the egress the
+// nft rules must match. A laptop changes it on every roam, unlike the router's
+// fixed eth0, so it is detected rather than configured.
+func DetectWAN(ctx context.Context) (string, error) {
+	out, err := exec.CommandContext(ctx, "ip", "route", "show", "default").Output()
+	if err != nil {
+		return "", fmt.Errorf("nfqws: detect WAN: %w", err)
+	}
+	if dev := ParseDefaultRouteIface(string(out)); dev != "" {
+		return dev, nil
+	}
+	return "", fmt.Errorf("nfqws: no default route found")
+}
+
+// ParseDefaultRouteIface pulls the interface out of `ip route show default`
+// output. Split out from the exec call so it is testable off-Linux. Only DEFAULT
+// routes are considered: taking "dev" from any line would happily return the
+// interface of a plain subnet route, and we would then install the NFQUEUE rules
+// on the wrong egress — silently desyncing the wrong traffic, or none.
+func ParseDefaultRouteIface(out string) string {
+	for line := range strings.SplitSeq(strings.TrimSpace(out), "\n") {
+		fields := strings.Fields(line)
+		if len(fields) == 0 || fields[0] != "default" {
+			continue
+		}
+		for i, f := range fields {
+			if f == "dev" && i+1 < len(fields) {
+				return fields[i+1]
+			}
+		}
+	}
+	return ""
+}
