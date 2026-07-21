@@ -62,6 +62,16 @@ type Options struct {
 	SingboxBin string // sing-box binary, used to decompile rule-sets into domains ("" = "sing-box")
 	QNum       int    // NFQUEUE queue number (0 = 200, matching the router)
 	WAN        string // egress interface for the nft rules ("" = autodetect the default route)
+
+	// DesyncExclude are extra destinations nfqws must never touch, on top of this
+	// client's own nodes — the servers of any OTHER tunnel sharing this host.
+	// They cannot be discovered automatically (see nfqws.ForeignTunnels), so an
+	// operator running a second VPN has to name them.
+	DesyncExclude []string
+	// DesyncForce arms the desync even though another tunnel is present. Only
+	// meaningful once its endpoints are in DesyncExclude, or its traffic does not
+	// cross the queued ports.
+	DesyncForce bool
 }
 
 // Core is the single-device Lotsman client control plane. It reuses the daemon's
@@ -161,6 +171,7 @@ func (c *Core) Start(ctx context.Context) error {
 	if z := c.newZapretExec(ctx); z != nil {
 		execs = append(execs, z)
 	}
+	c.dropUnsupportedRungs(execs)
 	c.brain = brain.New(c.bus, c.reg, c.kb, brain.DefaultConfig(), audit.Nop{}, c.log)
 	// Re-converge selectors every interval so a box restart (which resets them)
 	// heals without waiting for a state transition. Idempotent, single writer.
@@ -396,6 +407,20 @@ func (c *Core) newZapretExec(ctx context.Context) executor.StrategyExecutor {
 		}
 		wan = detected
 	}
+	// A foreign tunnel's packets are indistinguishable from ordinary traffic here,
+	// so arming the desync would silently mangle it. Refuse the RUNG rather than
+	// the client: the brain simply escalates to VPN instead.
+	if foreign := nfqws.ForeignTunnels(); len(foreign) > 0 && !c.opts.DesyncForce {
+		if len(c.opts.DesyncExclude) == 0 {
+			c.log.Warn("desync rung DISABLED: another tunnel is on this host and nfqws would mangle it",
+				"interfaces", foreign,
+				"fix", "list that tunnel's server IPs in -desync-exclude, or pass -desync-force if its traffic does not cross the queued ports")
+			return nil
+		}
+		c.log.Info("desync rung armed alongside a foreign tunnel",
+			"interfaces", foreign, "excluded", c.opts.DesyncExclude)
+	}
+
 	qnum := c.opts.QNum
 	if qnum == 0 {
 		qnum = defaultQNum
@@ -406,10 +431,13 @@ func (c *Core) newZapretExec(ctx context.Context) executor.StrategyExecutor {
 		Capture:   zapret.Capture{TCP: []string{"80", "443", "2053", "2083", "2087", "2096", "8443"}, UDP: []string{"443"}},
 		Connbytes: defaultConnbytes,
 	}
+	// Never desync a tunnel: ours (derived from the live node set) or a foreign
+	// one the operator named.
+	excluded := append(append([]string{}, c.tunnelIPs...), c.opts.DesyncExclude...)
 	c.zap = nfqws.New(c.opts.NfqwsBin, inst, zapret.NftOptions{
-		Table: "inet lotsman", WAN: wan, VPNServers: c.tunnelIPs,
+		Table: "inet lotsman", WAN: wan, VPNServers: excluded,
 	}, c.log)
-	c.log.Info("desync rung enabled", "engine", "nfqws", "wan", wan, "qnum", qnum, "excluded_tunnels", len(c.tunnelIPs))
+	c.log.Info("desync rung enabled", "engine", "nfqws", "wan", wan, "qnum", qnum, "excluded_tunnels", len(excluded))
 
 	return &zapretExec{
 		clash:   c.clash,
@@ -424,6 +452,48 @@ func (c *Core) newZapretExec(ctx context.Context) executor.StrategyExecutor {
 		active:  c.zapretServices,
 		resolve: rulesets.NewResolver(c.opts.SingboxBin, c.opts.RuleSetDir, c.log).Resolve,
 		log:     c.log,
+	}
+}
+
+// dropUnsupportedRungs rewrites the chains so no rung names a class this host
+// cannot execute. Without it the brain keeps proposing, say, a zapret rung where
+// the desync is unavailable, the applier answers "no executor for class" on every
+// tick, and the service sits wedged on a rung that can never be applied.
+// Positions are renumbered so the surviving rungs stay contiguous.
+func (c *Core) dropUnsupportedRungs(execs []executor.StrategyExecutor) {
+	have := make(map[string]bool, len(execs))
+	for _, e := range execs {
+		have[e.Class()] = true
+	}
+	for name, svc := range c.reg.Services {
+		kept := make([]registry.ChainStep, 0, len(svc.Chain))
+		var dropped []string
+		for _, step := range svc.Chain {
+			if have[step.StrategyClass] {
+				step.Position = len(kept)
+				kept = append(kept, step)
+				continue
+			}
+			dropped = append(dropped, step.StrategyClass)
+		}
+		if len(dropped) == 0 {
+			continue
+		}
+		if len(kept) == 0 {
+			// Nothing executable is left. Fall back to plain direct so traffic still
+			// flows unprotected, rather than leaving a chain the brain can never apply.
+			kept = []registry.ChainStep{{
+				Position: 0, State: registry.StateLocked,
+				StrategyClass: strategy.ClassDirect, StrategyID: "direct",
+			}}
+			c.log.Warn("service has no executable rung on this host — falling back to direct",
+				"service", name, "dropped", dropped)
+		} else {
+			c.log.Info("dropped chain rungs with no executor on this host",
+				"service", name, "dropped", dropped)
+		}
+		svc.Chain = kept
+		c.reg.Services[name] = svc
 	}
 }
 
