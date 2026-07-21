@@ -405,6 +405,12 @@ func (c *Core) newZapretExec(ctx context.Context) executor.StrategyExecutor {
 		clash:   c.clash,
 		engine:  c.zap,
 		recipes: append(strategycat.Load(), zaptune.RecipesFromDefinitions(c.conf.Strategies)...),
+		// Rank recipes by what has actually worked for this service. A cold KB scores
+		// every candidate at the prior, so this degrades to catalog order — the same
+		// choice the seed picker makes — and sharpens only as outcomes accumulate.
+		pick: zaptune.KBPicker(func(service, recipeID string) float64 {
+			return c.kb.Stats(service, recipeID).Success
+		}),
 		active:  c.zapretServices,
 		resolve: rulesets.NewResolver(c.opts.SingboxBin, c.opts.RuleSetDir, c.log).Resolve,
 		log:     c.log,
