@@ -425,7 +425,11 @@ func main() {
 				}
 			}
 		}
-		prober = mp
+		// An INACTIVE vpn rung cannot be measured by routing a probe through the
+		// selector: the traffic follows whichever rung is live, so the inactive one
+		// is credited with the active one's health. Measure those with a Clash delay
+		// test of the pool instead, which leaves the selector alone.
+		prober = dataplane.NewRungProber(mp, clash, reg, "", 0)
 		directProber = dp
 		if *probeProxy != "" {
 			log.Info("probing through sing-box socks inbound", "proxy", *probeProxy)
