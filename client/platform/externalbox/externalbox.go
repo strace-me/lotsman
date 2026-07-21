@@ -77,6 +77,15 @@ func (b *Box) Reload(_ context.Context, cfg []byte) error {
 	return b.spawnLocked()
 }
 
+// Restart re-spawns sing-box against the config already on disk, leaving the
+// file untouched — the caller placed it there deliberately.
+func (b *Box) Restart(_ context.Context) error {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.stopLocked()
+	return b.spawnLocked()
+}
+
 // Stop kills the managed sing-box.
 func (b *Box) Stop(_ context.Context) error {
 	b.mu.Lock()
