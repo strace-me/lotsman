@@ -17,6 +17,7 @@ package nfqws
 import (
 	"context"
 	"fmt"
+	"io"
 	"log/slog"
 	"net"
 	"os"
@@ -25,6 +26,7 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/strace-me/lotsman/pkg/zapret"
 )
@@ -73,14 +75,36 @@ func (e *Engine) Apply(ctx context.Context, args []string) error {
 
 	full := append([]string{fmt.Sprintf("--qnum=%d", e.inst.QNum)}, args...)
 	cmd := exec.Command(e.bin, full...)
-	cmd.Stdout, cmd.Stderr = os.Stdout, os.Stderr
+	// Tee the engine's own output: it is the only thing that explains a refusal
+	// (a missing payload, an unreadable hostlist after it drops privileges), and
+	// without it a failure is just "exit status 1".
+	var said tailBuffer
+	cmd.Stdout = io.MultiWriter(os.Stdout, &said)
+	cmd.Stderr = io.MultiWriter(os.Stderr, &said)
 	if err := cmd.Start(); err != nil {
 		return fmt.Errorf("nfqws: start %s: %w", e.bin, err)
 	}
+	// One Wait, shared: the liveness check and the reaper both read this channel.
+	// Calling cmd.Wait twice is a race, and nil-ing cmd.Process would break Kill.
+	done := make(chan error, 1)
+	go func() { done <- cmd.Wait() }()
+
+	// Confirm it is STILL alive a moment later. nfqws validates its inputs AFTER
+	// startup — notably that it can re-read the hostlist once it has dropped
+	// privileges — and exits if not. Reporting success here would be worse than
+	// cosmetic: the caller's canary would judge a strategy that never ran, record a
+	// failure against a blameless recipe, and demote its way through the whole
+	// catalog on the strength of an engine that is not running.
+	select {
+	case err := <-done:
+		return fmt.Errorf("nfqws: engine exited immediately (%v): %s", err, said.String())
+	case <-time.After(400 * time.Millisecond):
+	}
+
 	e.cmd = cmd
 	e.lastArgs = slices.Clone(args)
 	go func() {
-		err := cmd.Wait()
+		err := <-done
 		e.mu.Lock()
 		if e.cmd == cmd {
 			e.cmd = nil
@@ -91,7 +115,7 @@ func (e *Engine) Apply(ctx context.Context, args []string) error {
 			e.log.Warn("nfqws exited", "err", err)
 		}
 	}()
-	e.log.Info("nfqws applied", "qnum", e.inst.QNum, "blocks", strings.Count(strings.Join(args, " "), "--new"))
+	e.log.Info("nfqws applied", "qnum", e.inst.QNum, "blocks", strings.Count(strings.Join(args, " "), "--new")+1)
 	return nil
 }
 
@@ -139,6 +163,29 @@ func (e *Engine) stopProcessLocked() {
 		e.cmd = nil
 		e.lastArgs = nil
 	}
+}
+
+// tailBuffer keeps the last few KB of a stream — enough to carry the reason in
+// an error without letting a chatty engine grow unbounded.
+type tailBuffer struct {
+	mu  sync.Mutex
+	buf []byte
+}
+
+func (t *tailBuffer) Write(p []byte) (int, error) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	t.buf = append(t.buf, p...)
+	if len(t.buf) > 4096 {
+		t.buf = t.buf[len(t.buf)-4096:]
+	}
+	return len(p), nil
+}
+
+func (t *tailBuffer) String() string {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return strings.TrimSpace(string(t.buf))
 }
 
 func run(ctx context.Context, name string, args ...string) error {
