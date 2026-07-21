@@ -55,10 +55,36 @@ func PoolOptionsFrom(set *pools.Set) map[string]PoolOptions {
 // (matching the real R5S). A malformed SocksProbeListen is skipped, not fatal —
 // probing just falls back to direct.
 func inbounds(opts Options) []any {
-	in := []any{map[string]any{
-		"type": "tproxy", "tag": "tproxy-in",
-		"listen": "0.0.0.0", "listen_port": opts.TproxyPort,
-	}}
+	var in []any
+	if opts.Tun != nil {
+		// CLIENT ingress. Per the libbox spike, the tun fd is NEVER carried in the
+		// config — on Android libbox takes it via PlatformInterface.openTun; on
+		// desktop sing-box creates the tun itself (auto_route). So this describes the
+		// tun only, never a file_descriptor.
+		tun := map[string]any{"type": "tun", "tag": "tun-in", "auto_route": opts.Tun.AutoRoute}
+		if opts.Tun.InterfaceName != "" {
+			tun["interface_name"] = opts.Tun.InterfaceName
+		}
+		if opts.Tun.MTU != 0 {
+			tun["mtu"] = opts.Tun.MTU
+		}
+		if len(opts.Tun.Address) > 0 {
+			tun["address"] = opts.Tun.Address
+		}
+		if opts.Tun.Stack != "" {
+			tun["stack"] = opts.Tun.Stack
+		}
+		in = []any{tun}
+	} else if opts.TproxyPort != 0 {
+		in = []any{map[string]any{
+			"type": "tproxy", "tag": "tproxy-in",
+			"listen": "0.0.0.0", "listen_port": opts.TproxyPort,
+		}}
+	}
+	// Neither tun nor tproxy: PROXY MODE. The box only listens on the socks inbound
+	// below, so nothing is captured system-wide and no privileges are needed — apps
+	// opt in by pointing at the proxy. The router always sets TproxyPort, so its
+	// output is unchanged.
 	if opts.SocksProbeListen != "" {
 		if host, portStr, err := net.SplitHostPort(opts.SocksProbeListen); err == nil {
 			if port, err := strconv.Atoi(portStr); err == nil {
@@ -74,11 +100,14 @@ func inbounds(opts Options) []any {
 
 // Options grounds generation in the target deployment. Defaults match the R5S.
 type Options struct {
-	TproxyPort       int                    // tproxy inbound port
-	ClashAPIListen   string                 // experimental.clash_api external_controller
-	DefaultMark      int                    // route.default_mark (sing-box's own traffic mark)
-	RuleSetDir       string                 // base dir holding rule-set-{geosite,geoip}/*.srs
+	TproxyPort     int    // tproxy inbound port
+	ClashAPIListen string // experimental.clash_api external_controller
+	ClashAPISecret string // experimental.clash_api secret (Bearer token); "" = omit for a byte-identical config. Clients MUST set a per-install random secret; the router defaults empty.
+	DefaultMark    int    // route.default_mark (sing-box's own traffic mark)
+	RuleSetDir     string // base dir holding rule-set-{geosite,geoip}/*.srs
+
 	SocksProbeListen string                 // socks "probe-in" inbound host:port (empty = none); lets the box probe via the LAN path
+	Tun              *TunOptions            // CLIENT ingress: emit a `tun` inbound instead of tproxy (nil = tproxy, the router default). Never carries the tun fd.
 	PoolOpts         map[string]PoolOptions // per-pool url-test tuning (interval/idle_timeout); nil = defaults
 	UTLSFingerprint  string                 // default tls.utls fingerprint for TCP TLS outbounds lacking one (e.g. "chrome"); "" = off
 	UTLSPool         []string               // diversity-with-consistency: when set, each node draws a fingerprint from this vetted pool deterministically by node ID (consistent per node, diverse across the fleet) instead of all sharing UTLSFingerprint. Avoids "the whole fleet is one fingerprint → that fingerprint becomes the tool signature" without per-connection flipping (which uTLS warns is itself suspicious). Empty = use UTLSFingerprint for all.
@@ -155,6 +184,21 @@ type FakeIPOptions struct {
 	Inet4Range string // default 198.18.0.0/15
 	Inet6Range string // default fc00::/18
 	Resolver   string // real upstream for non-fake queries: "https://1.1.1.1/dns-query" or "192.168.1.1:5353" (udp)
+}
+
+// TunOptions makes the generator emit a `tun` inbound for a CLIENT (desktop or
+// mobile) instead of the router's tproxy inbound. Per the libbox spike, the tun
+// file descriptor is NEVER carried in this config: on Android libbox takes it via
+// the PlatformInterface.openTun callback, and on desktop sing-box creates the tun
+// itself (auto_route). So this only describes the tun, never the fd. Field names
+// track sing-box's tun inbound and must be validated against the pinned 1.14
+// schema before the client ships.
+type TunOptions struct {
+	InterfaceName string   // "" = sing-box default (tunN)
+	MTU           int      // 0 = sing-box default
+	Address       []string // tun addresses in CIDR form, e.g. ["172.19.0.1/30"]. Verified against sing-box 1.13.14: the legacy inet4_address/inet6_address fields were deprecated in 1.10.0 and REMOVED in 1.12.0 — emitting them is fatal.
+	Stack         string   // system | gvisor | mixed; "" = sing-box default
+	AutoRoute     bool     // sing-box installs the routes that capture traffic (desktop)
 }
 
 // DefaultOptions returns the R5S-grounded defaults (see home-network-context).
@@ -814,22 +858,36 @@ func Generate(services []registry.Service, devices []registry.Device, nodes []su
 	}
 	sort.Strings(ruleSetTags)
 
+	// route.default_mark is a Linux-only fwmark for the box's own traffic (the
+	// router's tproxy setup needs it). sing-box REFUSES to start with it on
+	// darwin/windows, so a client leaves DefaultMark at 0 and the key is omitted.
+	// The router keeps 255, so its output is byte-identical.
+	route := map[string]any{
+		"rule_set":              append(ruleSetDefs(ruleSetTags, opts.RuleSetDir), remLocalDefs(opts)...),
+		"rules":                 routeRules,
+		"final":                 "direct",
+		"auto_detect_interface": true,
+	}
+	if opts.DefaultMark != 0 {
+		route["default_mark"] = opts.DefaultMark
+	}
+
+	clashAPI := map[string]any{"external_controller": opts.ClashAPIListen}
+	if opts.ClashAPISecret != "" {
+		// Bearer secret gating the loopback control plane. Omitted when empty so the
+		// router config stays byte-identical; clients set a per-install random secret.
+		clashAPI["secret"] = opts.ClashAPISecret
+	}
 	cfg := map[string]any{
 		"log": map[string]any{"level": "info", "timestamp": true},
 		"experimental": map[string]any{
-			"clash_api": map[string]any{"external_controller": opts.ClashAPIListen},
+			"clash_api": clashAPI,
 		},
 		// Inbound-level sniff/domain_strategy are deprecated in 1.11+; sniffing
 		// is done by the route "sniff" action above.
 		"inbounds":  inbounds(opts),
 		"outbounds": outbounds,
-		"route": map[string]any{
-			"rule_set":              append(ruleSetDefs(ruleSetTags, opts.RuleSetDir), remLocalDefs(opts)...),
-			"rules":                 routeRules,
-			"final":                 "direct",
-			"auto_detect_interface": true,
-			"default_mark":          opts.DefaultMark,
-		},
+		"route":     route,
 	}
 
 	// WireGuard endpoints (1.11+ form). Tags here are referenced like outbounds.
