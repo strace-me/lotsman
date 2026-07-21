@@ -27,7 +27,7 @@ func TestComposeCoversAllServices(t *testing.T) {
 		svcWithDomains("discord", "voice", "discord.media", "dis.gd"),
 		svcWithDomains("gaming-epic", "gaming", "epicgames.com"),
 	}
-	p := Compose(services, cat, FirstPicker, nil)
+	p := Compose(services, cat, FirstPicker, nil, "")
 	if !p.Covered {
 		t.Fatalf("expected covered, uncovered=%v", p.Uncovered)
 	}
@@ -59,7 +59,7 @@ func TestComposeUncoveredKeepsExisting(t *testing.T) {
 		svcWithDomains("discord", "voice", "discord.media"),
 		svcWithDomains("gaming-epic", "gaming", "epicgames.com"), // general_tls/games — none in cat
 	}
-	p := Compose(services, cat, FirstPicker, nil)
+	p := Compose(services, cat, FirstPicker, nil, "")
 	if p.Covered {
 		t.Errorf("should NOT be covered when a service has no recipe: %v", p)
 	}
@@ -77,7 +77,7 @@ func TestComposeSkipsUnfillablePlaceholders(t *testing.T) {
 	cat := []strategycat.Recipe{
 		recipe("ipset-1", strategycat.ClassGeneralTLS, "--ipset={{IPSET}}", "--hostlist-domains={{DOMAINS}}", "--dpi-desync=fake"),
 	}
-	p := Compose([]registry.Service{svcWithDomains("dev", "general", "github.com")}, cat, FirstPicker, nil)
+	p := Compose([]registry.Service{svcWithDomains("dev", "general", "github.com")}, cat, FirstPicker, nil, "")
 	if p.Covered {
 		t.Error("recipe with {{IPSET}} must not be usable in 10b")
 	}
@@ -93,7 +93,7 @@ func TestComposeRejectsGlobalRecipeWithoutDomains(t *testing.T) {
 	if recipeRenderable(global) {
 		t.Fatal("a recipe without {{DOMAINS}} must not be usable (would be a global, unscoped block)")
 	}
-	p := Compose([]registry.Service{gaming}, []strategycat.Recipe{global}, FirstPicker, nil)
+	p := Compose([]registry.Service{gaming}, []strategycat.Recipe{global}, FirstPicker, nil, "")
 	if p.Covered {
 		t.Errorf("gaming with only a global recipe must be uncovered, got %v", p)
 	}
@@ -113,7 +113,7 @@ func TestComposeResolvesRuleSetDomains(t *testing.T) {
 	}
 
 	// With the resolver: covered, and the hostlist carries inline + resolved domains.
-	p := Compose([]registry.Service{discord}, cat, FirstPicker, resolve)
+	p := Compose([]registry.Service{discord}, cat, FirstPicker, resolve, "")
 	if !p.Covered {
 		t.Fatalf("discord should be composable with a resolver, uncovered=%v", p.Uncovered)
 	}
@@ -126,12 +126,12 @@ func TestComposeResolvesRuleSetDomains(t *testing.T) {
 
 	// Without a resolver: a rule_set service is NOT coherently composable -> uncovered
 	// -> caller keeps the existing config (no silent gateway regression).
-	if p2 := Compose([]registry.Service{discord}, cat, FirstPicker, nil); p2.Covered {
+	if p2 := Compose([]registry.Service{discord}, cat, FirstPicker, nil, ""); p2.Covered {
 		t.Error("rule_set service must be uncovered without a resolver (coherence safety)")
 	}
 	// Resolver that fails the tag -> also uncovered.
 	failResolve := func(string) ([]string, bool) { return nil, false }
-	if p3 := Compose([]registry.Service{discord}, cat, FirstPicker, failResolve); p3.Covered {
+	if p3 := Compose([]registry.Service{discord}, cat, FirstPicker, failResolve, ""); p3.Covered {
 		t.Error("unresolved rule_set must leave the service uncovered")
 	}
 }
@@ -141,7 +141,7 @@ func TestComposeServiceWithoutDomainsUncovered(t *testing.T) {
 	// rule_set-only service (no inline domains) — nfqws can't read .srs, so it is
 	// not domain-renderable -> uncovered.
 	svc := registry.Service{Name: "web", Profile: "general", RuleSets: []string{"geosite-ru-blocked"}}
-	p := Compose([]registry.Service{svc}, cat, FirstPicker, nil)
+	p := Compose([]registry.Service{svc}, cat, FirstPicker, nil, "")
 	if p.Covered {
 		t.Error("service with no inline domains must be uncovered (nfqws can't read rule_sets)")
 	}
@@ -210,7 +210,7 @@ func TestRecipesFromDefinitions(t *testing.T) {
 }
 
 func TestComposeEmptyServicesNotCovered(t *testing.T) {
-	p := Compose(nil, []strategycat.Recipe{recipe("tls-1", strategycat.ClassGeneralTLS, "--hostlist-domains={{DOMAINS}}")}, FirstPicker, nil)
+	p := Compose(nil, []strategycat.Recipe{recipe("tls-1", strategycat.ClassGeneralTLS, "--hostlist-domains={{DOMAINS}}")}, FirstPicker, nil, "")
 	if p.Covered || p.Args != nil {
 		t.Errorf("no zapret-active services -> not covered, got %v", p)
 	}
@@ -224,7 +224,7 @@ func TestComposeThreadsExcludeDomains(t *testing.T) {
 	}
 	svc := svcWithDomains("gaming-epic", "gaming", "fortnite.com")
 	svc.ExcludeDomains = []string{"epicgames-download1.akamaized.net", "download.eac-cdn.com"}
-	p := Compose([]registry.Service{svc}, cat, FirstPicker, nil)
+	p := Compose([]registry.Service{svc}, cat, FirstPicker, nil, "")
 	if !p.Covered {
 		t.Fatalf("expected covered, uncovered=%v", p.Uncovered)
 	}

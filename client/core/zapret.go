@@ -2,7 +2,13 @@ package core
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
+	"os"
+	"path/filepath"
+	"strings"
+
+	"github.com/strace-me/lotsman/pkg/aggregate"
 
 	"github.com/strace-me/lotsman/client/platform/nfqws"
 	"github.com/strace-me/lotsman/pkg/dataplane"
@@ -23,13 +29,14 @@ import (
 // service ENTERING a rung — never leaving it. Composing from remembered Enable
 // calls would therefore keep desyncing services that moved to VPN long ago.
 type zapretExec struct {
-	clash   *dataplane.ClashClient
-	engine  *nfqws.Engine
-	recipes []strategycat.Recipe
-	pick    zaptune.Picker            // ranks candidate recipes (KB-learned, catalog order as tiebreak)
-	files   string                    // zapret payload dir, for resolving .bin references
-	active  func() []registry.Service // services CURRENTLY on a zapret rung
-	resolve zaptune.Resolver
+	clash     *dataplane.ClashClient
+	engine    *nfqws.Engine
+	recipes   []strategycat.Recipe
+	pick      zaptune.Picker            // ranks candidate recipes (KB-learned, catalog order as tiebreak)
+	files     string                    // zapret payload dir, for resolving .bin references
+	hostlists string                    // dir for per-service hostlist files ("" = inline the domains)
+	active    func() []registry.Service // services CURRENTLY on a zapret rung
+	resolve   zaptune.Resolver
 	// canary probes the service just after a strategy lands, and record folds that
 	// verdict into the KB. Without them the picker cannot learn which recipe beats
 	// the DPI in front of THIS machine.
@@ -53,7 +60,7 @@ func (z *zapretExec) Enable(ctx context.Context, service, _ string) error {
 	if len(active) == 0 {
 		return nil
 	}
-	plan := zaptune.Compose(active, z.recipes, z.pick, z.resolve)
+	plan := zaptune.Compose(active, z.recipes, z.pick, z.resolve, z.hostlists)
 	if !plan.Covered {
 		// Composing a PARTIAL strategy is worse than composing none: a service whose
 		// rule_set domains could not be resolved would be desynced for only its
@@ -62,10 +69,36 @@ func (z *zapretExec) Enable(ctx context.Context, service, _ string) error {
 			"uncovered", plan.Uncovered, "service", service)
 		return nil
 	}
+	// Write the hostlists BEFORE applying: nfqws must never be pointed at a file
+	// that is not there yet. WriteIfChanged is the router's own primitive — atomic,
+	// so nfqws cannot read a half-written list, and a no-op when the content is
+	// identical, which matters because nfqws reloads on MTIME. Rewriting an
+	// unchanged file would make it reload for nothing.
+	changed := 0
+	for path, domains := range plan.Hostlists {
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			return fmt.Errorf("zapret: hostlist dir: %w", err)
+		}
+		body := []byte(strings.Join(domains, "\n") + "\n")
+		wrote, err := aggregate.WriteIfChanged(path, body, 0o644)
+		if err != nil {
+			return fmt.Errorf("zapret: write hostlist %s: %w", path, err)
+		}
+		if wrote {
+			changed++
+		}
+	}
 	// nfqws resolves a bare payload name against ITS working directory, which is
 	// ours rather than the zapret installation's.
 	if err := z.engine.Apply(ctx, absolutizePayloads(plan.Args, z.files)); err != nil {
 		return err
+	}
+	if changed > 0 && z.hostlists != "" {
+		// The arguments did not have to change for this to take effect: nfqws picks
+		// the new membership up from the file itself, so the engine kept running and
+		// no live connection lost its desync.
+		z.log.Info("zapret: hostlist membership updated without restarting the engine",
+			"files", changed)
 	}
 	z.log.Info("zapret: desync applied", "services", len(active), "chosen", plan.Chosen)
 	// Judge asynchronously: Enable is on the applier's path and must not block it

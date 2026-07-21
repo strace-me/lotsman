@@ -16,6 +16,7 @@
 package zaptune
 
 import (
+	"path/filepath"
 	"strings"
 
 	"github.com/strace-me/lotsman/pkg/nfqwsgen"
@@ -117,6 +118,12 @@ type Plan struct {
 	Covered   bool              // every given service got a recipe AND at least one block exists
 	Uncovered []string          // services with no usable recipe (why Covered may be false)
 	Chosen    map[string]string // service -> chosen recipe ID (for logging / KB)
+	// Hostlists is path -> domains for the blocks scoped by FILE rather than by
+	// inlined args (set only when Compose was given a hostlist dir). The caller
+	// writes these; keeping the write out here leaves Compose pure. Writing them
+	// only when the content actually changes is what makes membership changes
+	// restart-free — nfqws re-reads a hostlist when its mtime moves.
+	Hostlists map[string][]string
 }
 
 // Compose builds the nfqws config for the services CURRENTLY on a zapret rung
@@ -127,8 +134,11 @@ type Plan struct {
 // the existing whole-config (e.g. Flowseal alt12). This is because a whole-script
 // strategy and composed recipe blocks are different nfqws-config forms that do
 // not mix per-service (see docs/DESIGN-strategy-generator.md). Pure — no I/O.
-func Compose(services []registry.Service, recipes []strategycat.Recipe, pick Picker, resolve Resolver) Plan {
-	plan := Plan{Chosen: map[string]string{}}
+// hostlistDir, when non-empty, scopes each block by a per-service hostlist FILE
+// under that directory instead of inlining its domains into the arguments. The
+// files themselves are returned in Plan.Hostlists for the caller to write.
+func Compose(services []registry.Service, recipes []strategycat.Recipe, pick Picker, resolve Resolver, hostlistDir string) Plan {
+	plan := Plan{Chosen: map[string]string{}, Hostlists: map[string][]string{}}
 	var blocks []nfqwsgen.Block
 	for _, svc := range services {
 		// Full domain set nfqws must cover (inline + resolved rule_sets). If a
@@ -157,7 +167,12 @@ func Compose(services []registry.Service, recipes []strategycat.Recipe, pick Pic
 			plan.Uncovered = append(plan.Uncovered, svc.Name)
 			continue
 		}
-		blocks = append(blocks, BlockFor(svc, r, domains, dedup(svc.ExcludeDomains)))
+		b := BlockFor(svc, r, domains, dedup(svc.ExcludeDomains))
+		if hostlistDir != "" {
+			b.HostlistPath = filepath.Join(hostlistDir, svc.Name+".txt")
+			plan.Hostlists[b.HostlistPath] = domains
+		}
+		blocks = append(blocks, b)
 		plan.Chosen[svc.Name] = r.ID
 	}
 	plan.Covered = len(plan.Uncovered) == 0 && len(blocks) > 0

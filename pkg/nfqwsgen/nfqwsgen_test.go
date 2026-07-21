@@ -153,3 +153,39 @@ func countArg(args []string, want string) int {
 	}
 	return n
 }
+
+func TestComposeCanPointAtAHostlistFile(t *testing.T) {
+	// With the domains in a file, argv stops changing when membership changes, so
+	// the engine need not restart — nfqws re-reads the file by mtime instead, and a
+	// restart would drop the desync on every live connection.
+	got := Compose([]Block{{
+		Service:      "youtube",
+		Domains:      []string{"youtube.com", "ytimg.com"},
+		HostlistPath: "/var/lib/lotsman/hostlists/youtube.txt",
+		Recipe: strategycat.Recipe{NfqwsArgs: []string{
+			"--filter-tcp=443", "--hostlist-domains={{DOMAINS}}", "--dpi-desync=multisplit",
+		}},
+	}})
+	joined := strings.Join(got, " ")
+	if !strings.Contains(joined, "--hostlist=/var/lib/lotsman/hostlists/youtube.txt") {
+		t.Errorf("expected a hostlist file reference, got %v", got)
+	}
+	if strings.Contains(joined, "--hostlist-domains=") {
+		t.Errorf("domains must not ALSO be inlined, or argv changes with membership: %v", got)
+	}
+	if strings.Contains(joined, "{{DOMAINS}}") {
+		t.Errorf("placeholder left unresolved: %v", got)
+	}
+}
+
+func TestComposeStillInlinesWithoutAPath(t *testing.T) {
+	// The router composes without a hostlist dir; that path must be untouched.
+	got := Compose([]Block{{
+		Service: "youtube",
+		Domains: []string{"youtube.com"},
+		Recipe:  strategycat.Recipe{NfqwsArgs: []string{"--hostlist-domains={{DOMAINS}}"}},
+	}})
+	if got[0] != "--hostlist-domains=youtube.com" {
+		t.Errorf("without a path the domains stay inline, got %v", got)
+	}
+}

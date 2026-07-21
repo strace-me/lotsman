@@ -28,6 +28,14 @@ type Block struct {
 	Service string
 	Domains []string // the service's plaintext domains (inlined into --hostlist-domains)
 	Recipe  strategycat.Recipe
+	// HostlistPath, when set, makes this block reference a hostlist FILE instead of
+	// inlining its domains into --hostlist-domains. That matters for more than
+	// tidiness: nfqws re-reads hostlist files whenever their mtime or size changes
+	// (and on SIGHUP), so membership can then change WITHOUT restarting the engine
+	// — and a restart drops the desync mid-flow on every live connection. With the
+	// domains inlined they are part of argv, so any change forces a restart.
+	// The caller owns writing the file (Compose stays pure).
+	HostlistPath string
 	// Exclude are domains to pass RAW within this block — added as
 	// --hostlist-exclude-domains so the desync is cancelled for them. nfqws checks
 	// the exclude list first, so a domain here is never fooled even if it also
@@ -54,6 +62,14 @@ func Compose(blocks []Block) []string {
 			continue
 		}
 		joined := strings.Join(doms, ",")
+		// A recipe always carries --hostlist-domains={{DOMAINS}}; pointing it at a
+		// file is a rewrite of that one argument.
+		rewrite := func(a string) string {
+			if b.HostlistPath != "" && strings.HasPrefix(a, "--hostlist-domains=") {
+				return "--hostlist=" + b.HostlistPath
+			}
+			return strings.ReplaceAll(a, domainsPlaceholder, joined)
+		}
 		// --new DELIMITS profiles; nfqws creates the first one itself. Leading with
 		// it therefore prepends an auto-created profile that has no filter — and a
 		// profile with an empty filter matches every packet. Since profiles are
@@ -64,7 +80,7 @@ func Compose(blocks []Block) []string {
 			out = append(out, "--new")
 		}
 		for _, a := range b.Recipe.NfqwsArgs {
-			out = append(out, strings.ReplaceAll(a, domainsPlaceholder, joined))
+			out = append(out, rewrite(a))
 		}
 		if excl := validDomains(b.Exclude); len(excl) > 0 {
 			out = append(out, "--hostlist-exclude-domains="+strings.Join(excl, ","))
