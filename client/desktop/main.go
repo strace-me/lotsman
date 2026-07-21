@@ -36,7 +36,7 @@ func main() {
 		wan           = flag.String("wan", "", "egress interface for the desync nft rules (empty = autodetect the default route)")
 		desyncExclude = flag.String("desync-exclude", "", "comma-separated IPs/CIDRs the desync must never touch (the servers of another VPN sharing this host)")
 		desyncForce   = flag.Bool("desync-force", false, "arm the desync even though another tunnel is present on this host")
-		hostlistDir   = flag.String("hostlist-dir", "", "dir for per-service nfqws hostlist files; empty inlines domains into argv, which forces an engine restart on every membership change")
+		hostlistDir   = flag.String("hostlist-dir", "", "dir for per-service nfqws hostlist files (default /var/lib/lotsman/hostlists as root). MUST stay readable after nfqws drops privileges, so a path under a 0700 home will not work. Empty and non-root inlines domains into argv instead, which costs an engine restart on every membership change")
 		proxyListen   = flag.String("proxy", "", "PROXY MODE: run sing-box on this socks address instead of capturing the system with a tun (no root needed, nothing intercepted)")
 		refreshEvery  = flag.Duration("refresh-interval", 5*time.Minute, "how often to re-fetch subscriptions and reconcile the config (0 = never)")
 		controlSock   = flag.String("control-socket", "", "unix socket for the local control API (empty = default under the runtime dir)")
@@ -55,6 +55,13 @@ func main() {
 		if cache, cerr := os.UserCacheDir(); cerr == nil {
 			*ruleSetDir = filepath.Join(cache, "lotsman", "rule-sets")
 		}
+	}
+
+	// nfqws re-reads its hostlist AFTER dropping privileges, and refuses to start
+	// when it cannot. A home directory is typically 0700, so the files have to live
+	// somewhere the unprivileged user can still traverse.
+	if *hostlistDir == "" && os.Geteuid() == 0 {
+		*hostlistDir = "/var/lib/lotsman/hostlists"
 	}
 
 	if *controlSock == "" {
