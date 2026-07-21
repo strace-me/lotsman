@@ -124,6 +124,7 @@ func New(conf *config.Config, box ProxyCore, opts Options, log *slog.Logger) *Co
 	// with it and saying nothing.
 	opts.HostlistDir = absDir(opts.HostlistDir)
 	opts.ZapretFiles = absDir(opts.ZapretFiles)
+	opts.SingboxConfig = absDir(opts.SingboxConfig)
 	return &Core{conf: conf, reg: conf.Registry, box: box, opts: opts, log: log}
 }
 
