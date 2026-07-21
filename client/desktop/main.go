@@ -36,6 +36,7 @@ func main() {
 		desyncExclude = flag.String("desync-exclude", "", "comma-separated IPs/CIDRs the desync must never touch (the servers of another VPN sharing this host)")
 		desyncForce   = flag.Bool("desync-force", false, "arm the desync even though another tunnel is present on this host")
 		proxyListen   = flag.String("proxy", "", "PROXY MODE: run sing-box on this socks address instead of capturing the system with a tun (no root needed, nothing intercepted)")
+		controlSock   = flag.String("control-socket", "", "unix socket for the local control API (empty = default under the runtime dir)")
 		printConfig   = flag.Bool("print-config", false, "generate the sing-box config from -config, print it, and exit (no sing-box needed)")
 	)
 	flag.Parse()
@@ -51,6 +52,14 @@ func main() {
 		if cache, cerr := os.UserCacheDir(); cerr == nil {
 			*ruleSetDir = filepath.Join(cache, "lotsman", "rule-sets")
 		}
+	}
+
+	if *controlSock == "" {
+		base := os.Getenv("XDG_RUNTIME_DIR")
+		if base == "" {
+			base = os.TempDir()
+		}
+		*controlSock = filepath.Join(base, "lotsman", "control.sock")
 	}
 
 	conf, err := config.Load(*configPath)
@@ -80,8 +89,10 @@ func main() {
 		}(),
 	}, log)
 
-	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
-	defer stop()
+	sigCtx, stopSignals := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer stopSignals()
+	ctx, cancel := context.WithCancel(sigCtx)
+	defer cancel()
 
 	if *printConfig {
 		js, err := c.RenderConfig(ctx)
@@ -97,6 +108,15 @@ func main() {
 	if err := c.Start(ctx); err != nil {
 		log.Error("client start failed", "err", err)
 		os.Exit(1)
+	}
+
+	// The control socket is what an unprivileged tray attaches to. A failure here
+	// must not take the tunnel down with it — the service is useful headless.
+	ctl := core.NewControlServer(c, cancel, log)
+	if err := ctl.Serve(*controlSock); err != nil {
+		log.Warn("control API unavailable (continuing headless)", "err", err)
+	} else {
+		defer ctl.Close()
 	}
 
 	// Report the active node per service each interval until signalled.
