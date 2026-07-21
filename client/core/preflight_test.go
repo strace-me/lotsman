@@ -5,6 +5,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/strace-me/lotsman/pkg/singbox"
 )
 
 func TestPortFreeDetectsAnOccupiedAddress(t *testing.T) {
@@ -79,5 +81,37 @@ func TestAbsDirMakesPathsIndependentOfTheWorkingDirectory(t *testing.T) {
 	}
 	if got := absDir("/already/absolute"); got != "/already/absolute" {
 		t.Errorf("an absolute path must be left alone, got %q", got)
+	}
+}
+
+func TestDefaultTunKeepsLocalDiscoveryOffTheTunnel(t *testing.T) {
+	// Wiring, not generation: the generator honouring ExcludeRoutes means nothing
+	// if the client never sets them. Capturing multicast breaks LocalSend, mDNS,
+	// printer and cast discovery, and asymmetrically — this host still hears its
+	// neighbours while none of them hear it, which reads as a firewall fault.
+	tun := (&Core{}).tunOptions()
+	if tun == nil {
+		t.Fatal("a client with no explicit tun must still get a default")
+	}
+	want := map[string]bool{"224.0.0.0/4": false, "ff00::/8": false}
+	for _, e := range tun.ExcludeRoutes {
+		if _, ok := want[e]; ok {
+			want[e] = true
+		}
+	}
+	for cidr, present := range want {
+		if !present {
+			t.Errorf("%s must be excluded from auto_route, got %v", cidr, tun.ExcludeRoutes)
+		}
+	}
+}
+
+func TestExplicitTunIsRespected(t *testing.T) {
+	// An operator who supplies a tun owns it entirely; we must not silently graft
+	// our defaults onto their choice.
+	mine := &singbox.TunOptions{Address: []string{"10.9.0.1/30"}}
+	c := &Core{opts: Options{Tun: mine}}
+	if got := c.tunOptions(); got != mine {
+		t.Errorf("tunOptions() = %+v, want the caller's own", got)
 	}
 }

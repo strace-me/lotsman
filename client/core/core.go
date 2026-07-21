@@ -35,6 +35,15 @@ import (
 	"github.com/strace-me/lotsman/pkg/zaptune"
 )
 
+// defaultTunExcludes keep link-local discovery and the LAN out of the tunnel.
+// A VPN that swallows multicast silently breaks every neighbour-discovery
+// protocol on the machine, and the failure looks like anything but routing.
+var defaultTunExcludes = []string{
+	"224.0.0.0/4",        // all IPv4 multicast: mDNS, SSDP, LocalSend, Chromecast
+	"ff00::/8",           // the IPv6 equivalent
+	"255.255.255.255/32", // limited broadcast
+}
+
 const (
 	defaultQNum      = 200 // the router's nfqws queue number
 	defaultConnbytes = 12  // desync only the first N packets of a connection
@@ -381,7 +390,10 @@ func (c *Core) tunOptions() *singbox.TunOptions {
 	if c.opts.Tun != nil {
 		return c.opts.Tun
 	}
-	return &singbox.TunOptions{MTU: 9000, Address: []string{"172.19.0.1/30"}, Stack: "system", AutoRoute: true}
+	return &singbox.TunOptions{
+		MTU: 9000, Address: []string{"172.19.0.1/30"}, Stack: "system", AutoRoute: true,
+		ExcludeRoutes: defaultTunExcludes,
+	}
 }
 
 // ensureRuleSets provisions the .srs files this config's services reference. The
