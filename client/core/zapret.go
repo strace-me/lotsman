@@ -40,6 +40,10 @@ type zapretExec struct {
 	// canary probes the service just after a strategy lands, and record folds that
 	// verdict into the KB. Without them the picker cannot learn which recipe beats
 	// the DPI in front of THIS machine.
+	// life is the client's own lifetime. The verdict must not ride the applier's
+	// per-call context (cancelled the moment Enable returns) nor escape
+	// cancellation entirely — it has to die when the data plane does.
+	life   func() context.Context
 	canary func(ctx context.Context, service string) bool
 	record func(service, recipe string, ok bool)
 	log    *slog.Logger
@@ -103,7 +107,11 @@ func (z *zapretExec) Enable(ctx context.Context, service, _ string) error {
 	z.log.Info("zapret: desync applied", "services", len(active), "chosen", plan.Chosen)
 	// Judge asynchronously: Enable is on the applier's path and must not block it
 	// for the settle window.
-	go z.judge(context.WithoutCancel(ctx), service, plan.Chosen)
+	jctx := ctx
+	if z.life != nil {
+		jctx = z.life()
+	}
+	go z.judge(jctx, service, plan.Chosen)
 	return nil
 }
 

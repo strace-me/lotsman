@@ -13,6 +13,8 @@ import (
 	"os/exec"
 	"path/filepath"
 	"sync"
+	"syscall"
+	"time"
 
 	"github.com/strace-me/lotsman/client/core"
 )
@@ -142,9 +144,22 @@ func (b *Box) spawnLocked() error {
 }
 
 // stopLocked kills the child if running. Caller holds b.mu.
+// stopLocked ends the child. Caller holds b.mu.
+//
+// SIGTERM first: sing-box removes the auto_route policy rules and its own tun on
+// a graceful exit, and SIGKILL denies it that, leaving the host's routing altered
+// after we are gone. SIGKILL only as a backstop for a process that will not go.
 func (b *Box) stopLocked() {
 	if b.cmd != nil && b.cmd.Process != nil {
-		_ = b.cmd.Process.Kill()
+		done := make(chan struct{})
+		go func() { b.cmd.Process.Wait(); close(done) }()
+		_ = b.cmd.Process.Signal(syscall.SIGTERM)
+		select {
+		case <-done:
+		case <-time.After(5 * time.Second):
+			b.log.Warn("sing-box did not exit on SIGTERM, killing it (its routes may survive)")
+			_ = b.cmd.Process.Kill()
+		}
 		b.cmd = nil
 	}
 	os.Remove(b.pidFile)

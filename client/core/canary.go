@@ -38,6 +38,16 @@ func (z *zapretExec) judge(ctx context.Context, service string, chosen map[strin
 	case <-time.After(canaryDelay):
 	}
 
+	// The brain may have moved the service off the desync rung during the settle
+	// window — the third consecutive failure escalates on the very tick that spawned
+	// this judge. Probing then measures the tunnel it moved to and would file that
+	// as the RECIPE's success, promoting the strategy whose failures caused the
+	// escalation. Verify the rung still holds before forming any opinion.
+	if !z.stillOnRung(service) {
+		z.log.Info("desync canary: service left the rung during the settle window, no verdict",
+			"service", service, "recipe", recipe)
+		return
+	}
 	ok := z.canary(ctx, service)
 	z.record(service, recipe, ok)
 	if ok {
@@ -49,6 +59,19 @@ func (z *zapretExec) judge(ctx context.Context, service string, chosen map[strin
 	// next candidate.
 	z.log.Warn("desync canary: strategy did not restore the service, demoting it",
 		"service", service, "recipe", recipe)
+}
+
+// stillOnRung reports whether the service is STILL on a zapret rung.
+func (z *zapretExec) stillOnRung(service string) bool {
+	if z.active == nil {
+		return false
+	}
+	for _, svc := range z.active() {
+		if svc.Name == service {
+			return true
+		}
+	}
+	return false
 }
 
 // canaryProbe reports whether the service is reachable right now, probing the

@@ -109,13 +109,19 @@ type Core struct {
 	brain  *brain.Brain
 	secret string
 
-	prober    dataplane.Prober // shared with the autonomy loop, reused by the desync canary
-	zap       *nfqws.Engine    // local desync engine (nil = no desync rung on this platform)
-	tunnelIPs []string         // proxy server IPs the desync must never touch
+	prober dataplane.Prober // shared with the autonomy loop, reused by the desync canary
+	// foreignTunnels is sampled BEFORE our own tun exists. Sampling it later would
+	// always find our own interface and disable the desync rung in tun mode.
+	foreignTunnels []string
+	zap            *nfqws.Engine // local desync engine (nil = no desync rung on this platform)
+	tunnelIPs      []string      // proxy server IPs the desync must never touch
+	lastNodes      int           // nodes the last generate loaded; zero with subscriptions declared means no tunnel
 
-	mu     sync.Mutex
-	cancel context.CancelFunc
-	wg     sync.WaitGroup
+	mu         sync.Mutex
+	life       context.Context
+	lifeCancel context.CancelFunc
+	cancel     context.CancelFunc
+	wg         sync.WaitGroup
 }
 
 // New builds a client Core from a loaded config and a platform ProxyCore.
@@ -144,6 +150,17 @@ func (c *Core) Start(ctx context.Context) error {
 	if err := c.preflight(); err != nil {
 		return err
 	}
+	// One lifetime for everything this client spawns, so a background verdict
+	// cannot outlive the data plane it is judging.
+	c.mu.Lock()
+	c.life, c.lifeCancel = context.WithCancel(ctx)
+	c.mu.Unlock()
+
+	// Sample the host's tunnels while the only ones present belong to somebody
+	// else — after box.Start our own tun is up and would be mistaken for a foreign
+	// one, silently disabling the desync rung in exactly the mode that needs it.
+	c.foreignTunnels = nfqws.ForeignTunnels()
+
 	c.bus = events.NewBus()
 	c.kb = kb.New()
 
@@ -173,12 +190,32 @@ func (c *Core) Start(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("core: generate config: %w", err)
 	}
+	// Every selector falls back to "direct" when the fetch came back empty, so the
+	// client would start, report itself healthy and carry no traffic through any
+	// tunnel at all. A declared subscription that yields nothing is a failure, not
+	// a configuration.
+	if len(c.conf.Subscriptions) > 0 && c.lastNodes == 0 {
+		return fmt.Errorf("core: %d subscription(s) declared but not one node was loaded — "+
+			"refusing to start with no tunnel (check connectivity and the subscription URLs)",
+			len(c.conf.Subscriptions))
+	}
 	if err := c.box.Check(ctx, cfgJSON); err != nil {
 		return fmt.Errorf("core: config check: %w", err)
 	}
 	if err := c.box.Start(ctx, cfgJSON); err != nil {
 		return fmt.Errorf("core: start box: %w", err)
 	}
+	// From here on the box owns a tun with auto_route. Any failure that returns
+	// without stopping it leaves the host's routing hijacked by a process nothing
+	// supervises, and main exits without ever calling Stop.
+	started := false
+	defer func() {
+		if !started {
+			if err := c.box.Stop(context.WithoutCancel(ctx)); err != nil {
+				c.log.Warn("could not stop sing-box after a failed start", "err", err)
+			}
+		}
+	}()
 	// The box binds its control port a moment AFTER the process starts. Without
 	// this gate the brain's very first apply races the socket and fails, leaving
 	// the client inert until the next reassert tick.
@@ -243,8 +280,8 @@ func (c *Core) Start(ctx context.Context) error {
 	mc := metrics.New(c.brain.Snapshot, c.kb.Snapshot)
 	eng := probing.New(c.bus, rp, c.brain, c.reg, c.kb, mc, faillog.Nop{}, c.opts.Interval, c.log)
 
-	runCtx, cancel := context.WithCancel(ctx)
 	c.mu.Lock()
+	runCtx, cancel := c.life, c.lifeCancel
 	c.cancel = cancel
 	c.mu.Unlock()
 	runners := []func(context.Context){c.brain.Run, ap.Run, eng.Run, c.superviseBox}
@@ -260,6 +297,7 @@ func (c *Core) Start(ctx context.Context) error {
 			fn(runCtx)
 		}(run)
 	}
+	started = true
 	c.log.Info("lotsman client started", "services", len(c.reg.Services), "clash", c.opts.ClashListen)
 	return nil
 }
@@ -331,6 +369,10 @@ func (c *Core) RenderConfig(ctx context.Context) ([]byte, error) {
 // and a regenerated Clash secret would lock this client out of its own box.
 func (c *Core) singboxOptions() singbox.Options {
 	opts := singbox.DefaultOptions()
+	// The reconciler derives these from the pool set on every pass; leaving them
+	// unset here makes the startup config differ from the first reconciled one and
+	// restarts sing-box for a difference that is not real.
+	opts.PoolOpts = singbox.PoolOptionsFrom(c.conf.Pools)
 	opts.ClashAPIListen = c.opts.ClashListen
 	opts.ClashAPISecret = c.secret
 	// Router-only: a Linux fwmark for the box's own traffic. sing-box refuses to
@@ -368,6 +410,7 @@ func (c *Core) generate(ctx context.Context) ([]byte, error) {
 	}
 	memberships := c.conf.Pools.Memberships(nodes)
 	c.tunnelIPs = tunnelIPs(nodes, c.log)
+	c.lastNodes = len(nodes)
 
 	services := make([]registry.Service, 0, len(c.reg.Services))
 	for _, s := range c.reg.Services {
@@ -465,7 +508,7 @@ func (c *Core) newZapretExec(ctx context.Context) executor.StrategyExecutor {
 	// A foreign tunnel's packets are indistinguishable from ordinary traffic here,
 	// so arming the desync would silently mangle it. Refuse the RUNG rather than
 	// the client: the brain simply escalates to VPN instead.
-	if foreign := nfqws.ForeignTunnels(); len(foreign) > 0 && !c.opts.DesyncForce {
+	if foreign := c.foreignTunnels; len(foreign) > 0 && !c.opts.DesyncForce {
 		if len(c.opts.DesyncExclude) == 0 {
 			c.log.Warn("desync rung DISABLED: another tunnel is on this host and nfqws would mangle it",
 				"interfaces", foreign,
