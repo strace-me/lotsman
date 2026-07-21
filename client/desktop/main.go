@@ -31,6 +31,7 @@ func main() {
 		kbFile        = flag.String("kb-file", "", `KB persistence path ("" = in-memory)`)
 		ruleSetDir    = flag.String("ruleset-dir", "", "dir holding rule-set-{geosite,geoip}/*.srs (the client provisions these; empty = generator default)")
 		nfqwsBin      = flag.String("nfqws-bin", "nfqws", "nfqws binary for the local desync rung (Linux only)")
+		zapretFiles   = flag.String("zapret-files", "", "dir with zapret's fake payload .bin files (recipes naming a missing payload are skipped)")
 		qnum          = flag.Int("qnum", 200, "NFQUEUE queue number for nfqws")
 		wan           = flag.String("wan", "", "egress interface for the desync nft rules (empty = autodetect the default route)")
 		desyncExclude = flag.String("desync-exclude", "", "comma-separated IPs/CIDRs the desync must never touch (the servers of another VPN sharing this host)")
@@ -77,6 +78,7 @@ func main() {
 		ProbeProxy:    *probeProxy,
 		RuleSetDir:    *ruleSetDir,
 		NfqwsBin:      *nfqwsBin,
+		ZapretFiles:   *zapretFiles,
 		SingboxBin:    *singboxBin,
 		SingboxConfig: *singboxCfg,
 		RefreshEvery:  *refreshEvery,
