@@ -21,6 +21,7 @@ import (
 type Box struct {
 	bin        string
 	configPath string
+	pidFile    string
 	log        *slog.Logger
 
 	mu  sync.Mutex
@@ -35,7 +36,7 @@ func New(bin, configPath string, log *slog.Logger) *Box {
 	if bin == "" {
 		bin = "sing-box"
 	}
-	return &Box{bin: bin, configPath: configPath, log: log}
+	return &Box{bin: bin, configPath: configPath, pidFile: configPath + ".pid", log: log}
 }
 
 // Check validates cfg with `sing-box check -c` against a temp file.
@@ -57,6 +58,13 @@ func (b *Box) Start(_ context.Context, cfg []byte) error {
 	defer b.mu.Unlock()
 	if b.cmd != nil {
 		return nil
+	}
+	// A previous run killed with SIGKILL leaves its sing-box holding the ports we
+	// are about to claim.
+	if pid, err := ReclaimStale(b.pidFile, b.configPath); err != nil {
+		b.log.Warn("could not reclaim a previous sing-box", "err", err)
+	} else if pid != 0 {
+		b.log.Info("reclaimed a sing-box left by a previous run", "pid", pid)
 	}
 	if err := os.WriteFile(b.configPath, cfg, 0o600); err != nil {
 		return fmt.Errorf("externalbox: write config: %w", err)
@@ -110,6 +118,9 @@ func (b *Box) spawnLocked() error {
 		return fmt.Errorf("externalbox: sing-box run: %w", err)
 	}
 	b.cmd = cmd
+	if err := recordPid(b.pidFile, cmd.Process.Pid); err != nil {
+		b.log.Warn("could not record the sing-box pid (a crash will leave it running)", "err", err)
+	}
 	go func() {
 		err := cmd.Wait()
 		b.mu.Lock()
@@ -130,4 +141,5 @@ func (b *Box) stopLocked() {
 		_ = b.cmd.Process.Kill()
 		b.cmd = nil
 	}
+	os.Remove(b.pidFile)
 }

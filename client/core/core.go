@@ -27,6 +27,7 @@ import (
 	"github.com/strace-me/lotsman/pkg/probing"
 	"github.com/strace-me/lotsman/pkg/registry"
 	"github.com/strace-me/lotsman/pkg/singbox"
+	"github.com/strace-me/lotsman/pkg/state"
 	"github.com/strace-me/lotsman/pkg/strategy"
 	"github.com/strace-me/lotsman/pkg/strategycat"
 	"github.com/strace-me/lotsman/pkg/subscription"
@@ -64,6 +65,7 @@ type Options struct {
 	HostlistDir   string        // dir for per-service nfqws hostlist files ("" = inline domains into argv, which forces an engine restart on every membership change)
 	SingboxBin    string        // sing-box binary, used to decompile rule-sets into domains ("" = "sing-box")
 	SingboxConfig string        // path of the live sing-box config the reconciler swaps
+	StateFile     string        // persists each service's chain position across restarts ("" = start cold every time)
 	RefreshEvery  time.Duration // how often to re-fetch subscriptions and reconcile (0 = never)
 	QNum          int           // NFQUEUE queue number (0 = 200, matching the router)
 	WAN           string        // egress interface for the nft rules ("" = autodetect the default route)
@@ -189,6 +191,16 @@ func (c *Core) Start(ctx context.Context) error {
 	// Re-converge selectors every interval so a box restart (which resets them)
 	// heals without waiting for a state transition. Idempotent, single writer.
 	c.brain.SetReassert(c.opts.Interval)
+	// Persist which rung each service settled on. Without it every restart begins
+	// at the top of the chain and re-escalates through the failures that were
+	// already paid for once — the KB remembers which strategy works, but not that
+	// this service had already been moved off the rung that does not.
+	if c.opts.StateFile != "" {
+		store := state.NewFileStore(c.opts.StateFile)
+		c.brain.Restore(store.Load())
+		c.brain.SetPersist(func(pos map[string]int) { store.Save(pos) })
+		c.log.Info("chain positions persisted across restarts", "path", c.opts.StateFile)
+	}
 	ap := applier.New(c.bus, execs, c.log)
 
 	// Prober: test each service (through the tunnel when ProbeProxy is set), with
@@ -225,7 +237,7 @@ func (c *Core) Start(ctx context.Context) error {
 	c.mu.Lock()
 	c.cancel = cancel
 	c.mu.Unlock()
-	runners := []func(context.Context){c.brain.Run, ap.Run, eng.Run}
+	runners := []func(context.Context){c.brain.Run, ap.Run, eng.Run, c.superviseBox}
 	if c.opts.RefreshEvery > 0 && c.opts.SingboxConfig != "" {
 		rc := c.newReconciler()
 		runners = append(runners, func(rctx context.Context) { c.refreshLoop(rctx, rc, c.opts.RefreshEvery) })

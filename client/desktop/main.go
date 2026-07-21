@@ -28,6 +28,7 @@ func main() {
 		clashListen   = flag.String("clash", "127.0.0.1:9090", "loopback Clash-API host:port")
 		probeProxy    = flag.String("probe-proxy", "", `socks addr to probe through the tunnel ("" = probe direct)`)
 		interval      = flag.Duration("interval", 10*time.Second, "probe + reassert interval")
+		stateFile     = flag.String("state-file", "", `persist chain positions across restarts ("" = start cold)`)
 		kbFile        = flag.String("kb-file", "", `KB persistence path ("" = in-memory)`)
 		ruleSetDir    = flag.String("ruleset-dir", "", "dir holding rule-set-{geosite,geoip}/*.srs (the client provisions these; empty = generator default)")
 		nfqwsBin      = flag.String("nfqws-bin", "nfqws", "nfqws binary for the local desync rung (Linux only)")
@@ -83,6 +84,7 @@ func main() {
 		ClashListen:   *clashListen,
 		Interval:      *interval,
 		KBFile:        *kbFile,
+		StateFile:     *stateFile,
 		ProbeProxy:    *probeProxy,
 		RuleSetDir:    *ruleSetDir,
 		NfqwsBin:      *nfqwsBin,
