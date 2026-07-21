@@ -2,6 +2,7 @@ package core
 
 import (
 	"net"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -61,5 +62,22 @@ func TestAddrInUseIgnoresAnUnusedAddress(t *testing.T) {
 func TestAddrInUseToleratesGarbage(t *testing.T) {
 	if _, taken := addrInUse("not-a-cidr"); taken {
 		t.Error("an unparseable address must not be reported as in use")
+	}
+}
+
+func TestAbsDirMakesPathsIndependentOfTheWorkingDirectory(t *testing.T) {
+	// nfqws resolves relative paths against its own working directory. A relative
+	// hostlist path works when the operator runs the client by hand from the right
+	// folder and silently fails once systemd starts it elsewhere — the desync then
+	// loads nothing and reports nothing.
+	got := absDir("hostlists")
+	if !filepath.IsAbs(got) {
+		t.Errorf("absDir(%q) = %q, want an absolute path", "hostlists", got)
+	}
+	if absDir("") != "" {
+		t.Error("an empty path means 'unset' and must stay empty")
+	}
+	if got := absDir("/already/absolute"); got != "/already/absolute" {
+		t.Errorf("an absolute path must be left alone, got %q", got)
 	}
 }
