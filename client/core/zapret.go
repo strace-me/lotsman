@@ -30,7 +30,12 @@ type zapretExec struct {
 	files   string                    // zapret payload dir, for resolving .bin references
 	active  func() []registry.Service // services CURRENTLY on a zapret rung
 	resolve zaptune.Resolver
-	log     *slog.Logger
+	// canary probes the service just after a strategy lands, and record folds that
+	// verdict into the KB. Without them the picker cannot learn which recipe beats
+	// the DPI in front of THIS machine.
+	canary func(ctx context.Context, service string) bool
+	record func(service, recipe string, ok bool)
+	log    *slog.Logger
 }
 
 func (z *zapretExec) Class() string { return strategy.ClassZapret }
@@ -63,6 +68,9 @@ func (z *zapretExec) Enable(ctx context.Context, service, _ string) error {
 		return err
 	}
 	z.log.Info("zapret: desync applied", "services", len(active), "chosen", plan.Chosen)
+	// Judge asynchronously: Enable is on the applier's path and must not block it
+	// for the settle window.
+	go z.judge(context.WithoutCancel(ctx), service, plan.Chosen)
 	return nil
 }
 
