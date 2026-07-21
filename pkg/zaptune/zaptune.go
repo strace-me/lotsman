@@ -152,9 +152,13 @@ func Compose(services []registry.Service, recipes []strategycat.Recipe, pick Pic
 		}
 		// Candidates: target-class-narrowed AND domain-renderable (fills {{DOMAINS}};
 		// recipes needing {{IPSET}}/{{GAME_PORTS}}/… or with no {{DOMAINS}} are not usable).
+		// Only recipes the canary can actually falsify: one scoped to ports the
+		// service's probe never reaches would be applied blind and then blamed for a
+		// failure it could not have caused.
+		port := ProbePort(svc)
 		var cands []strategycat.Recipe
 		for _, r := range CandidateRecipes(svc, recipes) {
-			if recipeRenderable(r) {
+			if recipeRenderable(r) && recipeCoversPort(r, port) {
 				cands = append(cands, r)
 			}
 		}
