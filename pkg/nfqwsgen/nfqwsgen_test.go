@@ -19,15 +19,17 @@ func TestComposeScopesDomainsPerBlock(t *testing.T) {
 	}
 	got := Compose(blocks)
 	want := []string{
-		"--new", "--filter-tcp=443", "--hostlist-domains=discord.com,discord.media", "--dpi-desync=multisplit",
+		"--filter-tcp=443", "--hostlist-domains=discord.com,discord.media", "--dpi-desync=multisplit",
 		"--new", "--filter-tcp=443", "--hostlist-domains=battle.net", "--dpi-desync=fake",
 	}
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("Compose =\n  %v\nwant\n  %v", got, want)
 	}
-	// every block is --new-separated; one per service.
-	if n := strings.Count(strings.Join(got, " "), "--new"); n != 2 {
-		t.Errorf("got %d --new blocks, want 2", n)
+	// --new DELIMITS profiles rather than prefixing them: nfqws creates the first
+	// profile itself, so N blocks need N-1 delimiters. An extra leading one would
+	// prepend a filterless profile that matches everything and desyncs nothing.
+	if n := strings.Count(strings.Join(got, " "), "--new"); n != 1 {
+		t.Errorf("got %d delimiters for 2 blocks, want 1", n)
 	}
 }
 
@@ -38,7 +40,10 @@ func TestComposeSkipsEmpty(t *testing.T) {
 		{Service: "ok", Domains: []string{"y.com"}, Recipe: recipe("--hostlist-domains={{DOMAINS}}")}, // kept
 	}
 	got := Compose(blocks)
-	want := []string{"--new", "--hostlist-domains=y.com"}
+	// The kept block is the first one EMITTED even though two blocks preceded it,
+	// so it takes no delimiter — the counter has to follow what was emitted, not
+	// the input index.
+	want := []string{"--hostlist-domains=y.com"}
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("Compose = %v, want %v (only the well-formed block)", got, want)
 	}
@@ -112,4 +117,39 @@ func TestValidateCleanWhenDisjoint(t *testing.T) {
 	if c := Validate(blocks); len(c) != 0 {
 		t.Errorf("disjoint blocks should validate clean, got %+v", c)
 	}
+}
+
+func TestComposeDoesNotLeadWithNew(t *testing.T) {
+	// nfqws auto-creates the first profile, and a profile with an empty filter
+	// matches every packet. Leading with --new therefore inserts a do-nothing
+	// catch-all ahead of the real strategy; profiles being matched first-to-last
+	// until the first match, nothing is ever desynced. This was verified live —
+	// the strategy loaded cleanly, nfqws ran, and YouTube stayed blocked.
+	one := Compose([]Block{{
+		Service: "youtube",
+		Domains: []string{"youtube.com"},
+		Recipe:  strategycat.Recipe{NfqwsArgs: []string{"--filter-tcp=443", "--dpi-desync=multisplit"}},
+	}})
+	if len(one) == 0 || one[0] == "--new" {
+		t.Fatalf("the first profile must NOT be preceded by --new, got %v", one)
+	}
+
+	// A second block still needs the delimiter, or both would merge into one profile.
+	two := Compose([]Block{
+		{Service: "a", Domains: []string{"a.com"}, Recipe: strategycat.Recipe{NfqwsArgs: []string{"--dpi-desync=multisplit"}}},
+		{Service: "b", Domains: []string{"b.com"}, Recipe: strategycat.Recipe{NfqwsArgs: []string{"--dpi-desync=fake"}}},
+	})
+	if got := countArg(two, "--new"); got != 1 {
+		t.Errorf("two blocks need exactly one delimiter between them, got %d in %v", got, two)
+	}
+}
+
+func countArg(args []string, want string) int {
+	n := 0
+	for _, a := range args {
+		if a == want {
+			n++
+		}
+	}
+	return n
 }

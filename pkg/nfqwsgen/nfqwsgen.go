@@ -54,7 +54,15 @@ func Compose(blocks []Block) []string {
 			continue
 		}
 		joined := strings.Join(doms, ",")
-		out = append(out, "--new")
+		// --new DELIMITS profiles; nfqws creates the first one itself. Leading with
+		// it therefore prepends an auto-created profile that has no filter — and a
+		// profile with an empty filter matches every packet. Since profiles are
+		// matched first to last until the first match, that catch-all swallows all
+		// traffic and applies no desync, so every block behind it is dead. Verified
+		// live: the strategy loaded cleanly and changed nothing.
+		if len(out) > 0 {
+			out = append(out, "--new")
+		}
 		for _, a := range b.Recipe.NfqwsArgs {
 			out = append(out, strings.ReplaceAll(a, domainsPlaceholder, joined))
 		}

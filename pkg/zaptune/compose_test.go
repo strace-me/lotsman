@@ -31,9 +31,11 @@ func TestComposeCoversAllServices(t *testing.T) {
 	if !p.Covered {
 		t.Fatalf("expected covered, uncovered=%v", p.Uncovered)
 	}
-	// Two --new blocks, each with its service's domains.
-	if n := strings.Count(strings.Join(p.Args, " "), "--new"); n != 2 {
-		t.Errorf("want 2 --new blocks, got %d in %v", n, p.Args)
+	// Two profiles, each with its service's domains — which needs ONE delimiter,
+	// not two: nfqws creates the first profile itself, and a leading --new would
+	// prepend a filterless profile that matches everything and desyncs nothing.
+	if n := strings.Count(strings.Join(p.Args, " "), "--new"); n != 1 {
+		t.Errorf("want 1 delimiter between 2 profiles, got %d in %v", n, p.Args)
 	}
 	joined := strings.Join(p.Args, " ")
 	if !strings.Contains(joined, "discord.media,dis.gd") {
