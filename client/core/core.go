@@ -96,8 +96,9 @@ type Core struct {
 	brain  *brain.Brain
 	secret string
 
-	zap       *nfqws.Engine // local desync engine (nil = no desync rung on this platform)
-	tunnelIPs []string      // proxy server IPs the desync must never touch
+	prober    dataplane.Prober // shared with the autonomy loop, reused by the desync canary
+	zap       *nfqws.Engine    // local desync engine (nil = no desync rung on this platform)
+	tunnelIPs []string         // proxy server IPs the desync must never touch
 
 	mu     sync.Mutex
 	cancel context.CancelFunc
@@ -207,6 +208,7 @@ func (c *Core) Start(ctx context.Context) error {
 	// measured with a Clash delay test of the pool instead.
 	rp := dataplane.NewRungProber(mp, c.clash, c.reg, "", 0)
 
+	c.prober = rp
 	mc := metrics.New(c.brain.Snapshot, c.kb.Snapshot)
 	eng := probing.New(c.bus, rp, c.brain, c.reg, c.kb, mc, faillog.Nop{}, c.opts.Interval, c.log)
 
@@ -471,6 +473,8 @@ func (c *Core) newZapretExec(ctx context.Context) executor.StrategyExecutor {
 			return c.kb.Stats(service, recipeID).Success
 		}),
 		files:   c.opts.ZapretFiles,
+		canary:  c.canaryProbe,
+		record:  func(service, recipe string, ok bool) { c.kb.RecordOutcome(service, recipe, ok, 0) },
 		active:  c.zapretServices,
 		resolve: rulesets.NewResolver(c.opts.SingboxBin, c.opts.RuleSetDir, c.log).Resolve,
 		log:     c.log,
