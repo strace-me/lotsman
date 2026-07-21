@@ -150,7 +150,27 @@ coherence config dataplane domainscan registry singbox strategy subscription.
 pkg already does it (e.g. composition→zaptune/nfqwsgen, NAT-sensitive classify→bypasslearn, .srs→domains
 →rulesets, node rank→noderank), reuse it.
 
+### Client (`client/`, desktop)
+
+Single-device Lotsman. Composes the spine above unchanged — see [CLIENT.md](CLIENT.md)
+for how to run it and the operational facts. Desktop shape is a privileged service
+plus a thin unprivileged UI, since only the tun and the NFQUEUE rules need root.
+
+- `client/core` — spine composition (bus/kb/brain/applier/probing), client config
+  generation, preflight refusals, subscription reconcile, box supervisor, canary
+  verdicts into the KB, unix control socket.
+- `client/platform/externalbox` — `ProxyCore` over an external sing-box run as a
+  managed child; pid recorded so a SIGKILLed client's orphan is reclaimed.
+- `client/platform/nfqws` — zapret desync on Linux: nft NFQUEUE rules via
+  `zapret.GenerateNft` (same renderer the router's init script uses) plus nfqws as
+  a child taking argv, not a generated shell line.
+- `client/platform/rulesets` — provisions the `.srs` the config references from the
+  same upstream bundle the router's updater consumes, and decompiles them back to
+  domains so the desync covers what sing-box routes.
+- `client/desktop` — headless entrypoint.
+
 ## Other durable state
 
 - [docs/ARCHITECTURE.md](ARCHITECTURE.md) — prose architecture, state machine, routing model.
 - [docs/ROADMAP.md](ROADMAP.md) — direction and what's not wired yet; open work lives in the GitHub issue tracker.
+- [docs/CLIENT.md](CLIENT.md) — the desktop client: running it, host requirements, and the facts that cost the most to learn.
