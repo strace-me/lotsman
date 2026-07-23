@@ -65,6 +65,7 @@ func main() {
 		interval      = flag.Duration("interval", 10*time.Second, "probe + reassert interval")
 		stateFile     = flag.String("state-file", "", `persist chain positions across restarts ("" = start cold)`)
 		kbFile        = flag.String("kb-file", "", `KB persistence path ("" = in-memory)`)
+		kbDir         = flag.String("kb-dir", "", `per-network KB dir: the store becomes <dir>/<network-id>.json so each network's learning stays separate (overrides -kb-file)`)
 		ruleSetDir    = flag.String("ruleset-dir", "", "dir holding rule-set-{geosite,geoip}/*.srs (the client provisions these; empty = generator default)")
 		nfqwsBin      = flag.String("nfqws-bin", "nfqws", "nfqws binary for the local desync rung (Linux only)")
 		zapretFiles   = flag.String("zapret-files", "", "dir with zapret's fake payload .bin files (recipes naming a missing payload are skipped)")
@@ -140,6 +141,7 @@ func main() {
 		ClashListen:   *clashListen,
 		Interval:      *interval,
 		KBFile:        *kbFile,
+		KBDir:         *kbDir,
 		StateFile:     *stateFile,
 		ProbeProxy:    *probeProxy,
 		RuleSetDir:    *ruleSetDir,

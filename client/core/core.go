@@ -8,12 +8,14 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"os"
 	"path/filepath"
 	"runtime"
 	"strconv"
 	"sync"
 	"time"
 
+	"github.com/strace-me/lotsman/client/platform/netid"
 	"github.com/strace-me/lotsman/client/platform/nfqws"
 	"github.com/strace-me/lotsman/client/platform/rulesets"
 	"github.com/strace-me/lotsman/pkg/applier"
@@ -57,6 +59,7 @@ type Options struct {
 	ClashListen string              // loopback Clash-API host:port (default 127.0.0.1:9090)
 	Interval    time.Duration       // probe + reassert interval (default 10s)
 	KBFile      string              // KB persistence path ("" = in-memory)
+	KBDir       string              // per-network KB dir: the store becomes <dir>/<network-id>.json, keeping each network's learning separate (overrides KBFile when set)
 	ProbeProxy  string              // socks addr to probe through the tunnel ("" = probe direct)
 	RuleSetDir  string              // dir holding rule-set-{geosite,geoip}/*.srs ("" = generator default, i.e. the router's /etc/sing-box)
 	Tun         *singbox.TunOptions // client ingress (nil = a sensible default tun)
@@ -119,6 +122,7 @@ type Core struct {
 
 	bus    *events.Bus
 	kb     *kb.KB
+	kbFile string // resolved KB path (KBFile, or a per-network file under KBDir)
 	clash  *dataplane.ClashClient
 	brain  *brain.Brain
 	secret string
@@ -190,9 +194,10 @@ func (c *Core) Start(ctx context.Context) error {
 		catalog.Add(d)
 	}
 	c.kb.SetZapretSeed(catalog.ZapretIDs())
-	if c.opts.KBFile != "" {
-		if err := c.kb.Load(c.opts.KBFile); err != nil {
-			c.log.Warn("kb load failed (starting from seed)", "path", c.opts.KBFile, "err", err)
+	c.resolveKBPath(ctx)
+	if c.kbFile != "" {
+		if err := c.kb.Load(c.kbFile); err != nil {
+			c.log.Warn("kb load failed (starting from seed)", "path", c.kbFile, "err", err)
 		}
 	}
 
@@ -438,6 +443,28 @@ func (c *Core) observeLoop(ctx context.Context) {
 	}
 }
 
+// resolveKBPath decides where this run's knowledge base lives. With KBDir set the
+// store is per-network — <dir>/<network-id>.json — so a strategy learned behind
+// one network's DPI is not carried onto another, and returning to a known network
+// reuses what was already learned there instead of starting cold. Detection is at
+// startup only for now; roaming mid-run is a later step. KBFile (a single shared
+// store) remains the default when KBDir is unset.
+func (c *Core) resolveKBPath(ctx context.Context) {
+	if c.opts.KBDir == "" {
+		c.kbFile = c.opts.KBFile
+		return
+	}
+	net := netid.Detect(ctx)
+	if err := os.MkdirAll(c.opts.KBDir, 0o700); err != nil {
+		c.log.Warn("per-network KB dir unavailable, falling back to shared store", "dir", c.opts.KBDir, "err", err)
+		c.kbFile = c.opts.KBFile
+		return
+	}
+	c.kbFile = filepath.Join(c.opts.KBDir, net.Id+".json")
+	c.log.Info("per-network knowledge base",
+		"network", net.Id, "gateway", net.Gateway, "iface", net.IFace, "mac_known", net.MAC != "", "kb", c.kbFile)
+}
+
 // Stop cancels the autonomy loop, stops sing-box, and persists the KB.
 func (c *Core) Stop() error {
 	c.mu.Lock()
@@ -456,9 +483,9 @@ func (c *Core) Stop() error {
 		}
 	}
 	_ = c.box.Stop(context.Background())
-	if c.opts.KBFile != "" && c.kb != nil {
-		if err := c.kb.Save(c.opts.KBFile); err != nil {
-			c.log.Warn("kb save failed", "path", c.opts.KBFile, "err", err)
+	if c.kbFile != "" && c.kb != nil {
+		if err := c.kb.Save(c.kbFile); err != nil {
+			c.log.Warn("kb save failed", "path", c.kbFile, "err", err)
 		}
 	}
 	return nil
