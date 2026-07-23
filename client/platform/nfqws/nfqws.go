@@ -44,15 +44,6 @@ type Engine struct {
 	armed    bool // nft table installed
 }
 
-// LastArgs returns the argv of the currently-applied strategy (nil if none is
-// running), so a caller can tell whether the next Apply will restart the process
-// or only reload a changed hostlist file.
-func (e *Engine) LastArgs() []string {
-	e.mu.Lock()
-	defer e.mu.Unlock()
-	return slices.Clone(e.lastArgs)
-}
-
 // New returns an Engine for one nfqws instance. bin "" resolves nfqws on PATH.
 func New(bin string, inst zapret.Instance, nftOpts zapret.NftOptions, log *slog.Logger) *Engine {
 	if bin == "" {
@@ -64,21 +55,26 @@ func New(bin string, inst zapret.Instance, nftOpts zapret.NftOptions, log *slog.
 // Apply installs the nft rules (idempotent) and (re)starts nfqws with args — the
 // argv produced by nfqwsgen.Compose. Re-applying the SAME args is a no-op: a
 // restart drops the desync mid-flow, so it must only happen on a real change.
-func (e *Engine) Apply(ctx context.Context, args []string) error {
+//
+// restarted reports whether this call actually (re)launched the process, so the
+// caller can log the reload-free path honestly. It is decided INSIDE the lock
+// from the real e.cmd state — not from a snapshot the caller took earlier — so a
+// crash-and-reap racing this call cannot make a genuine restart look reload-free.
+func (e *Engine) Apply(ctx context.Context, args []string) (restarted bool, err error) {
 	if runtime.GOOS != "linux" {
-		return fmt.Errorf("nfqws: NFQUEUE desync requires Linux (running on %s)", runtime.GOOS)
+		return false, fmt.Errorf("nfqws: NFQUEUE desync requires Linux (running on %s)", runtime.GOOS)
 	}
 	if len(args) == 0 {
-		return fmt.Errorf("nfqws: empty strategy (nothing to desync)")
+		return false, fmt.Errorf("nfqws: empty strategy (nothing to desync)")
 	}
 	e.mu.Lock()
 	defer e.mu.Unlock()
 
 	if e.cmd != nil && slices.Equal(e.lastArgs, args) {
-		return nil // already running this exact strategy
+		return false, nil // already running this exact strategy — no restart
 	}
 	if err := e.installNftLocked(ctx); err != nil {
-		return err
+		return false, err
 	}
 	e.stopProcessLocked()
 
@@ -91,7 +87,7 @@ func (e *Engine) Apply(ctx context.Context, args []string) error {
 	cmd.Stdout = io.MultiWriter(os.Stdout, &said)
 	cmd.Stderr = io.MultiWriter(os.Stderr, &said)
 	if err := cmd.Start(); err != nil {
-		return fmt.Errorf("nfqws: start %s: %w", e.bin, err)
+		return false, fmt.Errorf("nfqws: start %s: %w", e.bin, err)
 	}
 	// One Wait, shared: the liveness check and the reaper both read this channel.
 	// Calling cmd.Wait twice is a race, and nil-ing cmd.Process would break Kill.
@@ -106,7 +102,7 @@ func (e *Engine) Apply(ctx context.Context, args []string) error {
 	// catalog on the strength of an engine that is not running.
 	select {
 	case err := <-done:
-		return fmt.Errorf("nfqws: engine exited immediately (%v): %s", err, said.String())
+		return false, fmt.Errorf("nfqws: engine exited immediately (%v): %s", err, said.String())
 	case <-time.After(400 * time.Millisecond):
 	}
 
@@ -125,7 +121,7 @@ func (e *Engine) Apply(ctx context.Context, args []string) error {
 		}
 	}()
 	e.log.Info("nfqws applied", "qnum", e.inst.QNum, "blocks", strings.Count(strings.Join(args, " "), "--new")+1)
-	return nil
+	return true, nil
 }
 
 // Stop kills nfqws and removes the nft table, leaving the host as it was found.

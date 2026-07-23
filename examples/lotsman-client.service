@@ -10,10 +10,14 @@
 #   journalctl -u lotsman-client -f                       # watch it steer
 #
 # This is the privileged half of shape B: the service owns the tun and the
-# NFQUEUE desync (both need CAP_NET_ADMIN/CAP_NET_RAW), the brain owns the
-# decisions, and an unprivileged tray attaches over the control socket at
-# /run/lotsman/control.sock. Do NOT run a GUI as root — point the tray at the
-# socket instead.
+# NFQUEUE desync (both need CAP_NET_ADMIN/CAP_NET_RAW) and the brain owns the
+# decisions. The control socket lives at /run/lotsman/control.sock.
+#
+# NOTE the socket is currently root-only: the service runs as root, the runtime
+# dir is 0700 and the socket 0600, so a tray must reach it as root too (e.g. run
+# the tray under sudo, or add a `Group=lotsman` here plus a group-owned 0660
+# socket once the client learns to set that). A truly unprivileged tray is not
+# possible with the perms as shipped — that group mechanism is the missing piece.
 
 [Unit]
 Description=Lotsman desktop client (autonomous anti-censorship tunnel)
@@ -34,7 +38,10 @@ ExecStart=/usr/local/bin/lotsman-client \
 	-kb-file ${LOTSMAN_STATE_DIR}/kb.json \
 	-control-socket ${LOTSMAN_RUNTIME_DIR}/control.sock \
 	-metrics-addr ${LOTSMAN_METRICS_ADDR} \
-	${LOTSMAN_EXTRA}
+	$LOTSMAN_EXTRA
+# NB $LOTSMAN_EXTRA is deliberately UNBRACED: only the bare $VAR form splits on
+# whitespace into separate argv words. ${LOTSMAN_EXTRA} would pass the whole
+# string as ONE argument, and lotsman-client would reject it and crash-loop.
 
 # /run/lotsman for the control socket, /var/lib/lotsman for KB/state/baseline and
 # the nfqws hostlists — systemd creates and owns both.
