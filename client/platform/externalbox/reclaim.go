@@ -6,7 +6,6 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
-	"syscall"
 )
 
 // ReclaimStale kills a sing-box left behind by a previous run of this client.
@@ -20,7 +19,9 @@ import (
 // tunnel. Better to clean up late than to risk killing a live one early.
 //
 // The recorded pid is only trusted when the process it names is still the one we
-// started, checked against its command line, because pids are reused.
+// started, checked against its command line, because pids are reused. Identity
+// verification is platform-specific (see reclaim_linux.go / reclaim_other.go);
+// where it cannot be done, ReclaimStale declines to signal rather than guess.
 func ReclaimStale(pidFile, configPath string) (reclaimed int, err error) {
 	raw, err := os.ReadFile(pidFile)
 	if os.IsNotExist(err) {
@@ -34,25 +35,23 @@ func ReclaimStale(pidFile, configPath string) (reclaimed int, err error) {
 		os.Remove(pidFile)
 		return 0, nil
 	}
-	if !isOurSingbox(pid, configPath) {
+	ours, resolved := isOurSingbox(pid, configPath)
+	if !resolved {
+		// Could not read the process at all (a transient error, not "it is gone").
+		// Deleting the record now would drop our only handle on a live orphan, and
+		// signalling a pid we cannot identify could hit an unrelated process that
+		// reused the number. Leave the record and try again next start.
+		return 0, nil
+	}
+	if !ours {
 		os.Remove(pidFile) // stale record, or the pid now belongs to somebody else
 		return 0, nil
 	}
-	if err := syscall.Kill(pid, syscall.SIGTERM); err != nil {
+	if err := terminate(pid); err != nil {
 		return 0, fmt.Errorf("externalbox: reclaim pid %d: %w", pid, err)
 	}
 	os.Remove(pidFile)
 	return pid, nil
-}
-
-// isOurSingbox reports whether pid is a live sing-box running OUR config.
-func isOurSingbox(pid int, configPath string) bool {
-	raw, err := os.ReadFile(filepath.Join("/proc", strconv.Itoa(pid), "cmdline"))
-	if err != nil {
-		return false // not Linux, or the process is gone
-	}
-	cmd := strings.ReplaceAll(string(raw), "\x00", " ")
-	return strings.Contains(cmd, "sing-box") && strings.Contains(cmd, configPath)
 }
 
 // recordPid notes the running child so a later run can reclaim it.

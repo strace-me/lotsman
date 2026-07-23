@@ -7,6 +7,7 @@ package main
 import (
 	"context"
 	"flag"
+	"fmt"
 	"log/slog"
 	"os"
 	"os/signal"
@@ -17,8 +18,42 @@ import (
 
 	"github.com/strace-me/lotsman/client/core"
 	"github.com/strace-me/lotsman/client/platform/externalbox"
+	"github.com/strace-me/lotsman/client/scaffold"
 	"github.com/strace-me/lotsman/pkg/config"
 )
+
+// writeStarter emits a working starter config to path from the given comma-
+// separated subscription URLs. It refuses to overwrite an existing file — an
+// -init that clobbered a tuned config would be a nasty surprise — and validates
+// its own output before writing, so a bad scaffold fails here, not on first run.
+func writeStarter(path, subCSV string) error {
+	if path == "" {
+		return fmt.Errorf("-init needs -config <path> to write to")
+	}
+	var subs []string
+	for _, u := range strings.Split(subCSV, ",") {
+		if u = strings.TrimSpace(u); u != "" {
+			subs = append(subs, u)
+		}
+	}
+	if len(subs) == 0 {
+		return fmt.Errorf("-init needs at least one -sub <url>")
+	}
+	if _, err := os.Stat(path); err == nil {
+		return fmt.Errorf("%s already exists — refusing to overwrite it", path)
+	} else if !os.IsNotExist(err) {
+		return fmt.Errorf("checking %s: %w", path, err)
+	}
+	out := scaffold.Starter(subs)
+	if _, err := config.Parse(out); err != nil {
+		return fmt.Errorf("generated config did not validate (a bug): %w", err)
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return err
+	}
+	// 0600: the config will hold subscription URLs and, once fetched, node creds.
+	return os.WriteFile(path, out, 0o600)
+}
 
 func main() {
 	var (
@@ -41,11 +76,32 @@ func main() {
 		proxyListen   = flag.String("proxy", "", "PROXY MODE: run sing-box on this socks address instead of capturing the system with a tun (no root needed, nothing intercepted)")
 		refreshEvery  = flag.Duration("refresh-interval", 5*time.Minute, "how often to re-fetch subscriptions and reconcile the config (0 = never)")
 		controlSock   = flag.String("control-socket", "", "unix socket for the local control API (empty = default under the runtime dir)")
+		metricsAddr   = flag.String("metrics-addr", "", "serve Prometheus /metrics on this host:port (empty = off; also enables the passive observe pass that surfaces frozen/leak/one-way flows)")
+		baselineFile  = flag.String("baseline-file", "", "persist the reconciler anti-churn baseline here (empty = derive from -singbox-config; the guard then survives restarts)")
+		initConfig    = flag.Bool("init", false, "write a starter config to -config from -sub URL(s) and exit (refuses to overwrite an existing file)")
+		subURLs       = flag.String("sub", "", "comma-separated subscription URL(s) for -init")
 		printConfig   = flag.Bool("print-config", false, "generate the sing-box config from -config, print it, and exit (no sing-box needed)")
 	)
 	flag.Parse()
 
 	log := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelInfo}))
+
+	if *initConfig {
+		if err := writeStarter(*configPath, *subURLs); err != nil {
+			log.Error("init failed", "err", err)
+			os.Exit(1)
+		}
+		log.Info("wrote starter config", "path", *configPath, "next", "edit it, then run without -init")
+		return
+	}
+
+	// Persist the anti-churn baseline beside the config the reconciler manages, so
+	// the degraded-fetch guard works across restarts without the operator wiring a
+	// path (LOT-45). Only meaningful when refresh actually runs.
+	if *baselineFile == "" && *singboxCfg != "" {
+		*baselineFile = *singboxCfg + ".baseline"
+	}
+
 	if *configPath == "" {
 		log.Error("missing required -config")
 		os.Exit(2)
@@ -96,6 +152,8 @@ func main() {
 		QNum:          *qnum,
 		WAN:           *wan,
 		ProxyListen:   *proxyListen,
+		MetricsAddr:   *metricsAddr,
+		BaselineFile:  *baselineFile,
 		DesyncForce:   *desyncForce,
 		DesyncExclude: func() []string {
 			if *desyncExclude == "" {

@@ -50,7 +50,7 @@ func (c *Core) newReconciler() *reconcile.Reconciler {
 	for _, s := range c.reg.Services {
 		services = append(services, s)
 	}
-	return &reconcile.Reconciler{
+	rc := &reconcile.Reconciler{
 		Services:   services,
 		Devices:    c.conf.Devices,
 		Opts:       c.singboxOptions(),
@@ -66,6 +66,19 @@ func (c *Core) newReconciler() *reconcile.Reconciler {
 		Alive:      c.controlAlive,
 		Log:        c.log,
 	}
+	// Persist the anti-churn baseline so the degraded-fetch guard fires on the very
+	// first reconcile after a restart instead of resetting to zero and applying a
+	// degraded startup fetch wholesale (LOT-29/LOT-45). Without a store the guard is
+	// inert until the first clean apply of THIS process — the exact window it exists
+	// to protect. The daemon seeds it identically.
+	if c.opts.BaselineFile != "" {
+		rc.Baseline = reconcile.NewBaselineStore(c.opts.BaselineFile)
+		if n := rc.Baseline.Load(); n > 0 {
+			rc.SetBaseline(n)
+			c.log.Info("reconcile: baseline restored", "path", c.opts.BaselineFile, "last_nodes", n)
+		}
+	}
+	return rc
 }
 
 // controlAlive reports whether sing-box came back after a restart. It asks the

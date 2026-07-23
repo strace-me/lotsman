@@ -1,0 +1,45 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  launchd plist for the Lotsman client on macOS. This is a LaunchAgent for
+  PROXY mode (no tun takeover, no root) — the desync and tun paths are Linux
+  only, so on macOS the client drives an external sing-box and apps opt in by
+  pointing at the SOCKS proxy. Use it to try configs and run the brain; it is
+  not the privileged whole-system tunnel the Linux unit provides.
+
+  Install (per-user):
+    cp examples/lotsman-client.plist ~/Library/LaunchAgents/com.lotsman.client.plist
+    # edit the paths below to your binary and config, then:
+    launchctl load ~/Library/LaunchAgents/com.lotsman.client.plist
+    launchctl start com.lotsman.client
+-->
+<plist version="1.0">
+<dict>
+	<key>Label</key>
+	<string>com.lotsman.client</string>
+	<key>ProgramArguments</key>
+	<array>
+		<string>/usr/local/bin/lotsman-client</string>
+		<string>-config</string>
+		<string>/Users/YOU/.config/lotsman/client.yaml</string>
+		<string>-proxy</string>
+		<string>127.0.0.1:1080</string>
+		<string>-state-file</string>
+		<string>/Users/YOU/.local/state/lotsman/state.json</string>
+		<string>-kb-file</string>
+		<string>/Users/YOU/.local/state/lotsman/kb.json</string>
+		<string>-metrics-addr</string>
+		<string>127.0.0.1:9091</string>
+	</array>
+	<key>RunAtLoad</key>
+	<true/>
+	<key>KeepAlive</key>
+	<dict>
+		<key>SuccessfulExit</key>
+		<false/>
+	</dict>
+	<key>StandardOutPath</key>
+	<string>/tmp/lotsman-client.log</string>
+	<key>StandardErrorPath</key>
+	<string>/tmp/lotsman-client.log</string>
+</dict>
+</plist>

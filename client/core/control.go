@@ -32,8 +32,9 @@ type ControlServer struct {
 	log  *slog.Logger
 }
 
-// Status is what a UI renders: whether the tunnel is up, and where each service
-// currently sits.
+// Status is what a UI renders: whether the data plane is actually up (sing-box
+// alive and answering — not merely configured), and where each service currently
+// sits.
 type Status struct {
 	Running  bool         `json:"running"`
 	Services []NodeStatus `json:"services"`
@@ -102,9 +103,12 @@ func (s *ControlServer) Close() error {
 }
 
 func (s *ControlServer) handleStatus(w http.ResponseWriter, r *http.Request) {
+	// Running reflects real data-plane liveness, not the presence of a config: a
+	// tray showing green over a dead sing-box is worse than useless (LOT-49).
+	running := s.core.Healthy(r.Context())
 	services := s.core.Status(r.Context())
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(Status{Running: services != nil, Services: services})
+	json.NewEncoder(w).Encode(Status{Running: running, Services: services})
 }
 
 func (s *ControlServer) handleStop(w http.ResponseWriter, _ *http.Request) {

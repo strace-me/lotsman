@@ -1,0 +1,60 @@
+# systemd unit for the Lotsman desktop client (Linux).
+#
+# Install:
+#   sudo install -m0755 lotsman-client /usr/local/bin/lotsman-client
+#   sudo install -Dm0644 examples/lotsman-client.service /etc/systemd/system/lotsman-client.service
+#   sudo install -Dm0644 examples/lotsman-client.env     /etc/lotsman/client.env   # edit flags here
+#   sudo install -Dm0600 your-config.yaml                /etc/lotsman/client.yaml
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now lotsman-client
+#   journalctl -u lotsman-client -f                       # watch it steer
+#
+# This is the privileged half of shape B: the service owns the tun and the
+# NFQUEUE desync (both need CAP_NET_ADMIN/CAP_NET_RAW), the brain owns the
+# decisions, and an unprivileged tray attaches over the control socket at
+# /run/lotsman/control.sock. Do NOT run a GUI as root — point the tray at the
+# socket instead.
+
+[Unit]
+Description=Lotsman desktop client (autonomous anti-censorship tunnel)
+Documentation=https://github.com/strace-me/lotsman
+# The client needs sing-box's Clash-API up, which it starts itself, but it also
+# needs the network to exist first.
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+EnvironmentFile=/etc/lotsman/client.env
+# The flags live in the env file so an upgrade of the unit does not clobber local
+# choices; the defaults there are a working starting point.
+ExecStart=/usr/local/bin/lotsman-client \
+	-config ${LOTSMAN_CONFIG} \
+	-state-file ${LOTSMAN_STATE_DIR}/state.json \
+	-kb-file ${LOTSMAN_STATE_DIR}/kb.json \
+	-control-socket ${LOTSMAN_RUNTIME_DIR}/control.sock \
+	-metrics-addr ${LOTSMAN_METRICS_ADDR} \
+	${LOTSMAN_EXTRA}
+
+# /run/lotsman for the control socket, /var/lib/lotsman for KB/state/baseline and
+# the nfqws hostlists — systemd creates and owns both.
+RuntimeDirectory=lotsman
+RuntimeDirectoryMode=0700
+StateDirectory=lotsman
+StateDirectoryMode=0700
+
+# tun + NFQUEUE are the only things needing privilege; keep just those two caps.
+# nfqws drops its own privileges after binding the queue, so this is the ceiling,
+# not what the desync runs as day to day.
+AmbientCapabilities=CAP_NET_ADMIN CAP_NET_RAW
+CapabilityBoundingSet=CAP_NET_ADMIN CAP_NET_RAW
+
+# Restart on crash, but back off so a broken config cannot crash-loop the machine:
+# five deaths inside 60s trips the limit and systemd stops trying until told to.
+Restart=on-failure
+RestartSec=5
+StartLimitIntervalSec=60
+StartLimitBurst=5
+
+[Install]
+WantedBy=multi-user.target

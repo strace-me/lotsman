@@ -44,6 +44,15 @@ type Engine struct {
 	armed    bool // nft table installed
 }
 
+// LastArgs returns the argv of the currently-applied strategy (nil if none is
+// running), so a caller can tell whether the next Apply will restart the process
+// or only reload a changed hostlist file.
+func (e *Engine) LastArgs() []string {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return slices.Clone(e.lastArgs)
+}
+
 // New returns an Engine for one nfqws instance. bin "" resolves nfqws on PATH.
 func New(bin string, inst zapret.Instance, nftOpts zapret.NftOptions, log *slog.Logger) *Engine {
 	if bin == "" {
