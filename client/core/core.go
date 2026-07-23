@@ -335,8 +335,19 @@ func (c *Core) Start(ctx context.Context) error {
 		}(run)
 	}
 	if c.opts.MetricsAddr != "" {
-		c.metricsSrv = mc.Serve(c.opts.MetricsAddr)
-		c.log.Info("metrics enabled", "addr", c.opts.MetricsAddr, "path", "/metrics")
+		// Bind synchronously so the "enabled" log asserts a listener that actually
+		// came up. mc.Serve runs ListenAndServe in a goroutine and drops its bind
+		// error, which would log success over a dead endpoint (e.g. a port already in
+		// use). A failed metrics bind is non-fatal — it is telemetry, not the tunnel.
+		if ln, lerr := net.Listen("tcp", c.opts.MetricsAddr); lerr != nil {
+			c.log.Warn("metrics endpoint unavailable (continuing without it)", "addr", c.opts.MetricsAddr, "err", lerr)
+		} else {
+			mux := http.NewServeMux()
+			mux.Handle("/metrics", mc)
+			c.metricsSrv = &http.Server{Handler: mux}
+			go c.metricsSrv.Serve(ln)
+			c.log.Info("metrics enabled", "addr", c.opts.MetricsAddr, "path", "/metrics")
+		}
 	}
 	started = true
 	c.log.Info("lotsman client started", "services", len(c.reg.Services), "clash", c.opts.ClashListen)
