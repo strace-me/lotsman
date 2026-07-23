@@ -7,8 +7,10 @@ import (
 	"fmt"
 	"log/slog"
 	"net"
+	"net/http"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"sync"
 	"time"
 
@@ -24,6 +26,7 @@ import (
 	"github.com/strace-me/lotsman/pkg/faillog"
 	"github.com/strace-me/lotsman/pkg/kb"
 	"github.com/strace-me/lotsman/pkg/metrics"
+	"github.com/strace-me/lotsman/pkg/observe"
 	"github.com/strace-me/lotsman/pkg/probing"
 	"github.com/strace-me/lotsman/pkg/registry"
 	"github.com/strace-me/lotsman/pkg/singbox"
@@ -79,6 +82,17 @@ type Options struct {
 	QNum          int           // NFQUEUE queue number (0 = 200, matching the router)
 	WAN           string        // egress interface for the nft rules ("" = autodetect the default route)
 
+	// MetricsAddr serves the same Prometheus /metrics the daemon exposes (per-service
+	// position/state/broken/active-fails, KB EWMA, and — while it is set — the passive
+	// observation eye's leak/dead/frozen/one-way ratios). "" = do not serve, and skip
+	// the observe pass entirely so nothing is computed for a surface nobody reads.
+	MetricsAddr string
+	// BaselineFile persists the anti-churn baseline (the node count of the last clean
+	// apply) so the reconciler's degraded-fetch guard survives a restart instead of
+	// applying a degraded startup fetch wholesale. "" = in-memory only (the guard is
+	// then inert on the first tick after every restart — LOT-29/LOT-45).
+	BaselineFile string
+
 	// DesyncExclude are extra destinations nfqws must never touch, on top of this
 	// client's own nodes — the servers of any OTHER tunnel sharing this host.
 	// They cannot be discovered automatically (see nfqws.ForeignTunnels), so an
@@ -108,6 +122,11 @@ type Core struct {
 	clash  *dataplane.ClashClient
 	brain  *brain.Brain
 	secret string
+
+	metrics    *metrics.Collector // populated in Start; nil until then
+	metricsSrv *http.Server       // non-nil only when MetricsAddr is served
+	obsMu      sync.Mutex         // guards obsSnap between the observe loop and /metrics
+	obsSnap    observe.Snapshot   // last passive-observation snapshot (zero until the first pass)
 
 	prober dataplane.Prober // shared with the autonomy loop, reused by the desync canary
 	// foreignTunnels is sampled BEFORE our own tun exists. Sampling it later would
@@ -278,6 +297,16 @@ func (c *Core) Start(ctx context.Context) error {
 
 	c.prober = rp
 	mc := metrics.New(c.brain.Snapshot, c.kb.Snapshot)
+	c.metrics = mc
+	if c.opts.MetricsAddr != "" {
+		// Wire the snapshot getter BEFORE any scrape can arrive; the observe loop only
+		// updates the guarded value from then on.
+		mc.SetObserveSnapshot(func() observe.Snapshot {
+			c.obsMu.Lock()
+			defer c.obsMu.Unlock()
+			return c.obsSnap
+		})
+	}
 	eng := probing.New(c.bus, rp, c.brain, c.reg, c.kb, mc, faillog.Nop{}, c.opts.Interval, c.log)
 
 	c.mu.Lock()
@@ -290,6 +319,14 @@ func (c *Core) Start(ctx context.Context) error {
 		runners = append(runners, func(rctx context.Context) { c.refreshLoop(rctx, rc, c.opts.RefreshEvery) })
 		c.log.Info("subscription refresh enabled", "every", c.opts.RefreshEvery)
 	}
+	// Observability: only when a scraper is actually served. The eye reads the
+	// Clash /connections list each interval to surface leak/dead/frozen/one-way
+	// flows — the TSPU-freeze signal a header-only probe cannot see — and feeds it
+	// to the collector. Telemetry only: it does not (yet) drive escalation on the
+	// client, so nothing behavioural changes by turning it on.
+	if c.opts.MetricsAddr != "" {
+		runners = append(runners, c.observeLoop)
+	}
 	for _, run := range runners {
 		c.wg.Add(1)
 		go func(fn func(context.Context)) {
@@ -297,9 +334,60 @@ func (c *Core) Start(ctx context.Context) error {
 			fn(runCtx)
 		}(run)
 	}
+	if c.opts.MetricsAddr != "" {
+		c.metricsSrv = mc.Serve(c.opts.MetricsAddr)
+		c.log.Info("metrics enabled", "addr", c.opts.MetricsAddr, "path", "/metrics")
+	}
 	started = true
 	c.log.Info("lotsman client started", "services", len(c.reg.Services), "clash", c.opts.ClashListen)
 	return nil
+}
+
+// clashObserveSource adapts the loopback Clash-API to the passive eye's Source,
+// mapping each /connections record to the subset observe needs. It mirrors the
+// daemon's adapter; the eye is otherwise the daemon's verbatim.
+type clashObserveSource struct{ c *dataplane.ClashClient }
+
+func (s clashObserveSource) Connections(ctx context.Context) ([]observe.Conn, error) {
+	cs, err := s.c.Connections(ctx)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]observe.Conn, len(cs))
+	for i, c := range cs {
+		port, _ := strconv.Atoi(c.Metadata.DestinationPort) // 0 on parse failure (best-effort)
+		out[i] = observe.Conn{
+			ID:     c.ID,
+			Chains: c.Chains, Upload: c.Upload, Download: c.Download, Rule: c.Rule,
+			Host: c.Metadata.Host, DestIP: c.Metadata.DestinationIP, DestPort: port, Network: c.Metadata.Network,
+		}
+	}
+	return out, nil
+}
+
+// observeLoop feeds the metrics collector the passive eye's snapshot each
+// interval. It runs only when metrics are served (see Start) and never touches
+// escalation — a failed pass (sing-box down, no connections yet) is logged and
+// retried, exactly as the daemon treats it.
+func (c *Core) observeLoop(ctx context.Context) {
+	eye := observe.New(clashObserveSource{c.clash}, c.reg)
+	t := time.NewTicker(c.opts.Interval)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+			s, err := eye.Observe(ctx)
+			if err != nil {
+				c.log.Debug("observe pass failed (retrying next tick)", "err", err)
+				continue
+			}
+			c.obsMu.Lock()
+			c.obsSnap = s
+			c.obsMu.Unlock()
+		}
+	}
 }
 
 // Stop cancels the autonomy loop, stops sing-box, and persists the KB.
@@ -311,6 +399,9 @@ func (c *Core) Stop() error {
 		cancel()
 	}
 	c.wg.Wait()
+	if c.metricsSrv != nil {
+		c.metricsSrv.Close()
+	}
 	if c.zap != nil {
 		if err := c.zap.Stop(context.Background()); err != nil {
 			c.log.Warn("nfqws stop", "err", err)
@@ -325,11 +416,15 @@ func (c *Core) Stop() error {
 	return nil
 }
 
-// NodeStatus is one service's currently-active node and brain state.
+// NodeStatus is one service's currently-active node and brain state. Fails and
+// Broken let a UI tell a healthy service from a wedged one: State/Node alone show
+// WHERE a service sits, not whether it is actually working there.
 type NodeStatus struct {
 	Service string `json:"service"`
 	State   string `json:"state"`
 	Node    string `json:"node"`
+	Fails   int    `json:"fails"`  // consecutive active-probe failures at this rung
+	Broken  bool   `json:"broken"` // chain exhausted — escalated past the last rung and still failing
 }
 
 // Status reports each service's brain position plus the concrete node its
@@ -344,9 +439,23 @@ func (c *Core) Status(ctx context.Context) []NodeStatus {
 		if info, err := c.clash.Proxy(ctx, registry.SelectorTag(s.Service)); err == nil {
 			node = info.Now
 		}
-		out = append(out, NodeStatus{Service: s.Service, State: s.State, Node: node})
+		out = append(out, NodeStatus{Service: s.Service, State: s.State, Node: node, Fails: s.Fails, Broken: s.Broken})
 	}
 	return out
+}
+
+// Healthy reports whether the data plane is actually up: the sing-box process is
+// alive AND its control plane answers. Reporting "running" from the mere presence
+// of a config (services != nil) would show green over a dead or wedged sing-box —
+// exactly what a tray must not do (LOT-49).
+func (c *Core) Healthy(ctx context.Context) bool {
+	if c.box == nil || !c.box.Alive(ctx) {
+		return false
+	}
+	ctx, cancel := context.WithTimeout(ctx, 2*time.Second)
+	defer cancel()
+	_, err := c.clash.Proxy(ctx, "direct")
+	return err == nil
 }
 
 // RenderConfig generates the sing-box config the client would run, WITHOUT

@@ -70,6 +70,69 @@ func TestParseValid(t *testing.T) {
 	}
 }
 
+// A config that leans on the builtin category chains must get the three standard
+// pools those chains name (vpn_url_test / vpn_url_test_udp / emergency_pool)
+// without the operator hand-copying them — the whole point of the category
+// defaults. Here nothing is declared but the service and its subscription.
+func TestBuiltinPoolsAreInjectedWhenReferencedButUndeclared(t *testing.T) {
+	const in = `
+services:
+  - name: discord
+    category: messaging
+    probe_target: https://discord.com/api/v9/gateway
+  - name: youtube
+    category: streaming
+    probe_target: https://x
+subscriptions:
+  - { name: s, url: "https://example/sub", format: auto, tags: [normal], enabled: true }
+`
+	cfg, err := Parse([]byte(in))
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	// messaging -> vpn_url_test_udp, streaming -> vpn_url_test, both -> emergency_pool.
+	for _, name := range []string{"vpn_url_test", "vpn_url_test_udp", "emergency_pool"} {
+		p, ok := cfg.Pools.Pools[name]
+		if !ok {
+			t.Errorf("referenced builtin pool %q was not injected", name)
+			continue
+		}
+		if p.Name != name {
+			t.Errorf("injected pool %q has Name %q", name, p.Name)
+		}
+	}
+}
+
+// An explicit pool declaration is authoritative: injection must never clobber the
+// operator's own filter with the builtin default.
+func TestDeclaredPoolIsNotOverwrittenByBuiltin(t *testing.T) {
+	const in = `
+services:
+  - name: youtube
+    category: streaming
+    probe_target: https://x
+subscriptions:
+  - { name: s, url: "https://example/sub", format: auto, tags: [normal], enabled: true }
+pools:
+  vpn_url_test:
+    type: url_test
+    filter: { caps: [tcp], countries_include: [nl] }
+`
+	cfg, err := Parse([]byte(in))
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	got := cfg.Pools.Pools["vpn_url_test"]
+	if len(got.Filter.CountriesInclude) != 1 || got.Filter.CountriesInclude[0] != "nl" {
+		t.Errorf("declared pool filter was overwritten by the builtin: %+v", got.Filter)
+	}
+	// emergency_pool is still referenced by the streaming chain and undeclared, so
+	// it must have been injected alongside the untouched user pool.
+	if _, ok := cfg.Pools.Pools["emergency_pool"]; !ok {
+		t.Error("emergency_pool should still be injected")
+	}
+}
+
 // The shipped production-draft config must always parse and validate, so a
 // broken example is caught here rather than on the box.
 func TestExampleR5SParses(t *testing.T) {

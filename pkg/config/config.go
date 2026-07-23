@@ -237,6 +237,10 @@ func Parse(data []byte) (*Config, error) {
 	if err != nil {
 		return nil, err
 	}
+	// Fill in the standard pools a chain references but the config did not declare,
+	// so a config that leans on the builtin categories does not have to hand-copy
+	// the same three pool blocks into every file.
+	injectBuiltinPools(pl, reg, f.SubViaPool, devices)
 	strategies, err := buildStrategies(f.Strategies)
 	if err != nil {
 		return nil, err
@@ -532,6 +536,46 @@ func resolveChain(s serviceYAML, cats map[string]registry.Category) ([]registry.
 		out = append(out, registry.ChainStep{Position: i, State: step.State, StrategyClass: step.StrategyClass, StrategyID: step.StrategyID, ProbeType: step.ProbeType, ProbeTarget: step.ProbeTarget})
 	}
 	return out, nil
+}
+
+// injectBuiltinPools adds the standard pools (vpn_url_test, vpn_url_test_udp,
+// emergency_pool) that a VPN/emergency chain step, subscription-via-pool, or
+// device policy REFERENCES but the config never declared. The builtin categories
+// name exactly these three, so without this a config that relies on category
+// defaults (`category: streaming`) would generate empty url-test groups unless it
+// also hand-copied the three pool blocks that pools.Builtin already provides. A
+// pool the config declares itself is authoritative and never overwritten; a
+// referenced name that is not one of the builtins is left alone (it may be a
+// user pool declared elsewhere, or a genuine typo the generator surfaces).
+func injectBuiltinPools(set *pools.Set, reg *registry.Registry, subViaPool string, devices []registry.Device) {
+	referenced := map[string]bool{}
+	for _, svc := range reg.Services {
+		for _, step := range svc.Chain {
+			if step.StrategyClass != strategy.ClassVPN && step.StrategyClass != strategy.ClassEmergency {
+				continue
+			}
+			if step.StrategyID != "" {
+				referenced[step.StrategyID] = true
+			}
+		}
+	}
+	if subViaPool != "" {
+		referenced[subViaPool] = true
+	}
+	for _, d := range devices {
+		if d.Policy != "" {
+			referenced[d.Policy] = true
+		}
+	}
+	builtin := pools.Builtin()
+	for name := range referenced {
+		if _, have := set.Pools[name]; have {
+			continue
+		}
+		if p, ok := builtin.Pools[name]; ok {
+			set.Pools[name] = p
+		}
+	}
 }
 
 func buildPools(in map[string]poolYAML) (*pools.Set, error) {

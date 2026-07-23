@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 
 	"github.com/strace-me/lotsman/pkg/aggregate"
@@ -94,15 +95,22 @@ func (z *zapretExec) Enable(ctx context.Context, service, _ string) error {
 	}
 	// nfqws resolves a bare payload name against ITS working directory, which is
 	// ours rather than the zapret installation's.
-	if err := z.engine.Apply(ctx, absolutizePayloads(plan.Args, z.files)); err != nil {
+	full := absolutizePayloads(plan.Args, z.files)
+	prevArgs := z.engine.LastArgs()
+	if err := z.engine.Apply(ctx, full); err != nil {
 		return err
 	}
 	if changed > 0 && z.hostlists != "" {
-		// The arguments did not have to change for this to take effect: nfqws picks
-		// the new membership up from the file itself, so the engine kept running and
-		// no live connection lost its desync.
-		z.log.Info("zapret: hostlist membership updated without restarting the engine",
-			"files", changed)
+		if slices.Equal(prevArgs, full) {
+			// The argv did not change, so Apply did not restart nfqws: it picks the new
+			// membership up from the file itself and no live connection lost its desync.
+			z.log.Info("zapret: hostlist membership updated without restarting the engine",
+				"files", changed)
+		} else {
+			// The argv changed too, so Apply restarted the engine — the reload-free
+			// claim would be false here.
+			z.log.Info("zapret: hostlist membership updated (engine re-applied)", "files", changed)
+		}
 	}
 	z.log.Info("zapret: desync applied", "services", len(active), "chosen", plan.Chosen)
 	// Judge asynchronously: Enable is on the applier's path and must not block it
