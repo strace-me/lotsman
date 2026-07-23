@@ -29,7 +29,20 @@ type RungProber struct {
 	reg     *registry.Registry
 	testURL string
 	timeout time.Duration
+	// direct probes a rung by dialing straight out, bypassing the selector. It is
+	// set (via SetDirectProber) only where a genuine direct path exists — the
+	// client's proxy mode. When nil, non-VPN rungs fall through to base, which is
+	// the router's current behaviour, so the router is byte-for-byte unaffected.
+	direct Prober
 }
+
+// SetDirectProber wires the prober used for an INACTIVE non-VPN (zapret/direct)
+// rung: one that dials direct instead of through the selector. Without it, such a
+// rung is probed through whatever the selector currently points at — a VPN node —
+// and credited with that node's health, the same false-recovery the VPN case was
+// built to avoid (LOT-44). Only meaningful where "direct" is really direct (proxy
+// mode); in tun mode the host's own tun would capture it, so it is left unset.
+func (r *RungProber) SetDirectProber(p Prober) { r.direct = p }
 
 // NewRungProber wraps base. A nil clash or reg makes every probe delegate, so
 // wiring it is always safe.
@@ -54,15 +67,52 @@ func NewRungProber(base Prober, clash *ClashClient, reg *registry.Registry, test
 
 // Probe measures the rung at position for service.
 func (r *RungProber) Probe(ctx context.Context, service string, position int) events.ProductionVerdict {
-	pool, ok := r.inactiveVPNPool(ctx, service, position)
+	if pool, ok := r.inactiveVPNPool(ctx, service, position); ok {
+		delay, err := r.clash.NodeDelay(ctx, pool, r.testURL, r.timeout)
+		if err != nil {
+			return events.ProductionVerdict{Service: service, Position: position, OK: false, Err: err.Error()}
+		}
+		return events.ProductionVerdict{Service: service, Position: position, OK: true, RTTms: delay}
+	}
+	// An inactive zapret/direct rung routes DIRECT; while the service sits on a VPN
+	// node the ordinary probe would follow the selector and measure that node, not
+	// the direct path this rung uses. Probe direct instead so the verdict is about
+	// the rung being tested (LOT-44).
+	if r.direct != nil && r.inactiveDirectRouted(ctx, service, position) {
+		return r.direct.Probe(ctx, service, position)
+	}
+	return r.base.Probe(ctx, service, position)
+}
+
+// inactiveDirectRouted reports whether position is a non-VPN (direct-routed) rung
+// the service is NOT currently on — i.e. the selector points at a VPN node, so the
+// ordinary path probe would mis-measure this rung.
+func (r *RungProber) inactiveDirectRouted(ctx context.Context, service string, position int) bool {
+	if r.clash == nil || r.reg == nil {
+		return false
+	}
+	svc, ok := r.reg.Services[service]
 	if !ok {
-		return r.base.Probe(ctx, service, position)
+		return false
 	}
-	delay, err := r.clash.NodeDelay(ctx, pool, r.testURL, r.timeout)
+	found := false
+	var step registry.ChainStep
+	for _, s := range svc.Chain {
+		if s.Position == position {
+			step, found = s, true
+			break
+		}
+	}
+	if !found || step.StrategyClass == strategy.ClassVPN {
+		return false // the VPN case is handled by inactiveVPNPool
+	}
+	info, err := r.clash.Proxy(ctx, registry.SelectorTag(service))
 	if err != nil {
-		return events.ProductionVerdict{Service: service, Position: position, OK: false, Err: err.Error()}
+		return false // cannot tell which rung is live — do not divert the probe
 	}
-	return events.ProductionVerdict{Service: service, Position: position, OK: true, RTTms: delay}
+	// "direct" (or unset) means the service already routes direct, so the ordinary
+	// probe measures the right path. Only a VPN node makes this rung inactive.
+	return info.Now != "direct" && info.Now != ""
 }
 
 // inactiveVPNPool returns the pool tag of the vpn-class rung at position, but
