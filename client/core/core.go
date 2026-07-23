@@ -668,6 +668,32 @@ func (c *Core) waitControlReady(ctx context.Context, timeout time.Duration) erro
 	}
 }
 
+// recipeScore ranks a desync recipe for a service, blending the service's own KB
+// history with a per-network prior — how the SAME recipe has done for OTHER
+// services on this network. The winning desync is largely a property of the
+// network's DPI (two services here shared a winner), so a service meeting the
+// rung for the first time should try what already worked on this network before
+// falling back to catalog order, and steer clear of what already failed here.
+func (c *Core) recipeScore(service, recipeID string) float64 {
+	own := c.kb.Stats(service, recipeID)
+	prior, priorN := c.kb.NetworkPrior(recipeID, service)
+	return blendRecipePrior(own.Success, own.Count, prior, priorN)
+}
+
+// blendRecipePrior shrinks the service's own success rate toward the network
+// prior by how little of its own evidence it has: a cold service (ownN≈0) leans
+// entirely on the prior, and its own signal takes over as outcomes accumulate.
+// With no prior (no other service tried this recipe) the own score is returned
+// unchanged, so behaviour is identical to before on a fresh network.
+func blendRecipePrior(ownSuccess, ownN, prior, priorN float64) float64 {
+	if priorN <= 0 {
+		return ownSuccess
+	}
+	const k = 3.0 // own observations needed to weigh equally with the prior
+	w := ownN / (ownN + k)
+	return w*ownSuccess + (1-w)*prior
+}
+
 // newZapretExec builds the zapret-class executor when this platform and config can
 // actually support local desync. NFQUEUE is Linux-only, and there is no point
 // wiring a rung no service declares. Returning nil simply means the brain never
@@ -730,9 +756,7 @@ func (c *Core) newZapretExec(ctx context.Context) *zapretExec {
 		// Rank recipes by what has actually worked for this service. A cold KB scores
 		// every candidate at the prior, so this degrades to catalog order — the same
 		// choice the seed picker makes — and sharpens only as outcomes accumulate.
-		pick: zaptune.KBPicker(func(service, recipeID string) float64 {
-			return c.kb.Stats(service, recipeID).Success
-		}),
+		pick:      zaptune.KBPicker(c.recipeScore),
 		files:     c.opts.ZapretFiles,
 		hostlists: c.opts.HostlistDir,
 		canary:    c.canaryProbe,

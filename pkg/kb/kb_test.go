@@ -246,3 +246,34 @@ func TestDecayFreshness(t *testing.T) {
 		t.Errorf("stale B should rank above freshly-resampled A (freshness re-validation): %v", got)
 	}
 }
+
+func TestNetworkPriorAggregatesAndExcludesSelf(t *testing.T) {
+	k := New()
+	for i := 0; i < 6; i++ {
+		k.RecordOutcome("youtube", "R", true, 10) // youtube: R works
+	}
+	for i := 0; i < 6; i++ {
+		k.RecordOutcome("tiktok", "R", false, 0) // tiktok: R fails
+	}
+
+	// discord never tried R: prior blends youtube (high) and tiktok (low).
+	succ, n := k.NetworkPrior("R", "discord")
+	if n == 0 {
+		t.Fatal("prior should aggregate youtube + tiktok")
+	}
+	if succ <= 0 || succ >= 1 {
+		t.Errorf("blended prior = %v, want strictly between the two extremes", succ)
+	}
+
+	// Querying for youtube excludes youtube's own success, leaving only tiktok's
+	// failure — the aggregate must drop.
+	succNoYT, _ := k.NetworkPrior("R", "youtube")
+	if !(succNoYT < succ) {
+		t.Errorf("excluding youtube should lower the aggregate: %v (excl youtube) vs %v (excl discord)", succNoYT, succ)
+	}
+
+	// A recipe nobody tried has no prior.
+	if _, n := k.NetworkPrior("never", "discord"); n != 0 {
+		t.Errorf("an untried recipe must have no prior, got n=%v", n)
+	}
+}

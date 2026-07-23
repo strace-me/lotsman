@@ -9,6 +9,7 @@ import (
 	"math"
 	"os"
 	"sort"
+	"strings"
 	"sync"
 
 	"github.com/strace-me/lotsman/pkg/strategy"
@@ -145,6 +146,7 @@ type Stats struct {
 	Loss     float64 // 1 - Success
 	RTTms    float64 // latency EWMA (0 = unseen)
 	JitterMs float64 // RTT variability EWMA (0 = unseen)
+	Count    float64 // observations behind Success (0 = unseen)
 	Seen     bool
 }
 
@@ -162,8 +164,41 @@ func (k *KB) Stats(service, strategyID string) Stats {
 		Loss:     1 - s,
 		RTTms:    k.rtt[key],
 		JitterMs: k.jitter[key],
+		Count:    k.count[key],
 		Seen:     seen,
 	}
+}
+
+// NetworkPrior aggregates a strategy's observed success across every OTHER
+// service in this KB — a per-network prior, since the client keeps one KB per
+// network (-kb-dir). It answers "how well has this recipe done here, for anything
+// else?", so a service that has never tried it can start from the network's
+// experience rather than blind catalog order. exceptService is excluded so a
+// service never primes its own prior. n is the total weight behind the average
+// (0 = no other service has tried it — no prior available).
+func (k *KB) NetworkPrior(strategyID, exceptService string) (success, n float64) {
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	suffix := "|" + strategyID
+	var wsum, csum float64
+	for key, e := range k.ewma {
+		if !strings.HasSuffix(key, suffix) {
+			continue
+		}
+		if strings.TrimSuffix(key, suffix) == exceptService {
+			continue
+		}
+		c := k.count[key]
+		if c <= 0 {
+			c = 1 // recorded at least once even if the count did not persist
+		}
+		wsum += e * c
+		csum += c
+	}
+	if csum == 0 {
+		return 0, 0
+	}
+	return wsum / csum, csum
 }
 
 // TopNZapret returns up to n zapret strategy IDs for a service, ranked by their
