@@ -7,10 +7,10 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 
 	"github.com/strace-me/lotsman/pkg/aggregate"
 
-	"github.com/strace-me/lotsman/client/platform/nfqws"
 	"github.com/strace-me/lotsman/pkg/dataplane"
 	"github.com/strace-me/lotsman/pkg/registry"
 	"github.com/strace-me/lotsman/pkg/strategy"
@@ -28,9 +28,17 @@ import (
 // every service's --new block, and the StrategyExecutor interface only reports a
 // service ENTERING a rung — never leaving it. Composing from remembered Enable
 // calls would therefore keep desyncing services that moved to VPN long ago.
+// desyncEngine is the slice of the nfqws engine the executor drives. It is an
+// interface purely so the recompose/stop logic can be tested without a live
+// NFQUEUE; *nfqws.Engine is the only implementation.
+type desyncEngine interface {
+	Apply(ctx context.Context, args []string) (restarted bool, err error)
+	Stop(ctx context.Context) error
+}
+
 type zapretExec struct {
 	clash     *dataplane.ClashClient
-	engine    *nfqws.Engine
+	engine    desyncEngine
 	recipes   []strategycat.Recipe
 	pick      zaptune.Picker            // ranks candidate recipes (KB-learned, catalog order as tiebreak)
 	files     string                    // zapret payload dir, for resolving .bin references
@@ -47,22 +55,69 @@ type zapretExec struct {
 	canary func(ctx context.Context, service string) bool
 	record func(service, recipe string, ok bool)
 	log    *slog.Logger
+
+	// mu serialises the whole-config recomposition. Enable (a service entering the
+	// rung) and Reconcile (the periodic sweep that stops the engine when the rung
+	// empties) both recompose from active(), and they must not interleave.
+	mu sync.Mutex
 }
 
 func (z *zapretExec) Class() string { return strategy.ClassZapret }
 
 // Enable routes the service direct and re-applies the composed desync strategy.
 func (z *zapretExec) Enable(ctx context.Context, service, _ string) error {
+	z.mu.Lock()
+	defer z.mu.Unlock()
 	// Route direct FIRST: the service may be sitting on a VPN pool from a previous
 	// chain step, and desyncing traffic that never leaves through the local stack
 	// does nothing. SetSelector is idempotent, so re-entering the rung is cheap.
 	if err := z.clash.SetSelector(ctx, registry.SelectorTag(service), "direct"); err != nil {
 		return err
 	}
+	plan, err := z.composeAndApplyLocked(ctx)
+	if err != nil {
+		return err
+	}
+	if plan == nil {
+		return nil // nothing composed (rung empty or uncovered) — no verdict to take
+	}
+	// Judge asynchronously: Enable is on the applier's path and must not block it
+	// for the settle window.
+	jctx := ctx
+	if z.life != nil {
+		jctx = z.life()
+	}
+	go z.judge(jctx, service, plan.Chosen)
+	return nil
+}
 
+// Reconcile recomposes the desync to match the CURRENT rung membership, stopping
+// the engine when the rung has emptied. It is the periodic counterpart to Enable:
+// Enable reacts to a service arriving, Reconcile catches the departures the
+// executor interface never reports. It takes no verdict — nothing new was chosen.
+func (z *zapretExec) Reconcile(ctx context.Context) error {
+	z.mu.Lock()
+	defer z.mu.Unlock()
+	_, err := z.composeAndApplyLocked(ctx)
+	return err
+}
+
+// composeAndApplyLocked recomposes the whole nfqws strategy from the services
+// currently on the rung and applies it, or stops the engine when none remain. It
+// returns the applied plan (for the caller to judge), or nil when nothing was
+// applied. Caller holds z.mu.
+func (z *zapretExec) composeAndApplyLocked(ctx context.Context) (*zaptune.Plan, error) {
 	active := z.active()
 	if len(active) == 0 {
-		return nil
+		// The last service left the zapret rung. Stop desyncing rather than keep
+		// mangling traffic for services that have moved to VPN (LOT-46): the executor
+		// interface only reports a service ENTERING a rung, so without this sweep the
+		// engine would run its final --new blocks indefinitely. Stop is idempotent, so
+		// a rung that is simply always empty costs a cheap no-op each tick.
+		if err := z.engine.Stop(ctx); err != nil {
+			return nil, fmt.Errorf("zapret: stop idle engine: %w", err)
+		}
+		return nil, nil
 	}
 	plan := zaptune.Compose(active, z.recipes, z.pick, z.resolve, z.hostlists)
 	if !plan.Covered {
@@ -70,8 +125,8 @@ func (z *zapretExec) Enable(ctx context.Context, service, _ string) error {
 		// rule_set domains could not be resolved would be desynced for only its
 		// inline domains, silently missing the rest (the discord-gateway regression).
 		z.log.Warn("zapret: strategy not applied — some services are uncovered",
-			"uncovered", plan.Uncovered, "service", service)
-		return nil
+			"uncovered", plan.Uncovered)
+		return nil, nil
 	}
 	// Write the hostlists BEFORE applying: nfqws must never be pointed at a file
 	// that is not there yet. WriteIfChanged is the router's own primitive — atomic,
@@ -81,12 +136,12 @@ func (z *zapretExec) Enable(ctx context.Context, service, _ string) error {
 	changed := 0
 	for path, domains := range plan.Hostlists {
 		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
-			return fmt.Errorf("zapret: hostlist dir: %w", err)
+			return nil, fmt.Errorf("zapret: hostlist dir: %w", err)
 		}
 		body := []byte(strings.Join(domains, "\n") + "\n")
 		wrote, err := aggregate.WriteIfChanged(path, body, 0o644)
 		if err != nil {
-			return fmt.Errorf("zapret: write hostlist %s: %w", path, err)
+			return nil, fmt.Errorf("zapret: write hostlist %s: %w", path, err)
 		}
 		if wrote {
 			changed++
@@ -97,7 +152,7 @@ func (z *zapretExec) Enable(ctx context.Context, service, _ string) error {
 	full := absolutizePayloads(plan.Args, z.files)
 	restarted, err := z.engine.Apply(ctx, full)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	if changed > 0 && z.hostlists != "" {
 		if restarted {
@@ -112,14 +167,7 @@ func (z *zapretExec) Enable(ctx context.Context, service, _ string) error {
 		}
 	}
 	z.log.Info("zapret: desync applied", "services", len(active), "chosen", plan.Chosen)
-	// Judge asynchronously: Enable is on the applier's path and must not block it
-	// for the settle window.
-	jctx := ctx
-	if z.life != nil {
-		jctx = z.life()
-	}
-	go z.judge(jctx, service, plan.Chosen)
-	return nil
+	return &plan, nil
 }
 
 // zapretServices reports the services whose CURRENT brain position sits on a
