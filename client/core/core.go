@@ -133,6 +133,7 @@ type Core struct {
 	// always find our own interface and disable the desync rung in tun mode.
 	foreignTunnels []string
 	zap            *nfqws.Engine // local desync engine (nil = no desync rung on this platform)
+	zapExec        *zapretExec   // the zapret executor, reconciled periodically (nil = no desync rung)
 	tunnelIPs      []string      // proxy server IPs the desync must never touch
 	lastNodes      int           // nodes the last generate loaded; zero with subscriptions declared means no tunnel
 
@@ -250,6 +251,7 @@ func (c *Core) Start(ctx context.Context) error {
 		executor.NewDirect(c.clash, false, c.log),
 	}
 	if z := c.newZapretExec(ctx); z != nil {
+		c.zapExec = z
 		execs = append(execs, z)
 	}
 	c.dropUnsupportedRungs(execs)
@@ -276,10 +278,18 @@ func (c *Core) Start(ctx context.Context) error {
 		specs[name] = dataplane.ServiceProbe{Type: svc.ProbeType, Target: svc.ProbeTarget}
 	}
 	probeVia := c.opts.ProbeProxy
-	if probeVia == "" && c.opts.ProxyListen != "" {
-		// Proxy mode: probe THROUGH the box. Probing direct would measure the host's
-		// own internet and call a dead node healthy — the brain would then never
-		// escalate away from it.
+	if c.opts.ProxyListen != "" {
+		// Proxy mode has ONE socks inbound (ProxyListen); singboxOptions points the
+		// box's probe inbound at exactly that address. The prober must dial the same
+		// one, or it reaches a port nothing is listening on and every probe fails.
+		// ProbeProxy is a tun-mode knob (a separate probe-through-the-tunnel inbound)
+		// and does not apply here, so it must not win — probe THROUGH the box, since
+		// probing direct would measure the host's own internet and call a dead node
+		// healthy, and the brain would never escalate away from it.
+		if probeVia != "" && probeVia != c.opts.ProxyListen {
+			c.log.Warn("ignoring -probe-proxy in proxy mode; probing through -proxy instead",
+				"probe_proxy", probeVia, "proxy", c.opts.ProxyListen)
+		}
 		probeVia = c.opts.ProxyListen
 	}
 	mp := dataplane.NewMultiProberProxy(specs, probeVia)
@@ -326,6 +336,14 @@ func (c *Core) Start(ctx context.Context) error {
 	// client, so nothing behavioural changes by turning it on.
 	if c.opts.MetricsAddr != "" {
 		runners = append(runners, c.observeLoop)
+	}
+	if c.zapExec != nil {
+		// The StrategyExecutor interface only reports a service ENTERING a rung, so
+		// nothing tells the desync engine when the LAST service leaves it. Reconcile
+		// it against the live rung membership each interval: recompose when the set
+		// changed, stop the engine when it emptied (LOT-46). Cheap and idempotent —
+		// the resolver is cached and Apply is a no-op when the argv is unchanged.
+		runners = append(runners, c.desyncReconcileLoop)
 	}
 	for _, run := range runners {
 		c.wg.Add(1)
@@ -374,6 +392,25 @@ func (s clashObserveSource) Connections(ctx context.Context) ([]observe.Conn, er
 		}
 	}
 	return out, nil
+}
+
+// desyncReconcileLoop keeps the nfqws engine in step with the set of services
+// currently on the zapret rung, closing the gap that the enter-only executor
+// interface leaves: when the last service escalates away, this is what stops the
+// engine instead of leaving it desyncing traffic for services long gone.
+func (c *Core) desyncReconcileLoop(ctx context.Context) {
+	t := time.NewTicker(c.opts.Interval)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+			if err := c.zapExec.Reconcile(ctx); err != nil {
+				c.log.Warn("desync reconcile failed (retrying next tick)", "err", err)
+			}
+		}
+	}
 }
 
 // observeLoop feeds the metrics collector the passive eye's snapshot each
@@ -608,7 +645,7 @@ func (c *Core) waitControlReady(ctx context.Context, timeout time.Duration) erro
 // actually support local desync. NFQUEUE is Linux-only, and there is no point
 // wiring a rung no service declares. Returning nil simply means the brain never
 // offers that rung — it escalates straight to VPN instead.
-func (c *Core) newZapretExec(ctx context.Context) executor.StrategyExecutor {
+func (c *Core) newZapretExec(ctx context.Context) *zapretExec {
 	if !c.hasZapretStep() {
 		return nil
 	}
