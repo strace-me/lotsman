@@ -131,3 +131,66 @@ func TestRungProberClampsTimeoutUnderTheClientBudget(t *testing.T) {
 		t.Errorf("a short timeout must be kept, got %s", p.timeout)
 	}
 }
+
+// fakeDirect stands in for the direct-dialing prober.
+type fakeDirect struct {
+	called  bool
+	verdict events.ProductionVerdict
+}
+
+func (f *fakeDirect) Probe(context.Context, string, int) events.ProductionVerdict {
+	f.called = true
+	return f.verdict
+}
+
+func TestRungProberProbesAnInactiveDirectRungDirect(t *testing.T) {
+	// Service sits on the VPN node (selector = vpn_pool). Silent-probing the direct
+	// rung (pos 1) through the selector would measure the VPN node and credit the
+	// direct rung with its health — the LOT-44 mis-credit. With a direct prober set,
+	// it must dial direct instead.
+	base := &fakeBase{verdict: events.ProductionVerdict{OK: true, RTTms: 26}}
+	direct := &fakeDirect{verdict: events.ProductionVerdict{OK: true, RTTms: 9}}
+	p := NewRungProber(base, clashStub(t, "vpn_pool", 42, false), rungReg(), "", 0)
+	p.SetDirectProber(direct)
+
+	got := p.Probe(context.Background(), "web", 1)
+	if base.called {
+		t.Error("an inactive direct rung must NOT be probed through the selector")
+	}
+	if !direct.called || got.RTTms != 9 {
+		t.Errorf("expected the direct prober's verdict; called=%v verdict=%+v", direct.called, got)
+	}
+}
+
+func TestRungProberUsesBaseForADirectRungWhenAlreadyDirect(t *testing.T) {
+	// Selector already on "direct": the ordinary path measures the direct route, so
+	// the special direct prober must NOT be diverted to.
+	base := &fakeBase{verdict: events.ProductionVerdict{OK: true, RTTms: 7}}
+	direct := &fakeDirect{verdict: events.ProductionVerdict{OK: true, RTTms: 9}}
+	p := NewRungProber(base, clashStub(t, "direct", 42, false), rungReg(), "", 0)
+	p.SetDirectProber(direct)
+
+	got := p.Probe(context.Background(), "web", 1)
+	if direct.called {
+		t.Error("with the selector already on direct, base must measure it — no divert")
+	}
+	if !base.called || got.RTTms != 7 {
+		t.Errorf("expected the base verdict; base.called=%v verdict=%+v", base.called, got)
+	}
+}
+
+func TestRungProberVPNRungStillWinsOverDirectProber(t *testing.T) {
+	// Even with a direct prober set, an inactive VPN rung must take the delay-test
+	// path, not the direct prober.
+	direct := &fakeDirect{verdict: events.ProductionVerdict{OK: true, RTTms: 9}}
+	p := NewRungProber(&fakeBase{}, clashStub(t, "direct", 42, false), rungReg(), "", 0)
+	p.SetDirectProber(direct)
+
+	got := p.Probe(context.Background(), "web", 0) // rung 0 is the VPN pool
+	if direct.called {
+		t.Error("an inactive VPN rung must use the pool delay test, not the direct prober")
+	}
+	if !got.OK || got.RTTms != 42 {
+		t.Errorf("verdict = %+v, want the delay-test RTT 42", got)
+	}
+}

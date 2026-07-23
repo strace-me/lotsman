@@ -298,10 +298,22 @@ func (c *Core) Start(ctx context.Context) error {
 		probeVia = c.opts.ProxyListen
 	}
 	mp := dataplane.NewMultiProberProxy(specs, probeVia)
+	// A second prober that dials DIRECT, for silent-probing an inactive zapret/
+	// direct rung while the service sits on a VPN node (LOT-44). Only in proxy mode,
+	// where the host's direct path is genuinely direct; in tun mode the client's own
+	// tun would capture it, so it stays unset and those rungs fall through as before.
+	var directMP *dataplane.MultiProber
+	if c.opts.ProxyListen != "" {
+		directMP = dataplane.NewMultiProberProxy(specs, "")
+	}
 	for name, svc := range c.reg.Services {
 		for _, step := range svc.Chain {
 			if step.ProbeType != "" {
-				mp.OverrideRung(name, step.Position, dataplane.ServiceProbe{Type: step.ProbeType, Target: step.ProbeTarget})
+				ov := dataplane.ServiceProbe{Type: step.ProbeType, Target: step.ProbeTarget}
+				mp.OverrideRung(name, step.Position, ov)
+				if directMP != nil {
+					directMP.OverrideRung(name, step.Position, ov)
+				}
 			}
 		}
 	}
@@ -309,6 +321,9 @@ func (c *Core) Start(ctx context.Context) error {
 	// traffic would follow the active rung and credit the wrong one), so those are
 	// measured with a Clash delay test of the pool instead.
 	rp := dataplane.NewRungProber(mp, c.clash, c.reg, "", 0)
+	if directMP != nil {
+		rp.SetDirectProber(directMP)
+	}
 
 	c.prober = rp
 	mc := metrics.New(c.brain.Snapshot, c.kb.Snapshot)
