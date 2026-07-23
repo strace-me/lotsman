@@ -166,7 +166,16 @@ func (z *zapretExec) composeAndApplyLocked(ctx context.Context) (*zaptune.Plan, 
 				"files", changed)
 		}
 	}
-	z.log.Info("zapret: desync applied", "services", len(active), "chosen", plan.Chosen)
+	// Only announce a real change. Enable (on every reassert) and the periodic
+	// Reconcile both recompose from active() each tick; when nothing changed, Apply
+	// is a no-op (restarted=false), and logging "desync applied" every tick from two
+	// sources is just noise. A genuine (re)apply — a new service, a recipe change —
+	// still reports at INFO.
+	if restarted {
+		z.log.Info("zapret: desync applied", "services", len(active), "chosen", plan.Chosen)
+	} else {
+		z.log.Debug("zapret: desync unchanged", "services", len(active))
+	}
 	return &plan, nil
 }
 
