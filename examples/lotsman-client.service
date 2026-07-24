@@ -36,6 +36,7 @@ ExecStart=/usr/local/bin/lotsman-client \
 	-config ${LOTSMAN_CONFIG} \
 	-state-file ${LOTSMAN_STATE_DIR}/state.json \
 	-kb-file ${LOTSMAN_STATE_DIR}/kb.json \
+	-singbox-config ${LOTSMAN_STATE_DIR}/singbox.json \
 	-control-socket ${LOTSMAN_RUNTIME_DIR}/control.sock \
 	-metrics-addr ${LOTSMAN_METRICS_ADDR} \
 	$LOTSMAN_EXTRA
