@@ -23,6 +23,8 @@
 		<string>/Users/YOU/.config/lotsman/client.yaml</string>
 		<string>-proxy</string>
 		<string>127.0.0.1:1080</string>
+		<string>-singbox-config</string>
+		<string>/Users/YOU/.local/state/lotsman/singbox.json</string>
 		<string>-state-file</string>
 		<string>/Users/YOU/.local/state/lotsman/state.json</string>
 		<string>-kb-file</string>
