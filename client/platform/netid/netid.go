@@ -31,6 +31,8 @@ type Network struct {
 	Gateway string // default-route next hop, "" if unknown
 	IFace   string // egress interface, "" if unknown
 	MAC     string // gateway hardware address, "" if it could not be read
+	Kind    string // "cellular" when egress is a modem, else "" (Wi-Fi/Ethernet)
+	Carrier string // MCC+MNC operator code on cellular, "" otherwise
 }
 
 // Detect returns the current network's identity. It never returns an error: an
@@ -40,6 +42,24 @@ func Detect(ctx context.Context) Network {
 	if gw == "" {
 		return Network{Id: Fallback}
 	}
+
+	// Cellular egress needs a different key entirely. A modem link is point-to-point
+	// (no gateway MAC to read) and its gateway IP is re-issued per attach / tower, so
+	// the Wi-Fi identity would either fail or thrash — a new store every reconnect,
+	// and learning that never accumulates. The DPI on mobile data is a property of
+	// the CARRIER, not the cell, so key on the operator (stable per SIM), and only
+	// fall back to the interface name — never the churning gateway IP.
+	if isCellularIface(iface) {
+		n := Network{Gateway: gw, IFace: iface, Kind: "cellular"}
+		if op := carrierCode(ctx); op != "" {
+			n.Carrier = op
+			n.Id = shortHash("cell:" + op)
+		} else {
+			n.Id = shortHash("cell-iface:" + iface)
+		}
+		return n
+	}
+
 	mac := gatewayMAC(ctx, gw, iface)
 	n := Network{Gateway: gw, IFace: iface, MAC: mac}
 	switch {
@@ -53,6 +73,77 @@ func Detect(ctx context.Context) Network {
 		n.Id = shortHash("route:" + gw + "/" + iface)
 	}
 	return n
+}
+
+// cellularPrefixes are the interface-name prefixes of a direct mobile modem. USB
+// or RNDIS phone tethering is deliberately absent: there the phone NATs and
+// presents itself as an ordinary gateway with a MAC, so the Wi-Fi/Ethernet path
+// keys it correctly and stably.
+var cellularPrefixes = []string{"rmnet", "wwan", "wwp", "ppp", "cdc-wdm"}
+
+// isCellularIface reports whether iface is a direct cellular modem link.
+func isCellularIface(iface string) bool {
+	for _, p := range cellularPrefixes {
+		if strings.HasPrefix(iface, p) {
+			return true
+		}
+	}
+	return false
+}
+
+// carrierCode returns the registered operator's MCC+MNC via ModemManager, or ""
+// when ModemManager is absent or reports nothing. It is best-effort: without it
+// the caller keys on the interface name instead.
+func carrierCode(ctx context.Context) string {
+	list, err := exec.CommandContext(ctx, "mmcli", "-L").Output()
+	if err != nil {
+		return ""
+	}
+	modem := parseFirstModem(string(list))
+	if modem == "" {
+		return ""
+	}
+	kv, err := exec.CommandContext(ctx, "mmcli", "-m", modem, "-K").Output()
+	if err != nil {
+		return ""
+	}
+	return parseOperatorCode(string(kv))
+}
+
+// parseFirstModem pulls the first modem index/path out of `mmcli -L` output, e.g.
+// "/org/freedesktop/ModemManager1/Modem/0 [Quectel] EG25" -> "0".
+func parseFirstModem(listOutput string) string {
+	for _, line := range strings.Split(listOutput, "\n") {
+		i := strings.Index(line, "/Modem/")
+		if i < 0 {
+			continue
+		}
+		rest := line[i+len("/Modem/"):]
+		idx := rest
+		if sp := strings.IndexAny(rest, " \t"); sp >= 0 {
+			idx = rest[:sp]
+		}
+		if idx != "" {
+			return idx
+		}
+	}
+	return ""
+}
+
+// parseOperatorCode extracts modem.3gpp.operator-code (MCC+MNC) from `mmcli -m N
+// -K` key-value output, e.g. "modem.3gpp.operator-code : 25001" -> "25001".
+func parseOperatorCode(kvOutput string) string {
+	for _, line := range strings.Split(kvOutput, "\n") {
+		if !strings.Contains(line, "operator-code") {
+			continue
+		}
+		if _, val, ok := strings.Cut(line, ":"); ok {
+			if v := strings.TrimSpace(val); v != "" && v != "--" {
+				return v
+			}
+		}
+	}
+	return ""
 }
 
 // defaultRoute parses `ip route show default` for the next-hop IP and interface.

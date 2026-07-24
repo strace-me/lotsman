@@ -169,6 +169,42 @@ func (k *KB) Stats(service, strategyID string) Stats {
 	}
 }
 
+// Reload atomically REPLACES the whole knowledge base with the contents of path
+// (empty if the file does not exist — a cold start for a not-seen-before network).
+// Unlike Load, which merges into the existing maps, this discards what was there:
+// it is how the client swaps to another network's KB on the move without carrying
+// the previous network's learning across. The file is read before the lock so a
+// concurrent reader never observes a half-populated store.
+func (k *KB) Reload(path string) error {
+	data, err := os.ReadFile(path)
+	if err != nil && !os.IsNotExist(err) {
+		return err
+	}
+	var in persisted
+	if len(data) > 0 {
+		if err := json.Unmarshal(data, &in); err != nil {
+			return err
+		}
+	}
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	k.ewma = make(map[string]float64, len(in.Records))
+	k.rtt = make(map[string]float64, len(in.Records))
+	k.jitter = make(map[string]float64, len(in.Records))
+	k.count = make(map[string]float64, len(in.Records))
+	k.cfail = make(map[string]int, len(in.Records))
+	k.quar = make(map[string]int, len(in.Records))
+	for key, r := range in.Records {
+		k.ewma[key] = r.EWMA
+		k.rtt[key] = r.RTT
+		k.jitter[key] = r.Jitter
+		k.count[key] = r.Count
+		k.cfail[key] = r.CFail
+		k.quar[key] = r.Quar
+	}
+	return nil
+}
+
 // NetworkPrior aggregates a strategy's observed success across every OTHER
 // service in this KB — a per-network prior, since the client keeps one KB per
 // network (-kb-dir). It answers "how well has this recipe done here, for anything

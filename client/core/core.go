@@ -52,6 +52,9 @@ var defaultTunExcludes = []string{
 const (
 	defaultQNum      = 200 // the router's nfqws queue number
 	defaultConnbytes = 12  // desync only the first N packets of a connection
+
+	roamPollInterval = 15 * time.Second // how often to re-fingerprint the network
+	roamDebounce     = 2                // consecutive polls a new network must persist before we swap (rides out a transient blip)
 )
 
 // Options configures a client Core.
@@ -122,10 +125,18 @@ type Core struct {
 
 	bus    *events.Bus
 	kb     *kb.KB
-	kbFile string // resolved KB path (KBFile, or a per-network file under KBDir)
+	kbFile string // resolved KB path (KBFile, or a per-network file under KBDir); guarded by mu
 	clash  *dataplane.ClashClient
 	brain  *brain.Brain
 	secret string
+
+	// Roaming: re-detect the network on an interval and swap the KB when it changes.
+	// detect is the fingerprint source (netid.Detect; overridable in tests). The
+	// three roam fields are touched only by roamLoop's single goroutine.
+	detect       func(context.Context) netid.Network
+	currentNetID string // network the live KB belongs to
+	pendingNet   string // a candidate new network, awaiting debounce confirmation
+	pendingCount int    // consecutive polls that saw pendingNet
 
 	metrics    *metrics.Collector // populated in Start; nil until then
 	metricsSrv *http.Server       // non-nil only when MetricsAddr is served
@@ -164,7 +175,7 @@ func New(conf *config.Config, box ProxyCore, opts Options, log *slog.Logger) *Co
 	opts.HostlistDir = absDir(opts.HostlistDir)
 	opts.ZapretFiles = absDir(opts.ZapretFiles)
 	opts.SingboxConfig = absDir(opts.SingboxConfig)
-	return &Core{conf: conf, reg: conf.Registry, box: box, opts: opts, log: log}
+	return &Core{conf: conf, reg: conf.Registry, box: box, opts: opts, log: log, detect: netid.Detect}
 }
 
 // Start generates the sing-box config, brings the box up, and launches the
@@ -365,6 +376,12 @@ func (c *Core) Start(ctx context.Context) error {
 		// the resolver is cached and Apply is a no-op when the argv is unchanged.
 		runners = append(runners, c.desyncReconcileLoop)
 	}
+	if c.opts.KBDir != "" {
+		// Per-network mode: watch for a network change and swap the KB to that
+		// network's store on the move, instead of applying the previous network's
+		// learning to a different DPI (roaming).
+		runners = append(runners, c.roamLoop)
+	}
 	for _, run := range runners {
 		c.wg.Add(1)
 		go func(fn func(context.Context)) {
@@ -433,6 +450,66 @@ func (c *Core) desyncReconcileLoop(ctx context.Context) {
 	}
 }
 
+// roamLoop re-fingerprints the network on an interval and swaps the KB when it
+// changes. It runs only in per-network mode (KBDir set).
+func (c *Core) roamLoop(ctx context.Context) {
+	t := time.NewTicker(roamPollInterval)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+			c.maybeRoam(ctx, c.detect(ctx))
+		}
+	}
+}
+
+// maybeRoam decides whether net is a confirmed move to a different network and,
+// if so, saves the current KB and swaps in that network's store. It reports
+// whether a swap happened. A change must persist for roamDebounce consecutive
+// polls to count, so a momentary disconnect (which reads as Fallback) or a brief
+// flap does not thrash the store. Only roamLoop's goroutine calls this.
+func (c *Core) maybeRoam(ctx context.Context, net netid.Network) bool {
+	// An undetectable network (a transient disconnect) is not a move: keep the
+	// current store and wait for a real network rather than swapping to the shared
+	// Fallback id mid-blip.
+	if net.Id == "" || net.Id == netid.Fallback || net.Id == c.currentNetID {
+		c.pendingNet, c.pendingCount = "", 0
+		return false
+	}
+	if net.Id == c.pendingNet {
+		c.pendingCount++
+	} else {
+		c.pendingNet, c.pendingCount = net.Id, 1
+	}
+	if c.pendingCount < roamDebounce {
+		return false
+	}
+
+	c.mu.Lock()
+	old := c.kbFile
+	c.mu.Unlock()
+	if err := c.kb.Save(old); err != nil {
+		c.log.Warn("kb save before roam failed (learning for the old network may be lost)", "path", old, "err", err)
+	}
+	newPath := filepath.Join(c.opts.KBDir, net.Id+".json")
+	if err := c.kb.Reload(newPath); err != nil {
+		// Keep the current KB rather than run on a half-swapped one.
+		c.log.Warn("kb reload on roam failed, keeping the previous store", "path", newPath, "err", err)
+		c.pendingNet, c.pendingCount = "", 0
+		return false
+	}
+	c.mu.Lock()
+	c.kbFile = newPath
+	c.mu.Unlock()
+	c.currentNetID = net.Id
+	c.pendingNet, c.pendingCount = "", 0
+	c.log.Info("network changed — swapped knowledge base",
+		"network", net.Id, "kind", net.Kind, "carrier", net.Carrier, "iface", net.IFace, "kb", newPath)
+	return true
+}
+
 // observeLoop feeds the metrics collector the passive eye's snapshot each
 // interval. It runs only when metrics are served (see Start) and never touches
 // escalation — a failed pass (sing-box down, no connections yet) is logged and
@@ -476,8 +553,10 @@ func (c *Core) resolveKBPath(ctx context.Context) {
 		return
 	}
 	c.kbFile = filepath.Join(c.opts.KBDir, net.Id+".json")
+	c.currentNetID = net.Id
 	c.log.Info("per-network knowledge base",
-		"network", net.Id, "gateway", net.Gateway, "iface", net.IFace, "mac_known", net.MAC != "", "kb", c.kbFile)
+		"network", net.Id, "gateway", net.Gateway, "iface", net.IFace,
+		"mac_known", net.MAC != "", "kind", net.Kind, "carrier", net.Carrier, "kb", c.kbFile)
 }
 
 // Stop cancels the autonomy loop, stops sing-box, and persists the KB.
