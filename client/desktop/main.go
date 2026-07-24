@@ -76,6 +76,7 @@ func main() {
 		hostlistDir   = flag.String("hostlist-dir", "", "dir for per-service nfqws hostlist files (default /var/lib/lotsman/hostlists as root). MUST stay readable after nfqws drops privileges, so a path under a 0700 home will not work. Empty and non-root inlines domains into argv instead, which costs an engine restart on every membership change")
 		proxyListen   = flag.String("proxy", "", "PROXY MODE: run sing-box on this socks address instead of capturing the system with a tun (no root needed, nothing intercepted)")
 		refreshEvery  = flag.Duration("refresh-interval", 5*time.Minute, "how often to re-fetch subscriptions and reconcile the config (0 = never)")
+		roamInterval  = flag.Duration("roam-interval", 15*time.Second, "how often to re-fingerprint the network and swap the KB on a change (only with -kb-dir)")
 		controlSock   = flag.String("control-socket", "", "unix socket for the local control API (empty = default under the runtime dir)")
 		metricsAddr   = flag.String("metrics-addr", "", "serve Prometheus /metrics on this host:port (empty = off; also enables the passive observe pass that surfaces frozen/leak/one-way flows)")
 		baselineFile  = flag.String("baseline-file", "", "persist the reconciler anti-churn baseline here (empty = derive from -singbox-config; the guard then survives restarts)")
@@ -151,6 +152,7 @@ func main() {
 		SingboxBin:    *singboxBin,
 		SingboxConfig: *singboxCfg,
 		RefreshEvery:  *refreshEvery,
+		RoamInterval:  *roamInterval,
 		QNum:          *qnum,
 		WAN:           *wan,
 		ProxyListen:   *proxyListen,

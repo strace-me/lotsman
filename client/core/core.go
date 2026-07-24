@@ -85,6 +85,7 @@ type Options struct {
 	SingboxConfig string        // path of the live sing-box config the reconciler swaps
 	StateFile     string        // persists each service's chain position across restarts ("" = start cold every time)
 	RefreshEvery  time.Duration // how often to re-fetch subscriptions and reconcile (0 = never)
+	RoamInterval  time.Duration // how often to re-fingerprint the network for roaming (0 = default 15s; only in -kb-dir mode)
 	QNum          int           // NFQUEUE queue number (0 = 200, matching the router)
 	WAN           string        // egress interface for the nft rules ("" = autodetect the default route)
 
@@ -453,7 +454,11 @@ func (c *Core) desyncReconcileLoop(ctx context.Context) {
 // roamLoop re-fingerprints the network on an interval and swaps the KB when it
 // changes. It runs only in per-network mode (KBDir set).
 func (c *Core) roamLoop(ctx context.Context) {
-	t := time.NewTicker(roamPollInterval)
+	every := c.opts.RoamInterval
+	if every <= 0 {
+		every = roamPollInterval
+	}
+	t := time.NewTicker(every)
 	defer t.Stop()
 	for {
 		select {
