@@ -277,3 +277,42 @@ func TestNetworkPriorAggregatesAndExcludesSelf(t *testing.T) {
 		t.Errorf("an untried recipe must have no prior, got n=%v", n)
 	}
 }
+
+func TestReloadReplacesRatherThanMerges(t *testing.T) {
+	dir := t.TempDir()
+	// KB for network A, saved to disk.
+	a := New()
+	a.RecordOutcome("youtube", "recipeA", true, 10)
+	if err := a.Save(dir + "/a.json"); err != nil {
+		t.Fatal(err)
+	}
+	// KB for network B, saved to disk.
+	b := New()
+	b.RecordOutcome("discord", "recipeB", true, 10)
+	if err := b.Save(dir + "/b.json"); err != nil {
+		t.Fatal(err)
+	}
+
+	// Live KB currently holds A; Reload to B must DISCARD A, not merge.
+	live := New()
+	if err := live.Load(dir + "/a.json"); err != nil {
+		t.Fatal(err)
+	}
+	if err := live.Reload(dir + "/b.json"); err != nil {
+		t.Fatal(err)
+	}
+	if !live.Stats("discord", "recipeB").Seen {
+		t.Error("Reload must load the new network's records")
+	}
+	if live.Stats("youtube", "recipeA").Seen {
+		t.Error("Reload must DISCARD the previous network's records, not merge them")
+	}
+
+	// Reloading a not-seen-before network (missing file) is a clean cold start.
+	if err := live.Reload(dir + "/never.json"); err != nil {
+		t.Fatalf("reload of a missing file must be a cold start, got %v", err)
+	}
+	if live.Stats("discord", "recipeB").Seen {
+		t.Error("a cold reload must leave an empty KB")
+	}
+}
