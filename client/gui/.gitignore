@@ -1,0 +1,4 @@
+# Build artifacts — `wails build` / `npm run build` regenerate these.
+frontend/node_modules/
+frontend/dist/
+build/
