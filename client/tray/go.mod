@@ -11,4 +11,9 @@ require (
 	github.com/strace-me/lotsman v0.0.0
 )
 
+require (
+	github.com/godbus/dbus/v5 v5.1.0 // indirect
+	golang.org/x/sys v0.35.0 // indirect
+)
+
 replace github.com/strace-me/lotsman => ../..
