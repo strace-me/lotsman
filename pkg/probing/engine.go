@@ -41,6 +41,8 @@ type Engine struct {
 	stall    func(service string) bool // LOT-43: is this service throttle-stalled right now? nil = disabled
 
 	rotation map[string]int // service -> next lower position to silent-probe
+
+	trigger chan string // on-demand "recheck now" requests, consumed on Run's goroutine
 }
 
 // SetStallOracle wires a per-service "is this service throttle-stalled?" signal
@@ -60,6 +62,19 @@ func New(bus *events.Bus, prober dataplane.Prober, pos Positioner, reg *registry
 	return &Engine{
 		bus: bus, prober: prober, pos: pos, reg: reg, kb: k, obs: obs, fails: fails,
 		interval: interval, log: log, rotation: map[string]int{},
+		trigger: make(chan string, 8),
+	}
+}
+
+// ProbeNow requests an immediate probe of one service, bypassing the interval —
+// the UI's "recheck now". Safe to call from any goroutine: the request is handed
+// to Run's loop (which owns the probe path and the rotation map) and dropped if a
+// recheck is already queued, so mashing the button cannot pile up work. The
+// resulting verdict reaches Brain through the very same bus an interval probe uses.
+func (e *Engine) ProbeNow(service string) {
+	select {
+	case e.trigger <- service:
+	default: // a recheck is already queued — one is enough
 	}
 }
 
@@ -75,6 +90,11 @@ func (e *Engine) Run(ctx context.Context) {
 			for name := range e.reg.Services {
 				e.probeService(ctx, name)
 			}
+		case name := <-e.trigger:
+			// An on-demand recheck, run on THIS goroutine so it shares the rotation
+			// map safely and feeds the brain through the same verdict bus as an
+			// interval probe — no special path, no reassert conflict.
+			e.probeService(ctx, name)
 		}
 	}
 }

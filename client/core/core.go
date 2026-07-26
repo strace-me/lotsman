@@ -129,6 +129,8 @@ type Core struct {
 	kbFile string // resolved KB path (KBFile, or a per-network file under KBDir); guarded by mu
 	clash  *dataplane.ClashClient
 	brain  *brain.Brain
+	eng    *probing.Engine     // probing engine, retained so the UI can force a recheck
+	events *audit.RingRecorder // in-memory brain-transition history for the UI
 	secret string
 
 	// Roaming: re-detect the network on an interval and swap the KB when it changes.
@@ -284,7 +286,10 @@ func (c *Core) Start(ctx context.Context) error {
 		execs = append(execs, z)
 	}
 	c.dropUnsupportedRungs(execs)
-	c.brain = brain.New(c.bus, c.reg, c.kb, brain.DefaultConfig(), audit.Nop{}, c.log)
+	// Capture brain rung-transitions into a bounded in-memory ring so the UI can read
+	// the "история событий"; the client discarded them via audit.Nop before.
+	c.events = audit.NewRingRecorder(0)
+	c.brain = brain.New(c.bus, c.reg, c.kb, brain.DefaultConfig(), c.events, c.log)
 	// Re-converge selectors every interval so a box restart (which resets them)
 	// heals without waiting for a state transition. Idempotent, single writer.
 	c.brain.SetReassert(c.opts.Interval)
@@ -362,6 +367,7 @@ func (c *Core) Start(ctx context.Context) error {
 		})
 	}
 	eng := probing.New(c.bus, rp, c.brain, c.reg, c.kb, mc, faillog.Nop{}, c.opts.Interval, c.log)
+	c.eng = eng // retained so the UI can force an on-demand recheck
 
 	c.mu.Lock()
 	runCtx, cancel := c.life, c.lifeCancel
@@ -679,6 +685,29 @@ func (c *Core) Healthy(ctx context.Context) bool {
 	defer cancel()
 	_, err := c.clash.Proxy(ctx, "direct")
 	return err == nil
+}
+
+// Recheck forces an immediate probe of one service (the UI's "recheck now"). It
+// returns before the probe completes; the verdict lands on the brain through the
+// normal bus. eng is checked first so a request before Start cannot nil-deref reg.
+func (c *Core) Recheck(service string) error {
+	if c.eng == nil {
+		return fmt.Errorf("core: probing engine not running")
+	}
+	if _, ok := c.reg.Services[service]; !ok {
+		return fmt.Errorf("core: unknown service %q", service)
+	}
+	c.eng.ProbeNow(service)
+	return nil
+}
+
+// Events returns recent brain rung-transitions newest-first (the UI's "история
+// событий"), optionally filtered to one service; limit <= 0 returns all retained.
+func (c *Core) Events(limit int, service string) []audit.Transition {
+	if c.events == nil {
+		return nil
+	}
+	return c.events.Snapshot(limit, service)
 }
 
 // RenderConfig generates the sing-box config the client would run, WITHOUT

@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strconv"
 	"time"
 )
 
@@ -78,6 +79,8 @@ func (s *ControlServer) Serve(path string) error {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /status", s.handleStatus)
 	mux.HandleFunc("POST /stop", s.handleStop)
+	mux.HandleFunc("POST /service/{name}/recheck", s.handleRecheck)
+	mux.HandleFunc("GET /events", s.handleEvents)
 
 	s.ln = ln
 	s.srv = &http.Server{Handler: mux, ReadHeaderTimeout: 5 * time.Second}
@@ -119,4 +122,28 @@ func (s *ControlServer) handleStop(w http.ResponseWriter, _ *http.Request) {
 	// Return the response before tearing the service down, so the caller sees the
 	// acknowledgement rather than a dropped connection.
 	go s.stop()
+}
+
+// handleRecheck forces an immediate probe of one service — the UI's "recheck now".
+// 400 on an unknown service so a stray request cannot wedge the engine.
+func (s *ControlServer) handleRecheck(w http.ResponseWriter, r *http.Request) {
+	if err := s.core.Recheck(r.PathValue("name")); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	w.WriteHeader(http.StatusAccepted)
+	w.Write([]byte(`{"rechecking":true}`))
+}
+
+// handleEvents returns recent brain rung-transitions newest-first (the "история
+// событий" surface). ?service= filters to one service; ?limit=N caps the count.
+func (s *ControlServer) handleEvents(w http.ResponseWriter, r *http.Request) {
+	limit := 0
+	if v := r.URL.Query().Get("limit"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil {
+			limit = n
+		}
+	}
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(s.core.Events(limit, r.URL.Query().Get("service")))
 }

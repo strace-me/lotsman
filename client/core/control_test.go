@@ -10,6 +10,8 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+
+	"github.com/strace-me/lotsman/pkg/audit"
 )
 
 // shortTempDir keeps the socket path under the sockaddr_un limit: the default
@@ -117,5 +119,39 @@ func TestControlCloseRemovesTheSocket(t *testing.T) {
 	}
 	if _, err := os.Stat(path); !os.IsNotExist(err) {
 		t.Error("Close must remove the socket so the next start binds cleanly")
+	}
+}
+
+func TestControlEventsIsServedOverTheSocket(t *testing.T) {
+	path, _ := startControl(t, func() {})
+
+	resp, err := unixClient(path).Get("http://unix/events")
+	if err != nil {
+		t.Fatalf("get events: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status code = %d", resp.StatusCode)
+	}
+	// A core that never started has no history, but the endpoint still answers
+	// cleanly rather than erroring — a UI attaching early gets an empty list.
+	var got []audit.Transition
+	if err := json.NewDecoder(resp.Body).Decode(&got); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+}
+
+func TestControlRecheckRejectsUnknownService(t *testing.T) {
+	path, _ := startControl(t, func() {})
+
+	resp, err := unixClient(path).Post("http://unix/service/nope/recheck", "", nil)
+	if err != nil {
+		t.Fatalf("post recheck: %v", err)
+	}
+	defer resp.Body.Close()
+	// A never-started core has no probing engine; a recheck must be refused with a
+	// 400, not panic on the nil registry.
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Errorf("status code = %d, want 400", resp.StatusCode)
 	}
 }
