@@ -7,6 +7,7 @@
 package control
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -98,6 +99,13 @@ type Event struct {
 	Reason        string    `json:"reason"`
 }
 
+// ConfigDoc is the service's config file: the raw YAML plus the path it lives at
+// (path is read-only — the GUI shows it; the service owns the file).
+type ConfigDoc struct {
+	Path string `json:"path"`
+	YAML string `json:"yaml"`
+}
+
 // Client talks to one control socket. It is safe for concurrent use.
 type Client struct {
 	http *http.Client
@@ -152,6 +160,25 @@ func (c *Client) Stop(ctx context.Context) error {
 	return c.post(ctx, "/stop")
 }
 
+// Config fetches the service's current config file (raw YAML + its path).
+func (c *Client) Config(ctx context.Context) (ConfigDoc, error) {
+	var d ConfigDoc
+	err := c.getJSON(ctx, "/config", &d)
+	return d, err
+}
+
+// ValidateConfig checks a candidate config without writing it; the returned error
+// carries the parser message when the YAML is invalid.
+func (c *Client) ValidateConfig(ctx context.Context, yaml string) error {
+	return c.postJSON(ctx, "/config/validate", ConfigDoc{YAML: yaml})
+}
+
+// SetConfig validates + writes a new config and applies it. The service re-execs,
+// so the socket briefly drops — the caller should expect to reconnect.
+func (c *Client) SetConfig(ctx context.Context, yaml string) error {
+	return c.postJSON(ctx, "/config", ConfigDoc{YAML: yaml})
+}
+
 func (c *Client) getJSON(ctx context.Context, path string, out any) error {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, "http://unix"+path, nil)
 	if err != nil {
@@ -182,6 +209,27 @@ func (c *Client) post(ctx context.Context, path string) error {
 	}
 	defer resp.Body.Close()
 	// Side-effecting calls ack with 202 Accepted (mirroring the server).
+	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusAccepted {
+		return statusError("POST", path, resp)
+	}
+	return nil
+}
+
+func (c *Client) postJSON(ctx context.Context, path string, body any) error {
+	b, err := json.Marshal(body)
+	if err != nil {
+		return err
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, "http://unix"+path, bytes.NewReader(b))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := c.http.Do(req)
+	if err != nil {
+		return fmt.Errorf("control: POST %s: %w", path, err)
+	}
+	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusAccepted {
 		return statusError("POST", path, resp)
 	}

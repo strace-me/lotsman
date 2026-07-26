@@ -1,6 +1,7 @@
 package core
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"io"
@@ -153,5 +154,73 @@ func TestControlRecheckRejectsUnknownService(t *testing.T) {
 	// 400, not panic on the nil registry.
 	if resp.StatusCode != http.StatusBadRequest {
 		t.Errorf("status code = %d, want 400", resp.StatusCode)
+	}
+}
+
+// validStarterConfig parses cleanly (builtin `streaming` category supplies the chain).
+const validStarterConfig = `subscriptions:
+  - { name: s1, url: "https://example.com/sub", format: auto, tags: [normal], enabled: true }
+services:
+  - name: youtube
+    category: streaming
+    probe_target: https://www.youtube.com/generate_204
+    domains: [youtube.com]
+`
+
+func TestControlConfigEditingDisabledByDefault(t *testing.T) {
+	path, _ := startControl(t, func() {})
+	// Without WithConfig the file endpoints must refuse rather than expose a path.
+	resp, err := unixClient(path).Get("http://unix/config")
+	if err != nil {
+		t.Fatalf("get config: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusNotImplemented {
+		t.Errorf("GET /config without WithConfig = %d, want 501", resp.StatusCode)
+	}
+}
+
+func TestControlConfigValidate(t *testing.T) {
+	path, _ := startControl(t, func() {})
+	post := func(yaml string) int {
+		body, _ := json.Marshal(map[string]string{"yaml": yaml})
+		resp, err := unixClient(path).Post("http://unix/config/validate", "application/json", bytes.NewReader(body))
+		if err != nil {
+			t.Fatalf("post validate: %v", err)
+		}
+		defer resp.Body.Close()
+		return resp.StatusCode
+	}
+	if code := post("this: [is not: valid: lotsman"); code != http.StatusBadRequest {
+		t.Errorf("invalid config validate = %d, want 400", code)
+	}
+	if code := post(validStarterConfig); code != http.StatusOK {
+		t.Errorf("valid config validate = %d, want 200", code)
+	}
+}
+
+func TestControlConfigGetReturnsTheFile(t *testing.T) {
+	dir := shortTempDir(t)
+	cfg := filepath.Join(dir, "config.yaml")
+	if err := os.WriteFile(cfg, []byte(validStarterConfig), 0o600); err != nil {
+		t.Fatalf("seed config: %v", err)
+	}
+	path, s := startControl(t, func() {})
+	s.WithConfig(cfg, func() {}) // handlers read configPath live, so post-Serve is fine
+
+	resp, err := unixClient(path).Get("http://unix/config")
+	if err != nil {
+		t.Fatalf("get config: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("GET /config = %d, want 200", resp.StatusCode)
+	}
+	var got struct{ Path, YAML string }
+	if err := json.NewDecoder(resp.Body).Decode(&got); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if got.Path != cfg || got.YAML != validStarterConfig {
+		t.Errorf("config mismatch: path=%q yaml-len=%d", got.Path, len(got.YAML))
 	}
 }

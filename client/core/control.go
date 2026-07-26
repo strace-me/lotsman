@@ -3,6 +3,7 @@ package core
 import (
 	"encoding/json"
 	"fmt"
+	"io"
 	"log/slog"
 	"net"
 	"net/http"
@@ -10,6 +11,8 @@ import (
 	"path/filepath"
 	"strconv"
 	"time"
+
+	"github.com/strace-me/lotsman/pkg/config"
 )
 
 // maxUnixSocketPath is a conservative bound below the smallest sockaddr_un limit
@@ -26,11 +29,13 @@ const maxUnixSocketPath = 100
 // permissions, which the kernel enforces for us. That is the same reasoning that
 // made the Clash-API secret mandatory, applied one layer up.
 type ControlServer struct {
-	core *Core
-	stop func()
-	srv  *http.Server
-	ln   net.Listener
-	log  *slog.Logger
+	core       *Core
+	stop       func()
+	restart    func() // re-exec the service to apply a new config (nil = config editing off)
+	configPath string // path of the config file the GUI edits ("" = config editing off)
+	srv        *http.Server
+	ln         net.Listener
+	log        *slog.Logger
 }
 
 // Status is the ORIGINAL /status shape: whether the data plane is actually up
@@ -46,6 +51,17 @@ type Status struct {
 // NewControlServer returns a server for core. stop is invoked by POST /stop.
 func NewControlServer(core *Core, stop func(), log *slog.Logger) *ControlServer {
 	return &ControlServer{core: core, stop: stop, log: log}
+}
+
+// WithConfig enables the config-editing endpoints (GET /config, POST /config,
+// POST /config/validate). The server reads and writes the config file at path and
+// applies a saved config by calling restart (a graceful Stop + re-exec). Left off
+// by default so a caller that does not want in-app config editing — or a test —
+// simply never enables it.
+func (s *ControlServer) WithConfig(path string, restart func()) *ControlServer {
+	s.configPath = path
+	s.restart = restart
+	return s
 }
 
 // Serve binds path and serves in the background until Close. A stale socket left
@@ -81,6 +97,9 @@ func (s *ControlServer) Serve(path string) error {
 	mux.HandleFunc("POST /stop", s.handleStop)
 	mux.HandleFunc("POST /service/{name}/recheck", s.handleRecheck)
 	mux.HandleFunc("GET /events", s.handleEvents)
+	mux.HandleFunc("GET /config", s.handleGetConfig)
+	mux.HandleFunc("POST /config", s.handleSetConfig)
+	mux.HandleFunc("POST /config/validate", s.handleValidateConfig)
 
 	s.ln = ln
 	s.srv = &http.Server{Handler: mux, ReadHeaderTimeout: 5 * time.Second}
@@ -146,4 +165,88 @@ func (s *ControlServer) handleEvents(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(s.core.Events(limit, r.URL.Query().Get("service")))
+}
+
+// configDoc is the service's config file as the GUI edits it: the raw on-disk YAML
+// plus the path it lives at (shown read-only in the editor).
+type configDoc struct {
+	Path string `json:"path"`
+	YAML string `json:"yaml"`
+}
+
+func (s *ControlServer) handleGetConfig(w http.ResponseWriter, _ *http.Request) {
+	if s.configPath == "" {
+		http.Error(w, "in-app config editing is not enabled on this instance", http.StatusNotImplemented)
+		return
+	}
+	data, err := os.ReadFile(s.configPath)
+	if err != nil {
+		http.Error(w, "read config: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(configDoc{Path: s.configPath, YAML: string(data)})
+}
+
+// handleValidateConfig parses a candidate config WITHOUT writing it, so the editor
+// can offer a "check" that never risks the running config.
+func (s *ControlServer) handleValidateConfig(w http.ResponseWriter, r *http.Request) {
+	in, err := readConfigDoc(r)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	if _, err := config.Parse([]byte(in.YAML)); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	w.WriteHeader(http.StatusOK)
+	w.Write([]byte(`{"valid":true}`))
+}
+
+// handleSetConfig validates a candidate config, writes it atomically, and applies
+// it by re-executing the service. It validates BEFORE touching the file — a config
+// that fails to parse is never written, so the service can always restart into a
+// good file. That is the whole safety of editing config from a UI.
+func (s *ControlServer) handleSetConfig(w http.ResponseWriter, r *http.Request) {
+	if s.configPath == "" || s.restart == nil {
+		http.Error(w, "in-app config editing is not enabled on this instance", http.StatusNotImplemented)
+		return
+	}
+	in, err := readConfigDoc(r)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	if _, err := config.Parse([]byte(in.YAML)); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	if err := writeFileAtomic(s.configPath, []byte(in.YAML), 0o600); err != nil {
+		http.Error(w, "write config: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+	w.WriteHeader(http.StatusAccepted)
+	w.Write([]byte(`{"applied":true}`))
+	// Apply AFTER the ack, so the caller sees success before the socket drops during
+	// the re-exec. The GUI already tolerates the brief unreachable window.
+	go s.restart()
+}
+
+func readConfigDoc(r *http.Request) (configDoc, error) {
+	var in configDoc
+	if err := json.NewDecoder(io.LimitReader(r.Body, 1<<20)).Decode(&in); err != nil {
+		return configDoc{}, fmt.Errorf("bad request: %w", err)
+	}
+	return in, nil
+}
+
+// writeFileAtomic writes via a temp file + rename, so a crash mid-write cannot
+// leave a half-written (unparseable) config that the next start would choke on.
+func writeFileAtomic(path string, data []byte, perm os.FileMode) error {
+	tmp := path + ".tmp"
+	if err := os.WriteFile(tmp, data, perm); err != nil {
+		return err
+	}
+	return os.Rename(tmp, path)
 }

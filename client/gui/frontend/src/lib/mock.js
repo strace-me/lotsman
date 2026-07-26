@@ -53,3 +53,28 @@ export function mock() {
     ],
   }
 }
+
+// mockConfig backs the «Конфиг» editor in a plain-browser vite dev session.
+export function mockConfig() {
+  return {
+    path: '/home/operator/.config/lotsman/config.yaml',
+    yaml: `# Lotsman client config (mock).
+# The three standard pools and each service's escalation chain come from the
+# builtin categories, so a starter only needs subscriptions + a few services.
+
+subscriptions:
+  - { name: demo-vless, url: "https://example.com/sub", format: auto, tags: [normal], enabled: true }
+  - { name: fastsub, url: "https://fastsub.example/sub", format: auto, tags: [normal], enabled: true }
+
+services:
+  - name: youtube
+    category: streaming
+    probe_target: https://www.youtube.com/generate_204
+    domains: [youtube.com, googlevideo.com, ytimg.com]
+  - name: discord
+    category: messaging
+    probe_target: https://discord.com/api/v9/gateway
+    domains: [discord.com, discord.gg, discordapp.com]
+`,
+  }
+}

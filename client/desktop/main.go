@@ -13,6 +13,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -188,9 +189,14 @@ func main() {
 		os.Exit(1)
 	}
 
-	// The control socket is what an unprivileged tray attaches to. A failure here
+	// The control socket is what an unprivileged tray/GUI attaches to. A failure here
 	// must not take the tunnel down with it — the service is useful headless.
-	ctl := core.NewControlServer(c, cancel, log)
+	// applyRestart lets the config-editing endpoint apply a saved config by re-exec:
+	// it flags the intent, then cancels, so the run loop tears the data plane down
+	// (Core.Stop) BEFORE we replace the process — no orphaned sing-box/nfqws.
+	var applyRestart atomic.Bool
+	restart := func() { applyRestart.Store(true); cancel() }
+	ctl := core.NewControlServer(c, cancel, log).WithConfig(*configPath, restart)
 	if err := ctl.Serve(*controlSock); err != nil {
 		log.Warn("control API unavailable (continuing headless)", "err", err)
 	} else {
@@ -206,6 +212,11 @@ func main() {
 			log.Info("shutting down")
 			if err := c.Stop(); err != nil {
 				log.Warn("stop", "err", err)
+			}
+			if applyRestart.Load() {
+				// A config save asked us to re-exec: the data plane is down now, so a
+				// fresh copy of this process loads the new config with no orphans.
+				reexec(log)
 			}
 			return
 		case <-ticker.C:

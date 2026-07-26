@@ -38,3 +38,12 @@ func (a *App) Recheck(service string) error { return a.client.Recheck(a.ctx, ser
 
 // Stop is the master OFF: it tears the service down.
 func (a *App) Stop() error { return a.client.Stop(a.ctx) }
+
+// Config returns the service's current config file (raw YAML + its path).
+func (a *App) Config() (control.ConfigDoc, error) { return a.client.Config(a.ctx) }
+
+// ValidateConfig checks a candidate config without writing it.
+func (a *App) ValidateConfig(yaml string) error { return a.client.ValidateConfig(a.ctx, yaml) }
+
+// SetConfig validates, writes and applies a new config (the service re-execs).
+func (a *App) SetConfig(yaml string) error { return a.client.SetConfig(a.ctx, yaml) }

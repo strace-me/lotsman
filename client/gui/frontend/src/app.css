@@ -549,6 +549,55 @@ h2 {
   margin-bottom: 6px;
 }
 
+/* ---------- Config editor ---------- */
+.cfg-path {
+  color: var(--ink-faint);
+  font-size: 12px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+.cfg-hint {
+  margin-bottom: 10px;
+  max-width: 70ch;
+  line-height: 1.55;
+}
+.cfg {
+  width: 100%;
+  min-height: 360px;
+  resize: vertical;
+  background: var(--panel-2);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  color: var(--ink);
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 12.5px;
+  line-height: 1.5;
+  padding: 12px 14px;
+  tab-size: 2;
+}
+.cfg:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+.cfg-actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-top: 12px;
+  flex-wrap: wrap;
+}
+.cfg-msg {
+  margin: 0;
+  font-size: 12px;
+  white-space: pre-wrap;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+.cfg-msg.ok {
+  color: var(--ok);
+}
+.cfg-msg.err {
+  color: var(--red);
+}
+
 /* ---------- Advanced ---------- */
 .raw {
   margin-top: 12px;
