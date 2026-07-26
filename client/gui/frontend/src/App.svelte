@@ -5,6 +5,7 @@
   import Nodes from './lib/Nodes.svelte'
   import Subscriptions from './lib/Subscriptions.svelte'
   import Advanced from './lib/Advanced.svelte'
+  import Config from './lib/Config.svelte'
   import { mock } from './lib/mock.js'
   import { verdictText, verdictKind } from './lib/format.js'
 
@@ -66,6 +67,7 @@
     ['dashboard', 'Обзор'],
     ['nodes', 'Ноды'],
     ['subs', 'Подписки'],
+    ['config', 'Конфиг'],
     ['advanced', 'Ещё'],
   ]
 </script>
@@ -108,8 +110,11 @@
   </nav>
 
   <main>
-    {#if error && !report}
+    {#if error && !report && tab !== 'config'}
       <div class="banner red">Сервис недоступен — {error}</div>
+    {/if}
+    {#if tab === 'config'}
+      <Config {backend} />
     {:else if report}
       {#if tab === 'dashboard'}
         <Dashboard {report} {events} onRecheck={recheck} />
