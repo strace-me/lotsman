@@ -54,18 +54,16 @@ export function mock() {
   }
 }
 
-// mockConfig backs the «Конфиг» editor in a plain-browser vite dev session.
+// mockConfig backs the «Конфиг» editor in a plain-browser vite dev session. It
+// carries both the raw YAML (escape hatch) and the structured `doc` (PascalCase
+// keys, mirroring config.Document's default JSON) the structured forms edit.
 export function mockConfig() {
   return {
     path: '/home/operator/.config/lotsman/config.yaml',
     yaml: `# Lotsman client config (mock).
-# The three standard pools and each service's escalation chain come from the
-# builtin categories, so a starter only needs subscriptions + a few services.
-
 subscriptions:
   - { name: demo-vless, url: "https://example.com/sub", format: auto, tags: [normal], enabled: true }
   - { name: fastsub, url: "https://fastsub.example/sub", format: auto, tags: [normal], enabled: true }
-
 services:
   - name: youtube
     category: streaming
@@ -76,5 +74,15 @@ services:
     probe_target: https://discord.com/api/v9/gateway
     domains: [discord.com, discord.gg, discordapp.com]
 `,
+    doc: {
+      Subscriptions: [
+        { Name: 'demo-vless', URL: 'https://example.com/sub', Format: 'auto', Tags: ['normal'], Enabled: true },
+        { Name: 'fastsub', URL: 'https://fastsub.example/sub', Format: 'auto', Tags: ['normal'], Enabled: true },
+      ],
+      Services: [
+        { Name: 'youtube', Category: 'streaming', ProbeTarget: 'https://www.youtube.com/generate_204', Domains: ['youtube.com', 'googlevideo.com', 'ytimg.com'] },
+        { Name: 'discord', Category: 'messaging', ProbeTarget: 'https://discord.com/api/v9/gateway', Domains: ['discord.com', 'discord.gg', 'discordapp.com'] },
+      ],
+    },
   }
 }
