@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 
 	"github.com/strace-me/lotsman/client/control"
 )
@@ -42,8 +43,27 @@ func (a *App) Stop() error { return a.client.Stop(a.ctx) }
 // Config returns the service's current config file (raw YAML + its path).
 func (a *App) Config() (control.ConfigDoc, error) { return a.client.Config(a.ctx) }
 
-// ValidateConfig checks a candidate config without writing it.
+// ValidateConfig checks a candidate raw-YAML config without writing it.
 func (a *App) ValidateConfig(yaml string) error { return a.client.ValidateConfig(a.ctx, yaml) }
 
-// SetConfig validates, writes and applies a new config (the service re-execs).
+// SetConfig validates, writes and applies a raw-YAML config — the escape hatch.
 func (a *App) SetConfig(yaml string) error { return a.client.SetConfig(a.ctx, yaml) }
+
+// ValidateConfigDoc checks a structured config document without writing it.
+func (a *App) ValidateConfigDoc(doc map[string]any) error {
+	b, err := json.Marshal(doc)
+	if err != nil {
+		return err
+	}
+	return a.client.ValidateConfigDoc(a.ctx, b)
+}
+
+// SaveConfig validates, writes and applies a STRUCTURED config document — the
+// primary path. The daemon re-serialises the structure to YAML and owns the file.
+func (a *App) SaveConfig(doc map[string]any) error {
+	b, err := json.Marshal(doc)
+	if err != nil {
+		return err
+	}
+	return a.client.SetConfigDoc(a.ctx, b)
+}

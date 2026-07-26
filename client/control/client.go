@@ -99,11 +99,14 @@ type Event struct {
 	Reason        string    `json:"reason"`
 }
 
-// ConfigDoc is the service's config file: the raw YAML plus the path it lives at
-// (path is read-only — the GUI shows it; the service owns the file).
+// ConfigDoc is the service's config file: its path, the raw YAML (for the escape
+// hatch), and Doc — the structured config the UI edits with forms. Doc is opaque
+// here (json.RawMessage) so this package stays free of pkg/config; the frontend
+// parses it.
 type ConfigDoc struct {
-	Path string `json:"path"`
-	YAML string `json:"yaml"`
+	Path string          `json:"path"`
+	YAML string          `json:"yaml"`
+	Doc  json.RawMessage `json:"doc,omitempty"`
 }
 
 // Client talks to one control socket. It is safe for concurrent use.
@@ -173,10 +176,22 @@ func (c *Client) ValidateConfig(ctx context.Context, yaml string) error {
 	return c.postJSON(ctx, "/config/validate", ConfigDoc{YAML: yaml})
 }
 
-// SetConfig validates + writes a new config and applies it. The service re-execs,
-// so the socket briefly drops — the caller should expect to reconnect.
+// SetConfig validates + writes a raw-YAML config and applies it (the escape hatch).
+// The service re-execs, so the socket briefly drops — expect to reconnect.
 func (c *Client) SetConfig(ctx context.Context, yaml string) error {
 	return c.postJSON(ctx, "/config", ConfigDoc{YAML: yaml})
+}
+
+// ValidateConfigDoc checks a structured config document without writing it.
+func (c *Client) ValidateConfigDoc(ctx context.Context, doc json.RawMessage) error {
+	return c.postJSON(ctx, "/config/validate", ConfigDoc{Doc: doc})
+}
+
+// SetConfigDoc validates + writes a structured config document and applies it — the
+// primary path. The service re-serialises the structure to YAML, so the UI never
+// handles YAML itself.
+func (c *Client) SetConfigDoc(ctx context.Context, doc json.RawMessage) error {
+	return c.postJSON(ctx, "/config", ConfigDoc{Doc: doc})
 }
 
 func (c *Client) getJSON(ctx context.Context, path string, out any) error {
