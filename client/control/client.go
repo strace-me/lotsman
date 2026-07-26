@@ -1,0 +1,198 @@
+// Package control is a thin, dependency-light client for a Lotsman service's
+// control socket. Both the GUI window and the (separate) tray process talk to the
+// service ONLY through this — the unix socket is the privilege boundary, so an
+// unprivileged UI never links the engine. The DTOs below mirror the server's JSON
+// contract (client/core.Report et al.) deliberately by value, not by import, so
+// this package stays free of the daemon spine.
+package control
+
+import (
+	"context"
+	"encoding/json"
+	"fmt"
+	"io"
+	"net"
+	"net/http"
+	"net/url"
+	"strconv"
+	"time"
+)
+
+// Report is the rich /status payload. It is a superset of the legacy
+// {running, services}; unknown future fields are ignored on decode.
+type Report struct {
+	Running       bool           `json:"running"`
+	Verdict       Verdict        `json:"verdict"`
+	Network       Network        `json:"network"`
+	Engines       []Engine       `json:"engines"`
+	Fleet         Fleet          `json:"fleet"`
+	Subscriptions []Subscription `json:"subscriptions"`
+	Services      []Service      `json:"services"`
+}
+
+// Verdict is the top-line coverage rollup. State is one of
+// working | partial | not-working | down.
+type Verdict struct {
+	State   string `json:"state"`
+	Working int    `json:"working"`
+	Failing int    `json:"failing"`
+	Broken  int    `json:"broken"`
+	Total   int    `json:"total"`
+}
+
+// Network is the fingerprint of the network the live KB belongs to.
+type Network struct {
+	ID      string `json:"id"`
+	Kind    string `json:"kind"`
+	Carrier string `json:"carrier"`
+	IFace   string `json:"iface"`
+	Roaming bool   `json:"roaming"`
+}
+
+// Engine is one process the service drives (lotsman | sing-box | nfqws), by
+// measured liveness (running | stopped).
+type Engine struct {
+	Name  string `json:"name"`
+	State string `json:"state"`
+}
+
+// Fleet is the exit pool. Total is the node count the last generate loaded; the
+// alive/frozen/dead breakdown is a later server-side addition.
+type Fleet struct {
+	Total int `json:"total"`
+}
+
+// Subscription is one subscription's quota/expiry.
+type Subscription struct {
+	Name            string  `json:"name"`
+	UsedBytes       int64   `json:"usedBytes"`
+	TotalBytes      int64   `json:"totalBytes"`
+	FractionUsed    float64 `json:"fractionUsed"`
+	DaysUntilExpire float64 `json:"daysUntilExpire"`
+	Expired         bool    `json:"expired"`
+}
+
+// Service is one service's current state and the passive eye's ratios.
+type Service struct {
+	Service      string  `json:"service"`
+	State        string  `json:"state"`
+	Node         string  `json:"node"`
+	Fails        int     `json:"fails"`
+	Broken       bool    `json:"broken"`
+	Rung         int     `json:"rung"`
+	RungClass    string  `json:"rungClass"`
+	Strategy     string  `json:"strategy"`
+	StalledRatio float64 `json:"stalledRatio"`
+	LeakRatio    float64 `json:"leakRatio"`
+}
+
+// Event is one brain rung-transition (the "история событий" surface).
+type Event struct {
+	Time          time.Time `json:"time"`
+	Service       string    `json:"service"`
+	FromPosition  int       `json:"from_position"`
+	ToPosition    int       `json:"to_position"`
+	State         string    `json:"state"`
+	StrategyClass string    `json:"strategy_class"`
+	StrategyID    string    `json:"strategy_id"`
+	Reason        string    `json:"reason"`
+}
+
+// Client talks to one control socket. It is safe for concurrent use.
+type Client struct {
+	http *http.Client
+}
+
+// New returns a client dialing the unix socket at path. Every request carries the
+// given timeout so a wedged service cannot hang the UI.
+func New(socketPath string) *Client {
+	return &Client{http: &http.Client{
+		Timeout: 5 * time.Second,
+		Transport: &http.Transport{
+			DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
+				return (&net.Dialer{}).DialContext(ctx, "unix", socketPath)
+			},
+		},
+	}}
+}
+
+// Status fetches the rich /status.
+func (c *Client) Status(ctx context.Context) (Report, error) {
+	var r Report
+	err := c.getJSON(ctx, "/status", &r)
+	return r, err
+}
+
+// Events fetches recent brain transitions newest-first. limit <= 0 = all
+// retained; service "" = every service.
+func (c *Client) Events(ctx context.Context, limit int, service string) ([]Event, error) {
+	q := url.Values{}
+	if limit > 0 {
+		q.Set("limit", strconv.Itoa(limit))
+	}
+	if service != "" {
+		q.Set("service", service)
+	}
+	path := "/events"
+	if e := q.Encode(); e != "" {
+		path += "?" + e
+	}
+	var ev []Event
+	err := c.getJSON(ctx, path, &ev)
+	return ev, err
+}
+
+// Recheck forces an immediate probe of one service.
+func (c *Client) Recheck(ctx context.Context, service string) error {
+	return c.post(ctx, "/service/"+url.PathEscape(service)+"/recheck")
+}
+
+// Stop is the master OFF: it tears the service down and the process exits.
+func (c *Client) Stop(ctx context.Context) error {
+	return c.post(ctx, "/stop")
+}
+
+func (c *Client) getJSON(ctx context.Context, path string, out any) error {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, "http://unix"+path, nil)
+	if err != nil {
+		return err
+	}
+	resp, err := c.http.Do(req)
+	if err != nil {
+		return fmt.Errorf("control: GET %s: %w", path, err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return statusError("GET", path, resp)
+	}
+	if err := json.NewDecoder(resp.Body).Decode(out); err != nil {
+		return fmt.Errorf("control: decode %s: %w", path, err)
+	}
+	return nil
+}
+
+func (c *Client) post(ctx context.Context, path string) error {
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, "http://unix"+path, nil)
+	if err != nil {
+		return err
+	}
+	resp, err := c.http.Do(req)
+	if err != nil {
+		return fmt.Errorf("control: POST %s: %w", path, err)
+	}
+	defer resp.Body.Close()
+	// Side-effecting calls ack with 202 Accepted (mirroring the server).
+	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusAccepted {
+		return statusError("POST", path, resp)
+	}
+	return nil
+}
+
+func statusError(method, path string, resp *http.Response) error {
+	body, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
+	msg := string(body)
+	if msg == "" {
+		msg = resp.Status
+	}
+	return fmt.Errorf("control: %s %s: %s", method, path, msg)
+}
