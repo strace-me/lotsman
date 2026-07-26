@@ -27,7 +27,7 @@ import (
 // separated subscription URLs. It refuses to overwrite an existing file — an
 // -init that clobbered a tuned config would be a nasty surprise — and validates
 // its own output before writing, so a bad scaffold fails here, not on first run.
-func writeStarter(path, subCSV string) error {
+func writeStarter(path, subCSV string, recommended bool) error {
 	if path == "" {
 		return fmt.Errorf("-init needs -config <path> to write to")
 	}
@@ -37,8 +37,11 @@ func writeStarter(path, subCSV string) error {
 			subs = append(subs, u)
 		}
 	}
-	if len(subs) == 0 {
-		return fmt.Errorf("-init needs at least one -sub <url>")
+	// The recommended config ships without creds (the user adds a subscription
+	// later, e.g. in the app), so -sub is optional there; the minimal starter needs
+	// at least one so it has a tunnel to point at.
+	if !recommended && len(subs) == 0 {
+		return fmt.Errorf("-init needs at least one -sub <url> (or pass -recommended for the curated default without creds)")
 	}
 	if _, err := os.Stat(path); err == nil {
 		return fmt.Errorf("%s already exists — refusing to overwrite it", path)
@@ -46,6 +49,9 @@ func writeStarter(path, subCSV string) error {
 		return fmt.Errorf("checking %s: %w", path, err)
 	}
 	out := scaffold.Starter(subs)
+	if recommended {
+		out = scaffold.Recommended(subs)
+	}
 	if _, err := config.Parse(out); err != nil {
 		return fmt.Errorf("generated config did not validate (a bug): %w", err)
 	}
@@ -83,6 +89,7 @@ func main() {
 		baselineFile  = flag.String("baseline-file", "", "persist the reconciler anti-churn baseline here (empty = derive from -singbox-config; the guard then survives restarts)")
 		initConfig    = flag.Bool("init", false, "write a starter config to -config from -sub URL(s) and exit (refuses to overwrite an existing file)")
 		subURLs       = flag.String("sub", "", "comma-separated subscription URL(s) for -init")
+		recommended   = flag.Bool("recommended", false, "with -init: write the curated recommended config (services + rules, no creds); -sub optional")
 		printConfig   = flag.Bool("print-config", false, "generate the sing-box config from -config, print it, and exit (no sing-box needed)")
 	)
 	flag.Parse()
@@ -90,7 +97,7 @@ func main() {
 	log := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelInfo}))
 
 	if *initConfig {
-		if err := writeStarter(*configPath, *subURLs); err != nil {
+		if err := writeStarter(*configPath, *subURLs, *recommended); err != nil {
 			log.Error("init failed", "err", err)
 			os.Exit(1)
 		}

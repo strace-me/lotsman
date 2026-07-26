@@ -1,0 +1,32 @@
+# Lotsman client — RECOMMENDED starter, shipped with Lotsman.
+# Curated services for the common RU-blocked set. There are NO subscriptions/creds
+# here on purpose — add your own subscription (in the app, or with `-sub` on
+# `-init`) and Lotsman does the rest: the three standard pools and each service's
+# escalation chain (zapret -> VPN -> emergency) come from the builtin categories.
+# Community PRs extend this set.
+
+services:
+  - name: youtube
+    category: streaming
+    probe_target: https://www.youtube.com/generate_204
+    domains: [youtube.com, googlevideo.com, ytimg.com, ggpht.com, youtu.be]
+  - name: discord
+    category: messaging
+    probe_target: https://discord.com/api/v9/gateway
+    domains: [discord.com, discord.gg, discordapp.com, discordapp.net, discord.media]
+  - name: instagram
+    category: streaming
+    probe_target: https://www.instagram.com/favicon.ico
+    domains: [instagram.com, cdninstagram.com, fbcdn.net]
+  - name: ai
+    category: generic
+    probe_target: https://chatgpt.com/robots.txt
+    domains: [openai.com, chatgpt.com, oaistatic.com, oaiusercontent.com, claude.ai, anthropic.com]
+  - name: x
+    category: generic
+    probe_target: https://x.com/robots.txt
+    domains: [x.com, twitter.com, twimg.com, t.co]
+  - name: gaming-epic
+    category: gaming
+    probe_target: https://store.epicgames.com/robots.txt
+    domains: [epicgames.com, unrealengine.com, easyanticheat.net, akamaized.net]

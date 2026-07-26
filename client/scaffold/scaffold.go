@@ -7,9 +7,32 @@
 package scaffold
 
 import (
+	_ "embed"
 	"fmt"
 	"strings"
 )
+
+//go:embed recommended.yaml
+var recommendedConfig []byte
+
+// Recommended returns the curated default config shipped with Lotsman (services +
+// rules on builtin categories, no creds) — first-run option (a). If subURLs are
+// given they are prepended as a subscriptions block; otherwise the config ships
+// without one, and the user adds a subscription later (e.g. in the app). Guaranteed
+// to satisfy config.Parse (proven by the test).
+func Recommended(subURLs []string) []byte {
+	if len(subURLs) == 0 {
+		return recommendedConfig
+	}
+	var b strings.Builder
+	b.WriteString("subscriptions:\n")
+	for i, u := range subURLs {
+		fmt.Fprintf(&b, "  - { name: sub%d, url: %q, format: auto, tags: [normal], enabled: true }\n", i+1, u)
+	}
+	b.WriteString("\n")
+	b.Write(recommendedConfig)
+	return []byte(b.String())
+}
 
 // starterService is one line of the scaffold: a well-known service on a builtin
 // category, with concrete domains and a probe so it works out of the box.
