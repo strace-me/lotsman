@@ -143,6 +143,18 @@ func (e *Engine) Stop(ctx context.Context) error {
 	return nil
 }
 
+// Alive reports whether the nfqws process is currently running, read from the real
+// child state (the reaper nils e.cmd on exit). This is the liveness /status needs:
+// it is NOT the same as "a service sits on the zapret rung" — an uncovered plan
+// never starts the process, and a crash leaves e.cmd nil while services are still
+// assigned — so reporting the rung set as liveness would show green over a dead
+// engine, the LOT-49 trap the sing-box gate exists to avoid.
+func (e *Engine) Alive() bool {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return e.cmd != nil
+}
+
 // installNftLocked (re)installs this instance's nft table. Caller holds e.mu.
 func (e *Engine) installNftLocked(ctx context.Context) error {
 	if e.armed {

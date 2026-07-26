@@ -32,9 +32,11 @@ type ControlServer struct {
 	log  *slog.Logger
 }
 
-// Status is what a UI renders: whether the data plane is actually up (sing-box
-// alive and answering — not merely configured), and where each service currently
-// sits.
+// Status is the ORIGINAL /status shape: whether the data plane is actually up
+// (sing-box alive and answering — not merely configured) and where each service
+// sits. GET /status now serves the richer Report (see status.go), which keeps
+// these two fields at the same JSON paths — so this remains a valid decode target
+// for a minimal client that wants only running+services.
 type Status struct {
 	Running  bool         `json:"running"`
 	Services []NodeStatus `json:"services"`
@@ -103,12 +105,12 @@ func (s *ControlServer) Close() error {
 }
 
 func (s *ControlServer) handleStatus(w http.ResponseWriter, r *http.Request) {
-	// Running reflects real data-plane liveness, not the presence of a config: a
-	// tray showing green over a dead sing-box is worse than useless (LOT-49).
-	running := s.core.Healthy(r.Context())
-	services := s.core.Status(r.Context())
+	// The rich Report is a backward-compatible superset of the old {running,
+	// services}: Running still reflects real data-plane liveness (LOT-49), and the
+	// legacy fields keep their JSON paths, so an old tray decoding Status is
+	// unaffected while a new UI reads the fleet/network/engines/subscription sections.
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(Status{Running: running, Services: services})
+	json.NewEncoder(w).Encode(s.core.Report(r.Context()))
 }
 
 func (s *ControlServer) handleStop(w http.ResponseWriter, _ *http.Request) {
