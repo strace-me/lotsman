@@ -132,17 +132,23 @@ type Core struct {
 	secret string
 
 	// Roaming: re-detect the network on an interval and swap the KB when it changes.
-	// detect is the fingerprint source (netid.Detect; overridable in tests). The
-	// three roam fields are touched only by roamLoop's single goroutine.
+	// detect is the fingerprint source (netid.Detect; overridable in tests). roamLoop
+	// is the only WRITER of the four fields below, but the rich /status reads them
+	// too, so they are guarded by roamMu.
 	detect       func(context.Context) netid.Network
-	currentNetID string // network the live KB belongs to
-	pendingNet   string // a candidate new network, awaiting debounce confirmation
-	pendingCount int    // consecutive polls that saw pendingNet
+	roamMu       sync.Mutex    // guards the network fields below against the /status reader
+	currentNet   netid.Network // full fingerprint of the live network (for /status)
+	currentNetID string        // network the live KB belongs to (== currentNet.Id)
+	pendingNet   string        // a candidate new network, awaiting debounce confirmation
+	pendingCount int           // consecutive polls that saw pendingNet
 
 	metrics    *metrics.Collector // populated in Start; nil until then
 	metricsSrv *http.Server       // non-nil only when MetricsAddr is served
 	obsMu      sync.Mutex         // guards obsSnap between the observe loop and /metrics
 	obsSnap    observe.Snapshot   // last passive-observation snapshot (zero until the first pass)
+
+	subMu   sync.Mutex                       // guards subInfo between generate() and /status
+	subInfo map[string]subscription.Userinfo // quota/expiry captured at the last fetch (for /status)
 
 	prober dataplane.Prober // shared with the autonomy loop, reused by the desync canary
 	// foreignTunnels is sampled BEFORE our own tun exists. Sampling it later would
@@ -207,6 +213,12 @@ func (c *Core) Start(ctx context.Context) error {
 	}
 	c.kb.SetZapretSeed(catalog.ZapretIDs())
 	c.resolveKBPath(ctx)
+	// A rich /status wants the current network in every mode; resolveKBPath only
+	// fingerprints it in per-network (KBDir) mode, so detect once here otherwise.
+	// This runs before any goroutine that could also touch currentNet, so no lock.
+	if c.currentNet.Id == "" {
+		c.currentNet = c.detect(ctx)
+	}
 	if c.kbFile != "" {
 		if err := c.kb.Load(c.kbFile); err != nil {
 			c.log.Warn("kb load failed (starting from seed)", "path", c.kbFile, "err", err)
@@ -361,14 +373,12 @@ func (c *Core) Start(ctx context.Context) error {
 		runners = append(runners, func(rctx context.Context) { c.refreshLoop(rctx, rc, c.opts.RefreshEvery) })
 		c.log.Info("subscription refresh enabled", "every", c.opts.RefreshEvery)
 	}
-	// Observability: only when a scraper is actually served. The eye reads the
-	// Clash /connections list each interval to surface leak/dead/frozen/one-way
-	// flows — the TSPU-freeze signal a header-only probe cannot see — and feeds it
-	// to the collector. Telemetry only: it does not (yet) drive escalation on the
-	// client, so nothing behavioural changes by turning it on.
-	if c.opts.MetricsAddr != "" {
-		runners = append(runners, c.observeLoop)
-	}
+	// Observability: the eye reads the Clash /connections list each interval to
+	// surface leak/dead/frozen/one-way flows — the TSPU-freeze signal a header-only
+	// probe cannot see. It feeds BOTH the /metrics collector (when served) and the
+	// control socket's rich /status (always), so run it unconditionally: it is cheap
+	// and telemetry-only — it does not (yet) drive escalation on the client.
+	runners = append(runners, c.observeLoop)
 	if c.zapExec != nil {
 		// The StrategyExecutor interface only reports a service ENTERING a rung, so
 		// nothing tells the desync engine when the LAST service leaves it. Reconcile
@@ -478,9 +488,12 @@ func (c *Core) roamLoop(ctx context.Context) {
 func (c *Core) maybeRoam(ctx context.Context, net netid.Network) bool {
 	// An undetectable network (a transient disconnect) is not a move: keep the
 	// current store and wait for a real network rather than swapping to the shared
-	// Fallback id mid-blip.
+	// Fallback id mid-blip. The network fields are read by /status too, so every
+	// access here takes roamMu — but never across the kb IO below.
+	c.roamMu.Lock()
 	if net.Id == "" || net.Id == netid.Fallback || net.Id == c.currentNetID {
 		c.pendingNet, c.pendingCount = "", 0
+		c.roamMu.Unlock()
 		return false
 	}
 	if net.Id == c.pendingNet {
@@ -488,7 +501,9 @@ func (c *Core) maybeRoam(ctx context.Context, net netid.Network) bool {
 	} else {
 		c.pendingNet, c.pendingCount = net.Id, 1
 	}
-	if c.pendingCount < roamDebounce {
+	confirmed := c.pendingCount >= roamDebounce
+	c.roamMu.Unlock()
+	if !confirmed {
 		return false
 	}
 
@@ -502,21 +517,26 @@ func (c *Core) maybeRoam(ctx context.Context, net netid.Network) bool {
 	if err := c.kb.Reload(newPath); err != nil {
 		// Keep the current KB rather than run on a half-swapped one.
 		c.log.Warn("kb reload on roam failed, keeping the previous store", "path", newPath, "err", err)
+		c.roamMu.Lock()
 		c.pendingNet, c.pendingCount = "", 0
+		c.roamMu.Unlock()
 		return false
 	}
 	c.mu.Lock()
 	c.kbFile = newPath
 	c.mu.Unlock()
+	c.roamMu.Lock()
+	c.currentNet = net
 	c.currentNetID = net.Id
 	c.pendingNet, c.pendingCount = "", 0
+	c.roamMu.Unlock()
 	c.log.Info("network changed — swapped knowledge base",
 		"network", net.Id, "kind", net.Kind, "carrier", net.Carrier, "iface", net.IFace, "kb", newPath)
 	return true
 }
 
-// observeLoop feeds the metrics collector the passive eye's snapshot each
-// interval. It runs only when metrics are served (see Start) and never touches
+// observeLoop refreshes the passive eye's snapshot each interval, feeding both the
+// rich /status (always) and the /metrics collector (when served). It never touches
 // escalation — a failed pass (sing-box down, no connections yet) is logged and
 // retried, exactly as the daemon treats it.
 func (c *Core) observeLoop(ctx context.Context) {
@@ -558,6 +578,7 @@ func (c *Core) resolveKBPath(ctx context.Context) {
 		return
 	}
 	c.kbFile = filepath.Join(c.opts.KBDir, net.Id+".json")
+	c.currentNet = net
 	c.currentNetID = net.Id
 	c.log.Info("per-network knowledge base",
 		"network", net.Id, "gateway", net.Gateway, "iface", net.IFace,
@@ -599,6 +620,14 @@ type NodeStatus struct {
 	Node    string `json:"node"`
 	Fails   int    `json:"fails"`  // consecutive active-probe failures at this rung
 	Broken  bool   `json:"broken"` // chain exhausted — escalated past the last rung and still failing
+
+	// Enriched for the rich /status (all additive — a consumer decoding only the
+	// original five fields is unaffected).
+	Rung         int     `json:"rung"`                   // chain position the brain settled on
+	RungClass    string  `json:"rungClass,omitempty"`    // zapret | vpn | direct | emergency
+	Strategy     string  `json:"strategy,omitempty"`     // static chain strategy id, or the live desync recipe
+	StalledRatio float64 `json:"stalledRatio,omitempty"` // passive-eye freeze ratio (0 when the eye saw nothing)
+	LeakRatio    float64 `json:"leakRatio,omitempty"`    // passive-eye leak-to-direct ratio
 }
 
 // Status reports each service's brain position plus the concrete node its
@@ -607,13 +636,33 @@ func (c *Core) Status(ctx context.Context) []NodeStatus {
 	if c.brain == nil {
 		return nil
 	}
+	obs := c.observeSnapshot()
 	var out []NodeStatus
 	for _, s := range c.brain.Snapshot() {
 		node := ""
 		if info, err := c.clash.Proxy(ctx, registry.SelectorTag(s.Service)); err == nil {
 			node = info.Now
 		}
-		out = append(out, NodeStatus{Service: s.Service, State: s.State, Node: node, Fails: s.Fails, Broken: s.Broken})
+		ns := NodeStatus{
+			Service: s.Service, State: s.State, Node: node,
+			Fails: s.Fails, Broken: s.Broken, Rung: s.Position,
+		}
+		// Join the brain position with the registry chain for the rung's class and
+		// strategy. A zapret rung carries no static StrategyID (it is resolved from the
+		// KB at escalation), so fill the live recipe the desync engine actually applied.
+		if svc, ok := c.reg.Services[s.Service]; ok && s.Position >= 0 && s.Position < len(svc.Chain) {
+			step := svc.Chain[s.Position]
+			ns.RungClass = step.StrategyClass
+			ns.Strategy = step.StrategyID
+			if ns.Strategy == "" && step.StrategyClass == strategy.ClassZapret && c.zapExec != nil {
+				ns.Strategy = c.zapExec.chosenRecipe(s.Service)
+			}
+		}
+		if m, ok := obs.Services[s.Service]; ok {
+			ns.StalledRatio = m.StalledRatio
+			ns.LeakRatio = m.LeakRatio
+		}
+		out = append(out, ns)
 	}
 	return out
 }
@@ -691,6 +740,12 @@ func (c *Core) generate(ctx context.Context) ([]byte, error) {
 	for _, e := range errs {
 		c.log.Warn("subscription load issue", "err", e)
 	}
+	// Capture the quota/expiry the fetch just parsed from the Subscription-Userinfo
+	// header before mgr is discarded, so /status can report it (the mgr itself is
+	// throwaway — only this snapshot is retained).
+	c.subMu.Lock()
+	c.subInfo = mgr.Userinfo()
+	c.subMu.Unlock()
 	memberships := c.conf.Pools.Memberships(nodes)
 	c.tunnelIPs = tunnelIPs(nodes, c.log)
 	c.lastNodes = len(nodes)

@@ -60,9 +60,36 @@ type zapretExec struct {
 	// rung) and Reconcile (the periodic sweep that stops the engine when the rung
 	// empties) both recompose from active(), and they must not interleave.
 	mu sync.Mutex
+
+	// chosen maps each service on the rung to the desync recipe currently applied,
+	// for the rich /status. It has its own tiny lock so a status read never blocks
+	// behind mu while an Apply is restarting nfqws.
+	chosenMu sync.Mutex
+	chosen   map[string]string
 }
 
 func (z *zapretExec) Class() string { return strategy.ClassZapret }
+
+// chosenRecipe returns the desync recipe currently applied for service (empty when
+// none), for the rich /status. It uses chosenMu, not mu, so a status read never
+// waits on an in-flight nfqws (re)start.
+func (z *zapretExec) chosenRecipe(service string) string {
+	z.chosenMu.Lock()
+	defer z.chosenMu.Unlock()
+	return z.chosen[service]
+}
+
+// setChosen replaces the per-service recipe map with an independent copy, so a
+// later mutation of the plan cannot race a status read.
+func (z *zapretExec) setChosen(chosen map[string]string) {
+	cp := make(map[string]string, len(chosen))
+	for k, v := range chosen {
+		cp[k] = v
+	}
+	z.chosenMu.Lock()
+	z.chosen = cp
+	z.chosenMu.Unlock()
+}
 
 // Enable routes the service direct and re-applies the composed desync strategy.
 func (z *zapretExec) Enable(ctx context.Context, service, _ string) error {
@@ -117,6 +144,7 @@ func (z *zapretExec) composeAndApplyLocked(ctx context.Context) (*zaptune.Plan, 
 		if err := z.engine.Stop(ctx); err != nil {
 			return nil, fmt.Errorf("zapret: stop idle engine: %w", err)
 		}
+		z.setChosen(nil)
 		return nil, nil
 	}
 	plan := zaptune.Compose(active, z.recipes, z.pick, z.resolve, z.hostlists)
@@ -176,6 +204,7 @@ func (z *zapretExec) composeAndApplyLocked(ctx context.Context) (*zaptune.Plan, 
 	} else {
 		z.log.Debug("zapret: desync unchanged", "services", len(active))
 	}
+	z.setChosen(plan.Chosen)
 	return &plan, nil
 }
 
