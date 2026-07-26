@@ -167,11 +167,23 @@ func (s *ControlServer) handleEvents(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(s.core.Events(limit, r.URL.Query().Get("service")))
 }
 
-// configDoc is the service's config file as the GUI edits it: the raw on-disk YAML
-// plus the path it lives at (shown read-only in the editor).
+// configDoc carries the config as the GUI works with it: the raw on-disk YAML plus
+// its path, AND — the primary path — the structured Document. A save (or validate)
+// carrying Doc uses it (the service turns structure → YAML → validation → file), so
+// the UI never handles YAML itself; one carrying only YAML is the raw escape hatch.
 type configDoc struct {
-	Path string `json:"path"`
-	YAML string `json:"yaml"`
+	Path string           `json:"path"`
+	YAML string           `json:"yaml,omitempty"`
+	Doc  *config.Document `json:"doc,omitempty"`
+}
+
+// yamlBytes resolves the YAML to validate/write: the structured Doc when present
+// (re-serialised by the service), else the raw YAML text.
+func (in configDoc) yamlBytes() ([]byte, error) {
+	if in.Doc != nil {
+		return in.Doc.YAML()
+	}
+	return []byte(in.YAML), nil
 }
 
 func (s *ControlServer) handleGetConfig(w http.ResponseWriter, _ *http.Request) {
@@ -184,8 +196,14 @@ func (s *ControlServer) handleGetConfig(w http.ResponseWriter, _ *http.Request) 
 		http.Error(w, "read config: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
+	out := configDoc{Path: s.configPath, YAML: string(data)}
+	// The structured view is best-effort: if the file does not even parse
+	// structurally, the UI still gets the raw YAML to repair by hand.
+	if doc, derr := config.ParseDocument(data); derr == nil {
+		out.Doc = doc
+	}
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(configDoc{Path: s.configPath, YAML: string(data)})
+	json.NewEncoder(w).Encode(out)
 }
 
 // handleValidateConfig parses a candidate config WITHOUT writing it, so the editor
@@ -196,7 +214,12 @@ func (s *ControlServer) handleValidateConfig(w http.ResponseWriter, r *http.Requ
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
-	if _, err := config.Parse([]byte(in.YAML)); err != nil {
+	y, err := in.yamlBytes()
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	if _, err := config.Parse(y); err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
@@ -218,11 +241,16 @@ func (s *ControlServer) handleSetConfig(w http.ResponseWriter, r *http.Request) 
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
-	if _, err := config.Parse([]byte(in.YAML)); err != nil {
+	y, err := in.yamlBytes()
+	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
-	if err := writeFileAtomic(s.configPath, []byte(in.YAML), 0o600); err != nil {
+	if _, err := config.Parse(y); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	if err := writeFileAtomic(s.configPath, y, 0o600); err != nil {
 		http.Error(w, "write config: "+err.Error(), http.StatusInternalServerError)
 		return
 	}

@@ -71,7 +71,13 @@ type Hostlist struct {
 
 // --- on-disk shape ---
 
-type fileYAML struct {
+// Document is the editable, round-trippable form of the config file — the exact
+// on-disk YAML shape, exported so a UI can read it as JSON, edit it structurally,
+// and hand it back for the service to re-serialise and validate. The service owns
+// the file; the UI works with this structure and never handles YAML itself. (The
+// sub-types stay unexported: a UI round-trips the whole Document as JSON, so it
+// never needs to name them.)
+type Document struct {
 	Services        []serviceYAML              `yaml:"services"`
 	Categories      map[string]categoryYAML    `yaml:"categories"`
 	Subscriptions   []subscription.Declaration `yaml:"subscriptions"`
@@ -205,7 +211,7 @@ func Load(path string) (*Config, error) {
 
 // Parse parses and validates config bytes.
 func Parse(data []byte) (*Config, error) {
-	var f fileYAML
+	var f Document
 	if err := yaml.Unmarshal(data, &f); err != nil {
 		return nil, fmt.Errorf("config: yaml: %w", err)
 	}
@@ -254,6 +260,44 @@ func Parse(data []byte) (*Config, error) {
 		mux = &Multiplex{Protocol: f.Multiplex.Protocol, MaxConnections: f.Multiplex.MaxConnections, MinStreams: f.Multiplex.MinStreams, Padding: f.Multiplex.Padding, BrutalUp: f.Multiplex.BrutalUp, BrutalDown: f.Multiplex.BrutalDown}
 	}
 	return &Config{Registry: reg, Subscriptions: f.Subscriptions, Pools: pl, Zapret: instances, Devices: devices, Hostlists: hostlists, Strategies: strategies, UTLSFingerprint: f.UTLSFingerprint, SingboxVersion: f.SingboxVersion, FakeIP: fakeip, Multiplex: mux, SubViaPool: f.SubViaPool}, nil
+}
+
+// LoadDocument reads the config file into its editable Document form (no
+// validation — call Validate for that). Use it to show a UI the current config.
+func LoadDocument(path string) (*Document, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, err
+	}
+	return ParseDocument(data)
+}
+
+// ParseDocument unmarshals config bytes into the editable Document WITHOUT the full
+// validation Parse does — the raw structural round-trip, not the domain build.
+func ParseDocument(data []byte) (*Document, error) {
+	var d Document
+	if err := yaml.Unmarshal(data, &d); err != nil {
+		return nil, fmt.Errorf("config: yaml: %w", err)
+	}
+	return &d, nil
+}
+
+// YAML re-serialises the document to on-disk YAML — the writer that turns a UI's
+// structured edits back into the file the service reads. Comments in the original
+// file are not preserved (that is what the raw-YAML escape hatch is for).
+func (d *Document) YAML() ([]byte, error) {
+	return yaml.Marshal(d)
+}
+
+// Validate reports whether the document builds into a valid config, reusing the
+// exact checks Parse runs, so a UI can reject a bad edit before it is written.
+func (d *Document) Validate() error {
+	data, err := d.YAML()
+	if err != nil {
+		return err
+	}
+	_, err = Parse(data)
+	return err
 }
 
 // buildCategories starts from the builtin seven and applies config overrides
