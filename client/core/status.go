@@ -76,7 +76,9 @@ type SubStatus struct {
 // client already holds; nothing here probes or blocks beyond the liveness check
 // Healthy already does.
 func (c *Core) Report(ctx context.Context) Report {
-	services := c.Status(ctx)
+	c.stateMu.Lock()
+	defer c.stateMu.Unlock()
+	services := c.statusLocked(ctx)
 	running := c.Healthy(ctx)
 	return Report{
 		Running:       running,

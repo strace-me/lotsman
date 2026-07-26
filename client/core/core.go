@@ -162,6 +162,8 @@ type Core struct {
 	lastNodes      int           // nodes the last generate loaded; zero with subscriptions declared means no tunnel
 
 	mu         sync.Mutex
+	stateMu    sync.Mutex      // serialises reads of the swappable loop state (brain/reg/eng/zap/prober) against Reload
+	rootCtx    context.Context // process lifetime; the autonomy loop derives from it and is rebuilt on reload
 	life       context.Context
 	lifeCancel context.CancelFunc
 	cancel     context.CancelFunc
@@ -194,11 +196,11 @@ func (c *Core) Start(ctx context.Context) error {
 	if err := c.preflight(); err != nil {
 		return err
 	}
-	// One lifetime for everything this client spawns, so a background verdict
-	// cannot outlive the data plane it is judging.
-	c.mu.Lock()
-	c.life, c.lifeCancel = context.WithCancel(ctx)
-	c.mu.Unlock()
+	// The process lifetime. The autonomy loop derives its own sub-context off this
+	// (in buildLoop), so a config reload can cancel + rebuild just the loop while the
+	// box, KB, control socket and metrics server (all process-level) stay up, and
+	// SIGTERM (cancelling ctx) still stops everything.
+	c.rootCtx = ctx
 
 	// Sample the host's tunnels while the only ones present belong to somebody
 	// else — after box.Start our own tun is up and would be mistaken for a foreign
@@ -274,52 +276,97 @@ func (c *Core) Start(ctx context.Context) error {
 		return err
 	}
 
-	// Brain + applier: VPN/direct steering over the Clash selector is the whole
-	// "make it work" autonomy for the MVP (desync engines come later). The applier
-	// is the single writer; NewVPN/NewDirect flip sel-<svc> over the Clash-API.
+	// Process-level, created once and reused across a config reload: the event ring
+	// and the metrics collector. The collector reads the CURRENT brain via a closure
+	// (under stateMu), so a rebuilt loop is reflected without re-creating the collector
+	// or the metrics server below.
+	c.events = audit.NewRingRecorder(0)
+	c.metrics = metrics.New(
+		func() []brain.ServiceState {
+			c.stateMu.Lock()
+			defer c.stateMu.Unlock()
+			if c.brain == nil {
+				return nil
+			}
+			return c.brain.Snapshot()
+		},
+		c.kb.Snapshot,
+	)
+	if c.opts.MetricsAddr != "" {
+		c.metrics.SetObserveSnapshot(func() observe.Snapshot {
+			c.obsMu.Lock()
+			defer c.obsMu.Unlock()
+			return c.obsSnap
+		})
+	}
+
+	// Build and launch the autonomy loop (bus, execs, brain, applier, prober, probing
+	// engine + the background runners) against the current config.
+	if err := c.buildLoop(); err != nil {
+		return fmt.Errorf("core: build autonomy loop: %w", err)
+	}
+	if c.opts.MetricsAddr != "" {
+		// Bind synchronously so the "enabled" log asserts a listener that actually
+		// came up. mc.Serve runs ListenAndServe in a goroutine and drops its bind
+		// error, which would log success over a dead endpoint (e.g. a port already in
+		// use). A failed metrics bind is non-fatal — it is telemetry, not the tunnel.
+		if ln, lerr := net.Listen("tcp", c.opts.MetricsAddr); lerr != nil {
+			c.log.Warn("metrics endpoint unavailable (continuing without it)", "addr", c.opts.MetricsAddr, "err", lerr)
+		} else {
+			mux := http.NewServeMux()
+			mux.Handle("/metrics", c.metrics)
+			c.metricsSrv = &http.Server{Handler: mux}
+			go c.metricsSrv.Serve(ln)
+			c.log.Info("metrics enabled", "addr", c.opts.MetricsAddr, "path", "/metrics")
+		}
+	}
+	started = true
+	c.log.Info("lotsman client started", "services", len(c.reg.Services), "clash", c.opts.ClashListen)
+	return nil
+}
+
+// buildLoop builds and launches the autonomy loop (bus, execs, brain, applier,
+// prober, probing engine + the background runners) against the CURRENT c.conf/c.reg,
+// on a fresh sub-context off c.rootCtx. Start calls it once; Reload calls it again
+// after swapping the config, so the loop is rebuilt while the box, KB, control socket
+// and metrics server (all process-level) stay up. On the reload path the caller holds
+// stateMu, so the swaps of brain/eng/prober/zap below are safe against the control
+// server's readers; on the Start path there are no readers yet.
+func (c *Core) buildLoop() error {
+	c.mu.Lock()
+	c.life, c.lifeCancel = context.WithCancel(c.rootCtx)
+	runCtx, cancel := c.life, c.lifeCancel
+	c.cancel = cancel
+	c.mu.Unlock()
+
+	// A fresh bus per loop — a rebuilt loop must not inherit stale in-flight verdicts.
+	c.bus = events.NewBus()
+
 	execs := []executor.StrategyExecutor{
 		executor.NewVPN(c.clash, false, c.log),
 		executor.NewDirect(c.clash, false, c.log),
 	}
-	if z := c.newZapretExec(ctx); z != nil {
+	if z := c.newZapretExec(runCtx); z != nil {
 		c.zapExec = z
 		execs = append(execs, z)
 	}
 	c.dropUnsupportedRungs(execs)
-	// Capture brain rung-transitions into a bounded in-memory ring so the UI can read
-	// the "история событий"; the client discarded them via audit.Nop before.
-	c.events = audit.NewRingRecorder(0)
+
 	c.brain = brain.New(c.bus, c.reg, c.kb, brain.DefaultConfig(), c.events, c.log)
-	// Re-converge selectors every interval so a box restart (which resets them)
-	// heals without waiting for a state transition. Idempotent, single writer.
 	c.brain.SetReassert(c.opts.Interval)
-	// Persist which rung each service settled on. Without it every restart begins
-	// at the top of the chain and re-escalates through the failures that were
-	// already paid for once — the KB remembers which strategy works, but not that
-	// this service had already been moved off the rung that does not.
 	if c.opts.StateFile != "" {
 		store := state.NewFileStore(c.opts.StateFile)
 		c.brain.Restore(store.Load())
 		c.brain.SetPersist(func(pos map[string]int) { store.Save(pos) })
-		c.log.Info("chain positions persisted across restarts", "path", c.opts.StateFile)
 	}
 	ap := applier.New(c.bus, execs, c.log)
 
-	// Prober: test each service (through the tunnel when ProbeProxy is set), with
-	// per-rung probe overrides, exactly as the daemon wires it.
 	specs := map[string]dataplane.ServiceProbe{}
 	for name, svc := range c.reg.Services {
 		specs[name] = dataplane.ServiceProbe{Type: svc.ProbeType, Target: svc.ProbeTarget}
 	}
 	probeVia := c.opts.ProbeProxy
 	if c.opts.ProxyListen != "" {
-		// Proxy mode has ONE socks inbound (ProxyListen); singboxOptions points the
-		// box's probe inbound at exactly that address. The prober must dial the same
-		// one, or it reaches a port nothing is listening on and every probe fails.
-		// ProbeProxy is a tun-mode knob (a separate probe-through-the-tunnel inbound)
-		// and does not apply here, so it must not win — probe THROUGH the box, since
-		// probing direct would measure the host's own internet and call a dead node
-		// healthy, and the brain would never escalate away from it.
 		if probeVia != "" && probeVia != c.opts.ProxyListen {
 			c.log.Warn("ignoring -probe-proxy in proxy mode; probing through -proxy instead",
 				"probe_proxy", probeVia, "proxy", c.opts.ProxyListen)
@@ -327,10 +374,6 @@ func (c *Core) Start(ctx context.Context) error {
 		probeVia = c.opts.ProxyListen
 	}
 	mp := dataplane.NewMultiProberProxy(specs, probeVia)
-	// A second prober that dials DIRECT, for silent-probing an inactive zapret/
-	// direct rung while the service sits on a VPN node (LOT-44). Only in proxy mode,
-	// where the host's direct path is genuinely direct; in tun mode the client's own
-	// tun would capture it, so it stays unset and those rungs fall through as before.
 	var directMP *dataplane.MultiProber
 	if c.opts.ProxyListen != "" {
 		directMP = dataplane.NewMultiProberProxy(specs, "")
@@ -346,57 +389,24 @@ func (c *Core) Start(ctx context.Context) error {
 			}
 		}
 	}
-	// Rung-aware: an INACTIVE vpn rung cannot be measured through the selector (the
-	// traffic would follow the active rung and credit the wrong one), so those are
-	// measured with a Clash delay test of the pool instead.
 	rp := dataplane.NewRungProber(mp, c.clash, c.reg, "", 0)
 	if directMP != nil {
 		rp.SetDirectProber(directMP)
 	}
-
 	c.prober = rp
-	mc := metrics.New(c.brain.Snapshot, c.kb.Snapshot)
-	c.metrics = mc
-	if c.opts.MetricsAddr != "" {
-		// Wire the snapshot getter BEFORE any scrape can arrive; the observe loop only
-		// updates the guarded value from then on.
-		mc.SetObserveSnapshot(func() observe.Snapshot {
-			c.obsMu.Lock()
-			defer c.obsMu.Unlock()
-			return c.obsSnap
-		})
-	}
-	eng := probing.New(c.bus, rp, c.brain, c.reg, c.kb, mc, faillog.Nop{}, c.opts.Interval, c.log)
-	c.eng = eng // retained so the UI can force an on-demand recheck
+	eng := probing.New(c.bus, rp, c.brain, c.reg, c.kb, c.metrics, faillog.Nop{}, c.opts.Interval, c.log)
+	c.eng = eng
 
-	c.mu.Lock()
-	runCtx, cancel := c.life, c.lifeCancel
-	c.cancel = cancel
-	c.mu.Unlock()
 	runners := []func(context.Context){c.brain.Run, ap.Run, eng.Run, c.superviseBox}
 	if c.opts.RefreshEvery > 0 && c.opts.SingboxConfig != "" {
 		rc := c.newReconciler()
 		runners = append(runners, func(rctx context.Context) { c.refreshLoop(rctx, rc, c.opts.RefreshEvery) })
-		c.log.Info("subscription refresh enabled", "every", c.opts.RefreshEvery)
 	}
-	// Observability: the eye reads the Clash /connections list each interval to
-	// surface leak/dead/frozen/one-way flows — the TSPU-freeze signal a header-only
-	// probe cannot see. It feeds BOTH the /metrics collector (when served) and the
-	// control socket's rich /status (always), so run it unconditionally: it is cheap
-	// and telemetry-only — it does not (yet) drive escalation on the client.
 	runners = append(runners, c.observeLoop)
 	if c.zapExec != nil {
-		// The StrategyExecutor interface only reports a service ENTERING a rung, so
-		// nothing tells the desync engine when the LAST service leaves it. Reconcile
-		// it against the live rung membership each interval: recompose when the set
-		// changed, stop the engine when it emptied (LOT-46). Cheap and idempotent —
-		// the resolver is cached and Apply is a no-op when the argv is unchanged.
 		runners = append(runners, c.desyncReconcileLoop)
 	}
 	if c.opts.KBDir != "" {
-		// Per-network mode: watch for a network change and swap the KB to that
-		// network's store on the move, instead of applying the previous network's
-		// learning to a different DPI (roaming).
 		runners = append(runners, c.roamLoop)
 	}
 	for _, run := range runners {
@@ -406,24 +416,59 @@ func (c *Core) Start(ctx context.Context) error {
 			fn(runCtx)
 		}(run)
 	}
-	if c.opts.MetricsAddr != "" {
-		// Bind synchronously so the "enabled" log asserts a listener that actually
-		// came up. mc.Serve runs ListenAndServe in a goroutine and drops its bind
-		// error, which would log success over a dead endpoint (e.g. a port already in
-		// use). A failed metrics bind is non-fatal — it is telemetry, not the tunnel.
-		if ln, lerr := net.Listen("tcp", c.opts.MetricsAddr); lerr != nil {
-			c.log.Warn("metrics endpoint unavailable (continuing without it)", "addr", c.opts.MetricsAddr, "err", lerr)
-		} else {
-			mux := http.NewServeMux()
-			mux.Handle("/metrics", mc)
-			c.metricsSrv = &http.Server{Handler: mux}
-			go c.metricsSrv.Serve(ln)
-			c.log.Info("metrics enabled", "addr", c.opts.MetricsAddr, "path", "/metrics")
-		}
-	}
-	started = true
-	c.log.Info("lotsman client started", "services", len(c.reg.Services), "clash", c.opts.ClashListen)
 	return nil
+}
+
+// Reload applies newConf in place WITHOUT re-executing the process: it rebuilds the
+// autonomy loop against newConf and restarts sing-box ONLY if its generated config
+// actually changed (an edit that does not touch routing keeps every live connection).
+// The KB (learning), control socket and metrics server stay up; the desync engine is
+// re-armed, which does not drop the VPN tunnel (nfqws is a separate layer on direct
+// traffic). Returns an error if it cannot apply in place, so the caller falls back to
+// a full re-exec. Serialised against the control server's readers by stateMu.
+func (c *Core) Reload(newConf *config.Config) error {
+	if c.opts.SingboxConfig == "" {
+		return fmt.Errorf("core: reload needs -singbox-config to reconcile in place")
+	}
+	c.stateMu.Lock()
+	defer c.stateMu.Unlock()
+
+	c.mu.Lock()
+	cancel, root := c.cancel, c.rootCtx
+	c.mu.Unlock()
+	if cancel == nil || root == nil {
+		return fmt.Errorf("core: reload before start")
+	}
+
+	// Tear the loop down; the box, KB, control socket and metrics server stay up.
+	cancel()
+	c.wg.Wait()
+
+	// Stop the old desync engine — buildLoop re-arms it from newConf.
+	if c.zap != nil {
+		if err := c.zap.Stop(context.WithoutCancel(root)); err != nil {
+			c.log.Warn("reload: stopping the old desync engine", "err", err)
+		}
+		c.zap, c.zapExec = nil, nil
+	}
+
+	// Adopt the new config. The KB survives, so learning is not lost.
+	c.conf = newConf
+	c.reg = newConf.Registry
+	catalog := strategy.BuiltinCatalog()
+	for _, d := range newConf.Strategies {
+		catalog.Add(d)
+	}
+	c.kb.SetZapretSeed(catalog.ZapretIDs())
+
+	// Reconcile the box: regenerate from newConf and restart sing-box only on a real
+	// diff. A non-routing edit produces the same config → no restart → connection kept.
+	if err := c.newReconciler().Reconcile(context.WithoutCancel(root)); err != nil {
+		return fmt.Errorf("core: reload reconcile: %w", err)
+	}
+
+	c.log.Info("config reloaded in place", "services", len(c.reg.Services))
+	return c.buildLoop()
 }
 
 // clashObserveSource adapts the loopback Clash-API to the passive eye's Source,
@@ -636,9 +681,17 @@ type NodeStatus struct {
 	LeakRatio    float64 `json:"leakRatio,omitempty"`    // passive-eye leak-to-direct ratio
 }
 
-// Status reports each service's brain position plus the concrete node its
-// selector currently points at (read over the Clash-API).
+// Status reports each service's brain position plus the concrete node its selector
+// currently points at (read over the Clash-API), under stateMu so a concurrent
+// config reload cannot swap the brain/reg mid-read.
 func (c *Core) Status(ctx context.Context) []NodeStatus {
+	c.stateMu.Lock()
+	defer c.stateMu.Unlock()
+	return c.statusLocked(ctx)
+}
+
+// statusLocked is Status's body; the caller holds stateMu (Status, or Report).
+func (c *Core) statusLocked(ctx context.Context) []NodeStatus {
 	if c.brain == nil {
 		return nil
 	}
@@ -691,6 +744,8 @@ func (c *Core) Healthy(ctx context.Context) bool {
 // returns before the probe completes; the verdict lands on the brain through the
 // normal bus. eng is checked first so a request before Start cannot nil-deref reg.
 func (c *Core) Recheck(service string) error {
+	c.stateMu.Lock()
+	defer c.stateMu.Unlock()
 	if c.eng == nil {
 		return fmt.Errorf("core: probing engine not running")
 	}

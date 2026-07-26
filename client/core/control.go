@@ -246,7 +246,8 @@ func (s *ControlServer) handleSetConfig(w http.ResponseWriter, r *http.Request) 
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
-	if _, err := config.Parse(y); err != nil {
+	cfg, err := config.Parse(y)
+	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
@@ -256,9 +257,16 @@ func (s *ControlServer) handleSetConfig(w http.ResponseWriter, r *http.Request) 
 	}
 	w.WriteHeader(http.StatusAccepted)
 	w.Write([]byte(`{"applied":true}`))
-	// Apply AFTER the ack, so the caller sees success before the socket drops during
-	// the re-exec. The GUI already tolerates the brief unreachable window.
-	go s.restart()
+	// Apply AFTER the ack, so the caller sees success before the data plane blips.
+	// Prefer an in-place reload — it restarts sing-box only when its config actually
+	// changed, so a non-routing edit keeps every live connection; fall back to a full
+	// re-exec if the reload cannot apply in place.
+	go func() {
+		if err := s.core.Reload(cfg); err != nil {
+			s.log.Warn("in-place config reload failed — falling back to re-exec", "err", err)
+			s.restart()
+		}
+	}()
 }
 
 func readConfigDoc(r *http.Request) (configDoc, error) {
