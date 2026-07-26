@@ -1,0 +1,14 @@
+<svg viewBox="0 0 512 512" xmlns="http://www.w3.org/2000/svg" color="#1B2A2E">
+  <g fill="none" stroke="currentColor" stroke-width="34" stroke-linecap="round" stroke-linejoin="round">
+    <!-- open wedge -->
+    <line x1="256" y1="152" x2="91.9"  y2="316.1"/>
+    <line x1="256" y1="152" x2="420.1" y2="316.1"/>
+    <!-- limb arc (bold) -->
+    <path d="M 91.9 316.1 A 232 232 0 0 0 420.1 316.1" stroke-width="40"/>
+    <!-- telescope stub, rooted on the right strut, pointing right -->
+    <line x1="304" y1="200" x2="440" y2="188" stroke-width="32"/>
+  </g>
+  <!-- index-mirror hub + drum on the limb -->
+  <circle cx="256"   cy="152"   r="16" fill="currentColor"/>
+  <circle cx="342.9" cy="367.1" r="21" fill="currentColor"/>
+</svg>
