@@ -1,6 +1,8 @@
 # Build artifacts — `wails build` / `npm run build` regenerate these.
 frontend/node_modules/
 frontend/dist/
+frontend/wailsjs/
+frontend/package.json.md5
 build/
 
 # Go binary from `go build` (the shipped app comes from `wails build`)
