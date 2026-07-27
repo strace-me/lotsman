@@ -656,6 +656,51 @@ func Generate(services []registry.Service, devices []registry.Device, nodes []su
 		nonEmptyPool[name] = true
 	}
 
+	// Back-fill any VPN pool a service's chain names but whose strict filter produced
+	// no members — classically vpn_url_test_udp on a fleet with no udp_native nodes
+	// (VLESS/Trojan/VMess are not native-UDP). The selector below already fails its
+	// *default* over to direct, but the brain/executor and the RungProber address the
+	// pool tag DIRECTLY over the Clash API, so a missing tag 404s and the service can
+	// never leave direct. Reuse the general TCP pool's nodes (VPN outbounds tunnel
+	// UDP), so the group exists and the service routes through an available exit; once
+	// a real udp_native node is added the pool is non-empty on its own and this never
+	// fires. Before selectorOutbounds so the recovered group is a valid selector
+	// member + default.
+	for _, svc := range services {
+		pool := svc.VPNPool()
+		if pool == "" || nonEmptyPool[pool] {
+			continue
+		}
+		tags := make([]string, 0, len(memberships["vpn_url_test"]))
+		for _, m := range memberships["vpn_url_test"] {
+			if t, ok := tagOf[m.ID]; ok {
+				tags = append(tags, t)
+			}
+		}
+		if len(tags) == 0 {
+			continue // no general VPN nodes either -> selector fails safe to direct
+		}
+		grp := outbound{
+			"type":      "urltest",
+			"tag":       pool,
+			"outbounds": tags,
+			"url":       "https://www.gstatic.com/generate_204",
+			"interval":  "5m",
+		}
+		if po, ok := opts.PoolOpts[pool]; ok {
+			if po.Interval != "" {
+				grp["interval"] = po.Interval
+			}
+			if po.IdleTimeout != "" {
+				grp["idle_timeout"] = po.IdleTimeout
+			}
+		}
+		outbounds = append(outbounds, grp)
+		poolTags = append(poolTags, pool)
+		nonEmptyPool[pool] = true
+	}
+	sort.Strings(poolTags) // deterministic order after the back-fill
+
 	// Per-service selector + route rule. Order matters: sing-box route is
 	// first-match-wins, so emit by Priority (lower first), then name for a stable
 	// tie-break. Protective/specific rules (ru-direct, Priority<0) land before
