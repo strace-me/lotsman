@@ -57,11 +57,60 @@
     }
   }
 
+  // Window zoom (Ctrl +/-/0 and Ctrl+wheel), persisted. Fractional on purpose: under
+  // XWayland double-scaling (the compositor upscales AND GDK_SCALE applies) an integer
+  // GDK_SCALE can only over- or under-shoot, so the user dials the comfortable size here
+  // and it sticks. CSS `zoom` reflows and keeps vh/% correct (unlike transform:scale), so
+  // .app's min-height:100vh still fits the window at any zoom.
+  const ZOOM_KEY = 'lotsman.zoom'
+  const ZOOM_MIN = 0.6
+  const ZOOM_MAX = 2.0
+  const ZOOM_STEP = 0.1
+  let zoom = 1
+
+  function setZoom(z) {
+    zoom = Math.min(ZOOM_MAX, Math.max(ZOOM_MIN, Math.round(z * 100) / 100))
+    document.documentElement.style.zoom = String(zoom)
+    try {
+      localStorage.setItem(ZOOM_KEY, String(zoom))
+    } catch (e) {
+      // storage disabled (private mode) — zoom still applies for this session
+    }
+  }
+
+  function onZoomKey(e) {
+    if (!(e.ctrlKey || e.metaKey)) return
+    if (e.key === '=' || e.key === '+') {
+      e.preventDefault()
+      setZoom(zoom + ZOOM_STEP)
+    } else if (e.key === '-' || e.key === '_') {
+      e.preventDefault()
+      setZoom(zoom - ZOOM_STEP)
+    } else if (e.key === '0') {
+      e.preventDefault()
+      setZoom(1)
+    }
+  }
+
+  function onZoomWheel(e) {
+    if (!(e.ctrlKey || e.metaKey)) return
+    e.preventDefault()
+    setZoom(zoom + (e.deltaY < 0 ? ZOOM_STEP : -ZOOM_STEP))
+  }
+
   onMount(() => {
+    const saved = parseFloat(localStorage.getItem(ZOOM_KEY) || '')
+    setZoom(Number.isFinite(saved) && saved > 0 ? saved : 1)
+    window.addEventListener('keydown', onZoomKey)
+    window.addEventListener('wheel', onZoomWheel, { passive: false })
     load()
     timer = setInterval(load, 2000)
   })
-  onDestroy(() => clearInterval(timer))
+  onDestroy(() => {
+    clearInterval(timer)
+    window.removeEventListener('keydown', onZoomKey)
+    window.removeEventListener('wheel', onZoomWheel)
+  })
 
   const tabs = [
     ['dashboard', 'Обзор'],
