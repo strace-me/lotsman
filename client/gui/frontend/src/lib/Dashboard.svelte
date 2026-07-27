@@ -66,7 +66,7 @@
   <section>
     <h2>История событий</h2>
     <div class="events">
-      {#each events as ev}
+      {#each events || [] as ev}
         <div class="event">
           <span class="t">{fmtTime(ev.time)}</span>
           <span class="es">{ev.service}</span>
@@ -81,7 +81,7 @@
   <section>
     <h2>Подписки</h2>
     <div class="subs">
-      {#each report.subscriptions as s}
+      {#each report.subscriptions || [] as s}
         <div class="subrow" class:warn={s.daysUntilExpire >= 0 && s.daysUntilExpire < 5}>
           <span class="name">{s.name}</span>
           <span class="meta">
