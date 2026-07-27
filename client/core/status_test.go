@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/strace-me/lotsman/client/platform/netid"
+	"github.com/strace-me/lotsman/pkg/config"
 	"github.com/strace-me/lotsman/pkg/subscription"
 )
 
@@ -72,6 +73,38 @@ func TestSubStatusesMapsQuotaAndSortsByName(t *testing.T) {
 	}
 	if got[1].DaysUntilExpire <= 0 {
 		t.Errorf("expiry in 48h must give positive days, got %v", got[1].DaysUntilExpire)
+	}
+}
+
+func TestSubStatusesListsConfiguredSubsWithoutUserinfo(t *testing.T) {
+	// A configured, enabled subscription whose provider sent no Subscription-Userinfo
+	// header must still appear (with unknown quota) so the UI never says "нет подписок"
+	// while the fleet runs off it. A disabled one must not appear.
+	c := &Core{
+		conf: &config.Config{Subscriptions: []subscription.Declaration{
+			{Name: "acme", Enabled: true},
+			{Name: "off", Enabled: false},
+		}},
+		subInfo: map[string]subscription.Userinfo{
+			"acme": {Upload: 1, Download: 2, Total: 100}, // captured quota overlays the configured entry
+		},
+	}
+	got := c.subStatuses()
+	if len(got) != 1 || got[0].Name != "acme" {
+		t.Fatalf("want just the enabled sub [acme], got %+v", got)
+	}
+	if got[0].UsedBytes != 3 || got[0].TotalBytes != 100 {
+		t.Errorf("captured quota must overlay the configured entry: %+v", got[0])
+	}
+
+	// Same sub, no userinfo captured at all -> still shows, with unknown quota.
+	c.subInfo = nil
+	got = c.subStatuses()
+	if len(got) != 1 || got[0].Name != "acme" {
+		t.Fatalf("a headerless configured sub must still show: %+v", got)
+	}
+	if got[0].TotalBytes != 0 || got[0].FractionUsed != -1 {
+		t.Errorf("headerless sub must read unknown quota, got %+v", got[0])
 	}
 }
 

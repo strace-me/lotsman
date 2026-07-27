@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/strace-me/lotsman/pkg/observe"
+	"github.com/strace-me/lotsman/pkg/subscription"
 )
 
 // Report is the rich /status payload a UI renders. It is a backward-compatible
@@ -156,29 +157,51 @@ func (c *Core) engineStatuses(ctx context.Context) []EngineStatus {
 	return out
 }
 
-// subStatuses maps the quota/expiry captured at the last fetch, sorted by name so
-// the output is stable.
+// subStatuses lists every configured (enabled) subscription by name, overlaying the
+// quota/expiry captured from the Subscription-Userinfo header at the last fetch. A
+// subscription that yielded nodes but whose provider sent no such header still shows,
+// with quota/expiry left unknown — so the UI never claims "нет подписок" while the
+// fleet is running off one. Sorted by name so the output is stable. (c.conf is nil
+// only in unit tests, hence the guard.)
 func (c *Core) subStatuses() []SubStatus {
 	c.subMu.Lock()
 	info := c.subInfo
 	c.subMu.Unlock()
-	if len(info) == 0 {
-		return nil
-	}
+
 	now := time.Now()
-	out := make([]SubStatus, 0, len(info))
+	var out []SubStatus
+	seen := make(map[string]bool)
+	if c.conf != nil {
+		for _, d := range c.conf.Subscriptions {
+			if !d.Enabled || seen[d.Name] {
+				continue
+			}
+			seen[d.Name] = true
+			out = append(out, subStatus(d.Name, info[d.Name], now))
+		}
+	}
+	// Surface any captured userinfo whose name is no longer in the config.
 	for name, ui := range info {
-		out = append(out, SubStatus{
-			Name:            name,
-			UsedBytes:       ui.Used(),
-			TotalBytes:      ui.Total,
-			FractionUsed:    ui.FractionUsed(),
-			DaysUntilExpire: ui.DaysUntilExpire(now),
-			Expired:         ui.Expired(now),
-		})
+		if !seen[name] {
+			out = append(out, subStatus(name, ui, now))
+		}
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
 	return out
+}
+
+// subStatus maps one subscription's captured userinfo to a SubStatus. A zero-value
+// Userinfo (no header captured) yields the documented "unknown" fields: TotalBytes 0,
+// FractionUsed/DaysUntilExpire -1, not expired.
+func subStatus(name string, ui subscription.Userinfo, now time.Time) SubStatus {
+	return SubStatus{
+		Name:            name,
+		UsedBytes:       ui.Used(),
+		TotalBytes:      ui.Total,
+		FractionUsed:    ui.FractionUsed(),
+		DaysUntilExpire: ui.DaysUntilExpire(now),
+		Expired:         ui.Expired(now),
+	}
 }
 
 // observeSnapshot returns the last passive-eye snapshot under obsMu. The eye
