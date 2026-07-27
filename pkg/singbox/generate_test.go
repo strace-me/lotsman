@@ -167,6 +167,45 @@ func TestGeneratePerServiceSelectors(t *testing.T) {
 	}
 }
 
+// A service whose VPN rung names a pool the strict filter left empty — classically
+// vpn_url_test_udp on a VLESS-only fleet with no udp_native nodes — still gets a real
+// urltest group, back-filled from the general TCP pool's nodes. Without it the group
+// tag is missing and the executor/RungProber's direct Clash-API call 404s, stranding
+// the service on direct.
+func TestGenerateBackfillsEmptyUDPPoolFromTCPNodes(t *testing.T) {
+	vless := mustParse(t, "vless://uuid@1.2.3.4:443?type=ws#v", subscription.FormatSingleURL)
+	nodes := []subscription.Node{vless}
+	services := []registry.Service{
+		svc("youtube", "vpn_url_test", "geosite-youtube"),
+		svc("discord", "vpn_url_test_udp", "geosite-discord"), // UDP pool, but no udp_native nodes exist
+	}
+	// vpn_url_test holds the VLESS node; vpn_url_test_udp is present but empty (its
+	// udp_native filter matched nothing).
+	memberships := map[string][]subscription.Node{
+		"vpn_url_test":     {vless},
+		"vpn_url_test_udp": {},
+	}
+
+	res, err := Generate(services, nil, nodes, memberships, DefaultOptions())
+	if err != nil {
+		t.Fatalf("generate: %v", err)
+	}
+	byTag, _, _ := outboundsByTag(t, res.JSON)
+
+	grp := byTag["vpn_url_test_udp"]
+	if grp == nil || grp["type"] != "urltest" {
+		t.Fatalf("vpn_url_test_udp urltest group missing (would 404 the executor): %v", grp)
+	}
+	if len(grp["outbounds"].([]any)) == 0 {
+		t.Error("back-filled vpn_url_test_udp group has no member nodes")
+	}
+	// With the group present, discord's selector keeps its VPN pool as the default
+	// instead of failing safe to direct.
+	if sel := byTag[registry.SelectorTag("discord")]; sel == nil || sel["default"] != "vpn_url_test_udp" {
+		t.Errorf("discord selector default = %v, want vpn_url_test_udp", sel["default"])
+	}
+}
+
 // gecko obfs is "Since sing-box 1.14.0": stripped + reported on an older target
 // (so the config stays loadable), kept on 1.14.0+ (LOT/caps gating).
 func TestGeckoObfsVersionGated(t *testing.T) {
