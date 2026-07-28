@@ -809,12 +809,33 @@ func (c *Core) singboxOptions() singbox.Options {
 		opts.SocksProbeListen = c.opts.ProxyListen
 	} else {
 		opts.Tun = c.tunOptions()
+		// A tun captures DNS system-wide, so the client must carry its own: without a
+		// dns block sing-box has no resolver and lookups fail. Proxy mode doesn't
+		// capture DNS, so it keeps the system resolver (no block).
+		opts.DNS = defaultDNS("vpn_url_test")
 		if c.opts.ProbeProxy != "" {
 			opts.SocksProbeListen = c.opts.ProbeProxy
 		}
 	}
 
 	return opts
+}
+
+// defaultDNS is the split-DNS a tun client runs with when the config declares none:
+// censored/default domains resolve via Cloudflare DoH DETOURED THROUGH THE VPN pool
+// (so the ISP neither sees the queries in the clear nor poisons the answers), while
+// the OS resolver bootstraps that DoH hostname and serves the RU-direct rule-sets.
+// The pool detour is dropped by the generator when the pool doesn't exist yet (no
+// nodes), degrading to DoH-over-direct — still encrypted, just not tunnelled.
+func defaultDNS(pool string) *singbox.DNSOptions {
+	return &singbox.DNSOptions{
+		Servers: []singbox.DNSServer{
+			{Tag: "dns_remote", Type: "https", Server: "cloudflare-dns.com", ServerName: "cloudflare-dns.com", Bootstrap: "dns_direct", Detour: pool},
+			{Tag: "dns_direct", Type: "local"},
+		},
+		Direct: "dns_direct",
+		Final:  "dns_remote",
+	}
 }
 
 // generate fetches subscription nodes and renders the client sing-box config

@@ -26,6 +26,7 @@ const (
 	FeatureShadowTLS   Feature = "shadowtls"    // shadowtls v3 outbound (ss detours through it)
 	FeatureWireGuard   Feature = "wireguard"    // wireguard endpoint (the deprecated outbound form is not emitted)
 	FeatureECH         Feature = "ech"          // tls.ech base form (enabled + explicit config); not the 1.13+ query_server_name
+	FeatureDNSServers  Feature = "dns_servers"  // the 1.12 type-based DNS server format (udp/tcp/tls/quic/https/h3) — gates the whole split-DNS block
 )
 
 // baselineVersion is the R5S box; an empty/unknown target resolves to it.
@@ -50,6 +51,7 @@ var minVersion = map[Feature]string{
 	FeatureAnyTLS:      "1.12.0",
 	FeatureGeckoObfs:   "1.14.0", // real, added 1.14.0 (verified vs real doc); 1.12.17 rejects it
 	FeatureFakeIP:      "1.12.0", // type:"fakeip" DNS server (new form) — verified accepted on 1.12.17
+	FeatureDNSServers:  "1.12.0", // type-based DNS servers (udp/tcp/tls/quic/https/h3) landed together in the 1.12.0 DNS rewrite; a new-format config fails to load on <=1.11
 	FeatureMultiplex:   "1.1.0",  // smux/yamux long-standing; padding (1.3+) & brutal (1.7+) ≤ 1.12.17 baseline
 	FeatureShadowTLS:   "1.3.0",  // shadowtls v3 — verified accepted on 1.12.17
 	FeatureWireGuard:   "1.11.0", // `endpoints` form (outbound form deprecated on 1.12.17)

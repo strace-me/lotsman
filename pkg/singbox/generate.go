@@ -115,7 +115,8 @@ type Options struct {
 	UTLSFingerprint  string                 // default tls.utls fingerprint for TCP TLS outbounds lacking one (e.g. "chrome"); "" = off
 	UTLSPool         []string               // diversity-with-consistency: when set, each node draws a fingerprint from this vetted pool deterministically by node ID (consistent per node, diverse across the fleet) instead of all sharing UTLSFingerprint. Avoids "the whole fleet is one fingerprint → that fingerprint becomes the tool signature" without per-connection flipping (which uTLS warns is itself suspicious). Empty = use UTLSFingerprint for all.
 	TargetVersion    string                 // sing-box version to target (e.g. "1.12.17"); gates version-specific knobs. "" = baseline
-	FakeIP           *FakeIPOptions         // emit a fakeip DNS section (nil = off)
+	FakeIP           *FakeIPOptions         // legacy fakeip-only DNS section (nil = off); superseded by DNS
+	DNS              *DNSOptions            // split-DNS block (multi-server, DoT/DoH/DoQ, VPN-detoured); nil = fall back to FakeIP/none
 	Multiplex        *MultiplexOptions      // default outbound multiplex for TCP proxies (nil = off)
 	Remediations     map[string]Remediation // per-service self-heal remediation rules (nil/absent = no change; LOT-18). Keyed by service name.
 
@@ -957,9 +958,37 @@ func Generate(services []registry.Service, devices []registry.Device, nodes []su
 		cfg["endpoints"] = endpoints
 	}
 
-	// FakeIP DNS section (opt-in, version-gated). Off => no dns block at all (the
-	// box's existing resolver/AdGuard stays in charge).
-	if opts.FakeIP != nil {
+	// DNS. Prefer the split-DNS block (opts.DNS): encrypted resolver(s) detoured
+	// through the VPN for censored/default resolution, a local/direct resolver for the
+	// RU-direct services — so a tun client neither leaks queries to the ISP nor eats
+	// poisoned answers. Falls back to the legacy fakeip-only block, then to no dns
+	// block at all (the box's existing resolver stays in charge).
+	if opts.DNS != nil {
+		if caps.Supports(FeatureDNSServers) {
+			// RU-direct services' rule-sets resolve via the direct server.
+			var directRuleSets []string
+			seenRS := map[string]bool{}
+			for _, svc := range services {
+				if !svc.DirectOnly() {
+					continue
+				}
+				for _, rs := range svc.RuleSets {
+					if !seenRS[rs] {
+						seenRS[rs] = true
+						directRuleSets = append(directRuleSets, rs)
+					}
+				}
+			}
+			sort.Strings(directRuleSets)
+			validDetour := func(tag string) bool { return nonEmptyPool[tag] }
+			if dns, ok := dnsSection(opts.DNS, directRuleSets, validDetour, caps); ok {
+				cfg["dns"] = dns
+			}
+		} else {
+			res.SkippedKnobs = append(res.SkippedKnobs,
+				fmt.Sprintf("dns (new-format servers unsupported on sing-box %s)", caps.Version()))
+		}
+	} else if opts.FakeIP != nil {
 		if caps.Supports(FeatureFakeIP) {
 			cfg["dns"] = dnsBlock(opts.FakeIP)
 		} else {
