@@ -719,10 +719,17 @@ func Generate(services []registry.Service, devices []registry.Device, nodes []su
 	// sniff first (route action, the 1.11+ replacement for deprecated inbound
 	// sniff) so domain rule-sets can match the sniffed host; then private->direct.
 	var routeRules []any
-	routeRules = append(routeRules,
-		map[string]any{"action": "sniff"},
-		map[string]any{"ip_is_private": true, "outbound": "direct"},
-	)
+	routeRules = append(routeRules, map[string]any{"action": "sniff"})
+	// In tun mode with our own DNS, hijack DNS queries the tun captures into the
+	// sing-box DNS engine so they resolve via the trusted (VPN-detoured) resolver
+	// instead of leaking to the ISP. Caveat: it only catches DNS that ENTERS the tun —
+	// a resolver on the route_exclude_address LAN (the host's DHCP resolver) still
+	// escapes; pointing the host at a captured resolver (system resolv.conf) is the
+	// remaining, system-mutating piece.
+	if opts.Tun != nil && opts.DNS != nil && caps.Supports(FeatureDNSServers) {
+		routeRules = append(routeRules, map[string]any{"protocol": "dns", "action": "hijack-dns"})
+	}
+	routeRules = append(routeRules, map[string]any{"ip_is_private": true, "outbound": "direct"})
 
 	// Per-device source overrides come before destination rules so a device's
 	// policy wins regardless of what it is connecting to.
