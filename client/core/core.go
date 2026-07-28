@@ -17,6 +17,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/strace-me/lotsman/client/platform/hostdns"
 	"github.com/strace-me/lotsman/client/platform/netid"
 	"github.com/strace-me/lotsman/client/platform/nfqws"
 	"github.com/strace-me/lotsman/client/platform/rulesets"
@@ -113,6 +114,12 @@ type Options struct {
 	// meaningful once its endpoints are in DesyncExclude, or its traffic does not
 	// cross the queued ports.
 	DesyncForce bool
+
+	// HostDNS redirects the HOST's own resolver (its browser/shell) into the tun
+	// while it is up, so it resolves censored names through the trusted in-tunnel
+	// resolver instead of leaking to the excluded LAN resolver. System-mutating and
+	// Linux+root+tun only; off by default. See client/platform/hostdns.
+	HostDNS bool
 }
 
 // Core is the single-device Lotsman client control plane. It reuses the daemon's
@@ -162,6 +169,13 @@ type Core struct {
 	foreignTunnels []string
 	zap            *nfqws.Engine // local desync engine (nil = no desync rung on this platform)
 	zapExec        *zapretExec   // the zapret executor, reconciled periodically (nil = no desync rung)
+
+	// hostDNS redirects the host's own resolver into the tun (nil = off / unsupported).
+	// hostResolver is the real LAN resolver captured before the redirect, pinned as the
+	// sing-box `direct` DNS server so its bootstrap does not re-read the mutated
+	// resolv.conf and loop. Both set once in Start before the loop; read-only after.
+	hostDNS      *hostdns.Manager
+	hostResolver string
 	tunnelIPs      []string      // proxy server IPs the desync must never touch
 	lastNodes      int           // nodes the last generate loaded; zero with subscriptions declared means no tunnel
 
@@ -242,6 +256,13 @@ func (c *Core) Start(ctx context.Context) error {
 	c.secret = secret
 	c.clash = dataplane.NewClashClient("http://"+c.opts.ClashListen, secret)
 
+	// Host-DNS: capture the real LAN resolver BEFORE generate, so the DNS block can
+	// pin its `direct` server to it (below, in singboxOptions) instead of type:local
+	// — which would re-read the resolv.conf we are about to redirect and loop. The
+	// redirect itself happens only after the tun is up (further down). Off unless the
+	// operator asked for it, and only where it can work (Linux + root + tun).
+	c.setupHostDNS()
+
 	// Generate the client config (tun ingress + secret) and bring sing-box up.
 	cfgJSON, err := c.generate(ctx)
 	if err != nil {
@@ -268,6 +289,13 @@ func (c *Core) Start(ctx context.Context) error {
 	started := false
 	defer func() {
 		if !started {
+			// Put the host's resolver back before anything else — a failed start must
+			// not leave the machine pointed at a sentinel whose tun is gone.
+			if c.hostDNS != nil {
+				if err := c.hostDNS.Restore(); err != nil {
+					c.log.Warn("host-dns: restore after a failed start", "err", err)
+				}
+			}
 			if err := c.box.Stop(context.WithoutCancel(ctx)); err != nil {
 				c.log.Warn("could not stop sing-box after a failed start", "err", err)
 			}
@@ -278,6 +306,27 @@ func (c *Core) Start(ctx context.Context) error {
 	// the client inert until the next reassert tick.
 	if err := c.waitControlReady(ctx, 15*time.Second); err != nil {
 		return err
+	}
+
+	// The tun is up and hijack-dns is live, so redirecting the host's resolver into
+	// it now catches the host's own DNS instead of leaving a gap with no resolver.
+	if c.hostDNS != nil {
+		if err := c.hostDNS.Redirect(); err != nil {
+			c.log.Warn("host-dns: could not redirect the host resolver (continuing; the host's own DNS may leak to the ISP)", "err", err)
+			c.hostDNS = nil
+		} else if err := c.hostDNS.Verify(ctx); err != nil {
+			// The redirect installed but a lookup through the sentinel did not answer:
+			// the tun-gateway hijack may not work on this host. Revert so the host keeps
+			// its original (working) resolver instead of a dead sentinel, and disable the
+			// feature (nil) so the supervisor does not re-engage it.
+			c.log.Warn("host-dns: reverting — the redirected resolver did not answer a test lookup", "err", err)
+			if rerr := c.hostDNS.Restore(); rerr != nil {
+				c.log.Warn("host-dns: revert after a failed verify", "err", rerr)
+			}
+			c.hostDNS = nil
+		} else {
+			c.log.Info("host-dns: verified — the host now resolves through the tunnel")
+		}
 	}
 
 	// Process-level, created once and reused across a config reload: the event ring
@@ -657,6 +706,13 @@ func (c *Core) Stop() error {
 			c.log.Warn("nfqws stop", "err", err)
 		}
 	}
+	// Put the host's resolver back before tearing the tun down, so the machine is
+	// never left pointing at an in-tun sentinel whose tun no longer exists.
+	if c.hostDNS != nil {
+		if err := c.hostDNS.Restore(); err != nil {
+			c.log.Warn("host-dns: restore on stop", "err", err)
+		}
+	}
 	_ = c.box.Stop(context.Background())
 	if c.kbFile != "" && c.kb != nil {
 		if err := c.kb.Save(c.kbFile); err != nil {
@@ -818,12 +874,104 @@ func (c *Core) singboxOptions() singbox.Options {
 		} else {
 			opts.DNS = defaultDNS("vpn_url_test")
 		}
+		// When host-DNS has redirected the system resolv.conf into the tun, the
+		// `direct` server can no longer be type:local (it would re-read the redirected
+		// file and loop); pin it to the real LAN resolver captured before the redirect.
+		if c.hostResolver != "" {
+			pinDirectResolver(opts.DNS, c.hostResolver)
+		}
 		if c.opts.ProbeProxy != "" {
 			opts.SocksProbeListen = c.opts.ProbeProxy
 		}
 	}
 
 	return opts
+}
+
+// setupHostDNS builds the host-DNS redirector and captures the real LAN resolver,
+// so singboxOptions can pin the sing-box `direct` server to it. It is a no-op
+// unless -host-dns is set and the mode can support it (Linux + root + tun): the
+// redirect rewrites /etc/resolv.conf, which needs root, and only makes sense when a
+// tun is actually capturing DNS. A capture failure disables the feature rather than
+// blocking startup — the client is still useful without host-DNS.
+func (c *Core) setupHostDNS() {
+	if !c.opts.HostDNS || c.opts.ProxyListen != "" {
+		return
+	}
+	if runtime.GOOS != "linux" || os.Geteuid() != 0 {
+		c.log.Warn("host-dns unavailable: it rewrites /etc/resolv.conf, so it needs Linux + root + tun mode",
+			"goos", runtime.GOOS, "euid", os.Geteuid())
+		return
+	}
+	sentinel := tunSentinel(c.tunOptions())
+	if sentinel == "" {
+		c.log.Warn("host-dns disabled: no tun gateway address to point the host at")
+		return
+	}
+	m := hostdns.New(sentinel, "/run/lotsman/resolv.conf.orig", "", c.log)
+	res, err := m.Capture()
+	if err != nil {
+		c.log.Warn("host-dns disabled: could not read the host resolver", "err", err)
+		return
+	}
+	if len(res) == 0 {
+		// Without a real resolver to pin the sing-box `direct` server to, redirecting
+		// resolv.conf into the tun would make sing-box's own bootstrap re-read the
+		// sentinel and loop. Refuse rather than break the tunnel's DNS.
+		c.log.Warn("host-dns disabled: no usable IPv4 resolver to pin the bootstrap to (a redirect would loop sing-box's own DNS)")
+		return
+	}
+	c.hostDNS = m
+	c.hostResolver = res[0]
+}
+
+// tunSentinel is the in-tun address the host's resolver is pointed at. It is the
+// tun's PEER address, NOT the tun's own interface address: with stack:system a
+// packet to the interface's own address is delivered locally and never reaches
+// sing-box's tun reader to be hijacked, whereas the peer routes INTO the tun. In
+// the /30 the client uses (172.19.0.1/30) that peer is 172.19.0.2. A verify step
+// after the redirect catches any host where even this does not get hijacked.
+func tunSentinel(t *singbox.TunOptions) string {
+	if t == nil || len(t.Address) == 0 {
+		return ""
+	}
+	ip, ipnet, err := net.ParseCIDR(t.Address[0])
+	if err != nil {
+		return ""
+	}
+	ip = ip.To4()
+	if ip == nil {
+		return ""
+	}
+	peer := make(net.IP, len(ip))
+	copy(peer, ip)
+	peer[len(peer)-1]++
+	if !ipnet.Contains(peer) {
+		copy(peer, ip)
+		peer[len(peer)-1]--
+	}
+	if peer.Equal(ip) || !ipnet.Contains(peer) {
+		return ""
+	}
+	return peer.String()
+}
+
+// pinDirectResolver rewrites the DNS block's `direct` server to dial a concrete
+// resolver IP over plain UDP, instead of `type: local` reading the system
+// resolv.conf. It is used only when host-DNS has redirected that resolv.conf into
+// the tun: sing-box's own bootstrap must keep reaching the REAL LAN resolver (its
+// traffic bypasses its tun via the routing mark), or resolving the DoH hostname
+// would loop back through the sentinel. A no-op if the direct server can't be found.
+func pinDirectResolver(dns *singbox.DNSOptions, resolver string) {
+	if dns == nil || resolver == "" || dns.Direct == "" {
+		return
+	}
+	for i := range dns.Servers {
+		if dns.Servers[i].Tag == dns.Direct {
+			dns.Servers[i] = singbox.DNSServer{Tag: dns.Direct, Type: "udp", Server: resolver}
+			return
+		}
+	}
 }
 
 // defaultDNS is the split-DNS a tun client runs with when the config declares none:
