@@ -11,7 +11,9 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"sort"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -40,9 +42,11 @@ import (
 	"github.com/strace-me/lotsman/pkg/zaptune"
 )
 
-// defaultTunExcludes keep link-local discovery and the LAN out of the tunnel.
-// A VPN that swallows multicast silently breaks every neighbour-discovery
-// protocol on the machine, and the failure looks like anything but routing.
+// defaultTunExcludes keep link-local discovery out of the tunnel: a VPN that
+// swallows multicast silently breaks every neighbour-discovery protocol on the
+// machine, and the failure looks like anything but routing. The LAN's own unicast
+// subnet(s) are added on top at generate time by localExcludeRoutes — without them
+// auto_route captures the LAN and kills SSH / local connectivity.
 var defaultTunExcludes = []string{
 	"224.0.0.0/4",        // all IPv4 multicast: mDNS, SSDP, LocalSend, Chromecast
 	"ff00::/8",           // the IPv6 equivalent
@@ -857,8 +861,60 @@ func (c *Core) tunOptions() *singbox.TunOptions {
 	}
 	return &singbox.TunOptions{
 		MTU: 9000, Address: []string{"172.19.0.1/30"}, Stack: "system", AutoRoute: true,
-		ExcludeRoutes: defaultTunExcludes,
+		ExcludeRoutes: append(append([]string{}, defaultTunExcludes...), localExcludeRoutes()...),
 	}
+}
+
+// localExcludeRoutes returns the machine's own directly-connected subnets so
+// auto_route never pulls them into the tunnel. The ip_is_private route rule only
+// steers traffic sing-box already handles, whereas auto_route decides what the kernel
+// diverts into the tun in the first place — so without excluding the LAN here the tun
+// swallows local traffic and kills SSH / LAN connectivity. Best-effort: on error only
+// the static multicast excludes apply.
+func localExcludeRoutes() []string {
+	ifaces, err := net.Interfaces()
+	if err != nil {
+		return nil
+	}
+	seen := map[string]bool{}
+	var out []string
+	for _, ifc := range ifaces {
+		// Only real, up LAN interfaces carry a subnet to keep local. Skip loopback,
+		// down, point-to-point and tun/tap/wg links: a tunnel's own /30 must never be
+		// excluded or it would blackhole the tunnel itself.
+		if ifc.Flags&net.FlagUp == 0 || ifc.Flags&net.FlagLoopback != 0 ||
+			ifc.Flags&net.FlagPointToPoint != 0 || isTunName(ifc.Name) {
+			continue
+		}
+		addrs, err := ifc.Addrs()
+		if err != nil {
+			continue
+		}
+		for _, a := range addrs {
+			ipnet, ok := a.(*net.IPNet)
+			if !ok {
+				continue
+			}
+			network := (&net.IPNet{IP: ipnet.IP.Mask(ipnet.Mask), Mask: ipnet.Mask}).String()
+			if !seen[network] {
+				seen[network] = true
+				out = append(out, network)
+			}
+		}
+	}
+	sort.Strings(out) // deterministic order for the anti-churn baseline
+	return out
+}
+
+// isTunName reports whether an interface name looks like a tunnel/tap/wireguard
+// device, whose point-to-point subnet must not be mistaken for a LAN to exclude.
+func isTunName(name string) bool {
+	for _, p := range []string{"tun", "utun", "sing", "tap", "wg"} {
+		if strings.HasPrefix(name, p) {
+			return true
+		}
+	}
+	return false
 }
 
 // ensureRuleSets provisions the .srs files this config's services reference. The
