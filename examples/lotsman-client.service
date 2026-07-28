@@ -13,11 +13,22 @@
 # NFQUEUE desync (both need CAP_NET_ADMIN/CAP_NET_RAW) and the brain owns the
 # decisions. The control socket lives at /run/lotsman/control.sock.
 #
-# NOTE the socket is currently root-only: the service runs as root, the runtime
-# dir is 0700 and the socket 0600, so a tray must reach it as root too (e.g. run
-# the tray under sudo, or add a `Group=lotsman` here plus a group-owned 0660
-# socket once the client learns to set that). A truly unprivileged tray is not
-# possible with the perms as shipped — that group mechanism is the missing piece.
+# UNPRIVILEGED UI: the socket is the privilege seam, so it defaults to owner-only
+# 0600. To let an unprivileged GUI/tray drive this root service, put both in a
+# shared group:
+#   sudo groupadd --system lotsman
+#   sudo usermod -aG lotsman <your-login>      # log out/in for it to take effect
+# then Group=lotsman + RuntimeDirectoryMode=0750 below make /run/lotsman
+# group-traversable, and -control-socket-group lotsman makes the socket 0660
+# root:lotsman — a member of the group can attach without being root. To also
+# let the GUI start/stop this unit without a password, install the polkit rule:
+#   sudo install -Dm0644 examples/lotsman-client.rules \
+#        /etc/polkit-1/rules.d/49-lotsman-client.rules
+#
+# DAILY DRIVER (replace the system sing-box): this service and a system sing-box
+# cannot both own a tun. Disable the system unit before enabling this one —
+#   sudo systemctl disable --now sing-box
+# — and put the tun-mode flags (no -proxy; -zapret-files; -wan) in the env file.
 
 [Unit]
 Description=Lotsman desktop client (autonomous anti-censorship tunnel)
@@ -30,6 +41,10 @@ Wants=network-online.target
 [Service]
 Type=simple
 EnvironmentFile=/etc/lotsman/client.env
+# The service runs as root (tun + NFQUEUE need it); Group=lotsman is the shared
+# group an unprivileged UI joins to reach the control socket. Comment both this
+# and -control-socket-group out to keep the socket owner-only 0600.
+Group=lotsman
 # The flags live in the env file so an upgrade of the unit does not clobber local
 # choices; the defaults there are a working starting point.
 ExecStart=/usr/local/bin/lotsman-client \
@@ -38,6 +53,7 @@ ExecStart=/usr/local/bin/lotsman-client \
 	-kb-file ${LOTSMAN_STATE_DIR}/kb.json \
 	-singbox-config ${LOTSMAN_STATE_DIR}/singbox.json \
 	-control-socket ${LOTSMAN_RUNTIME_DIR}/control.sock \
+	-control-socket-group lotsman \
 	-metrics-addr ${LOTSMAN_METRICS_ADDR} \
 	$LOTSMAN_EXTRA
 # NB $LOTSMAN_EXTRA is deliberately UNBRACED: only the bare $VAR form splits on
@@ -45,9 +61,11 @@ ExecStart=/usr/local/bin/lotsman-client \
 # string as ONE argument, and lotsman-client would reject it and crash-loop.
 
 # /run/lotsman for the control socket, /var/lib/lotsman for KB/state/baseline and
-# the nfqws hostlists — systemd creates and owns both.
+# the nfqws hostlists — systemd creates and owns both. RuntimeDirectoryMode=0750
+# (paired with Group=lotsman) lets a group member traverse to the socket; drop it
+# back to 0700 if you remove the group.
 RuntimeDirectory=lotsman
-RuntimeDirectoryMode=0700
+RuntimeDirectoryMode=0750
 StateDirectory=lotsman
 StateDirectoryMode=0700
 

@@ -85,6 +85,7 @@ func main() {
 		refreshEvery  = flag.Duration("refresh-interval", 5*time.Minute, "how often to re-fetch subscriptions and reconcile the config (0 = never)")
 		roamInterval  = flag.Duration("roam-interval", 15*time.Second, "how often to re-fingerprint the network and swap the KB on a change (only with -kb-dir)")
 		controlSock   = flag.String("control-socket", "", "unix socket for the local control API (empty = default under the runtime dir)")
+		controlGroup  = flag.String("control-socket-group", "", "UNIX group to own the control socket (0660, group-traversable dir) so an unprivileged UI in this group can drive a root service; empty = owner-only 0600")
 		metricsAddr   = flag.String("metrics-addr", "", "serve Prometheus /metrics on this host:port (empty = off; also enables the passive observe pass that surfaces frozen/leak/one-way flows)")
 		baselineFile  = flag.String("baseline-file", "", "persist the reconciler anti-churn baseline here (empty = derive from -singbox-config; the guard then survives restarts)")
 		initConfig    = flag.Bool("init", false, "write a starter config to -config from -sub URL(s) and exit (refuses to overwrite an existing file)")
@@ -204,6 +205,9 @@ func main() {
 	var applyRestart atomic.Bool
 	restart := func() { applyRestart.Store(true); cancel() }
 	ctl := core.NewControlServer(c, cancel, log).WithConfig(*configPath, restart)
+	if *controlGroup != "" {
+		ctl = ctl.WithSocketGroup(*controlGroup)
+	}
 	if err := ctl.Serve(*controlSock); err != nil {
 		log.Warn("control API unavailable (continuing headless)", "err", err)
 	} else {

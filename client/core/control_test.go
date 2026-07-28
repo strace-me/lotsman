@@ -9,7 +9,10 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"os/user"
 	"path/filepath"
+	"strconv"
+	"syscall"
 	"testing"
 
 	"github.com/strace-me/lotsman/pkg/audit"
@@ -110,6 +113,57 @@ func TestControlSocketIsPrivateAndReplacesAStaleOne(t *testing.T) {
 	}
 	if perm := fi.Mode().Perm(); perm != 0o600 {
 		t.Errorf("socket perms = %o, want 0600 — a writable socket hands over the tunnel", perm)
+	}
+}
+
+func TestControlSocketGroupOpensItTo0660(t *testing.T) {
+	// Chowning to a group the caller already belongs to is allowed unprivileged, so
+	// drive the test with the caller's own primary group — no root, no CI setup.
+	u, err := user.Current()
+	if err != nil {
+		t.Skipf("user.Current: %v", err)
+	}
+	g, err := user.LookupGroupId(u.Gid)
+	if err != nil {
+		t.Skipf("own group name: %v", err)
+	}
+
+	dir := shortTempDir(t)
+	path := filepath.Join(dir, "control.sock")
+	s := NewControlServer(&Core{}, func() {}, slog.New(slog.DiscardHandler)).WithSocketGroup(g.Name)
+	if err := s.Serve(path); err != nil {
+		t.Fatalf("serve with group %q: %v", g.Name, err)
+	}
+	defer s.Close()
+
+	fi, err := os.Stat(path)
+	if err != nil {
+		t.Fatalf("stat socket: %v", err)
+	}
+	if perm := fi.Mode().Perm(); perm != 0o660 {
+		t.Errorf("socket perms = %o, want 0660 so a group member can drive it", perm)
+	}
+	di, err := os.Stat(dir)
+	if err != nil {
+		t.Fatalf("stat dir: %v", err)
+	}
+	if perm := di.Mode().Perm(); perm != 0o750 {
+		t.Errorf("socket dir perms = %o, want 0750 so the group can traverse to the socket", perm)
+	}
+	wantGID, _ := strconv.Atoi(u.Gid)
+	if st, ok := fi.Sys().(*syscall.Stat_t); ok && int(st.Gid) != wantGID {
+		t.Errorf("socket gid = %d, want %d", st.Gid, wantGID)
+	}
+}
+
+func TestControlSocketGroupThatDoesNotExistFailsLoudly(t *testing.T) {
+	dir := shortTempDir(t)
+	path := filepath.Join(dir, "control.sock")
+	s := NewControlServer(&Core{}, func() {}, slog.New(slog.DiscardHandler)).
+		WithSocketGroup("lotsman-no-such-group-xyzzy")
+	if err := s.Serve(path); err == nil {
+		s.Close()
+		t.Fatal("serve with an unknown group succeeded; want a loud failure, not a silent fallback")
 	}
 }
 
