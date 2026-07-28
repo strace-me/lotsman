@@ -8,6 +8,7 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"os/user"
 	"path/filepath"
 	"strconv"
 	"time"
@@ -29,13 +30,14 @@ const maxUnixSocketPath = 100
 // permissions, which the kernel enforces for us. That is the same reasoning that
 // made the Clash-API secret mandatory, applied one layer up.
 type ControlServer struct {
-	core       *Core
-	stop       func()
-	restart    func() // re-exec the service to apply a new config (nil = config editing off)
-	configPath string // path of the config file the GUI edits ("" = config editing off)
-	srv        *http.Server
-	ln         net.Listener
-	log        *slog.Logger
+	core        *Core
+	stop        func()
+	restart     func() // re-exec the service to apply a new config (nil = config editing off)
+	configPath  string // path of the config file the GUI edits ("" = config editing off)
+	socketGroup string // group to own the control socket 0660 ("" = owner-only 0600)
+	srv         *http.Server
+	ln          net.Listener
+	log         *slog.Logger
 }
 
 // Status is the ORIGINAL /status shape: whether the data plane is actually up
@@ -64,6 +66,19 @@ func (s *ControlServer) WithConfig(path string, restart func()) *ControlServer {
 	return s
 }
 
+// WithSocketGroup opens the control socket to a UNIX group so an unprivileged UI
+// running as a member of it can attach to a root service without itself being
+// root. The socket becomes group-owned 0660 (and the directory reaching it
+// group-traversable 0750) instead of the owner-only 0600 default. Left empty the
+// socket stays private to the owning user — the safe default that suits a
+// same-user run. This is the mechanism the systemd unit's Group= relies on; the
+// group must already exist. Named a group that does not resolve, Serve fails
+// loudly rather than silently falling back to a wider or narrower mode.
+func (s *ControlServer) WithSocketGroup(group string) *ControlServer {
+	s.socketGroup = group
+	return s
+}
+
 // Serve binds path and serves in the background until Close. A stale socket left
 // by a killed process is removed first — otherwise bind fails and the service
 // refuses to start for no reason the operator can see.
@@ -85,11 +100,9 @@ func (s *ControlServer) Serve(path string) error {
 	if err != nil {
 		return fmt.Errorf("core: control socket %s: %w", path, err)
 	}
-	// Belt and braces: the directory is already 0700, but a socket another user
-	// could write to would hand them the tunnel.
-	if err := os.Chmod(path, 0o600); err != nil {
+	if err := s.lockSocket(path); err != nil {
 		ln.Close()
-		return fmt.Errorf("core: control socket perms: %w", err)
+		return err
 	}
 
 	mux := http.NewServeMux()
@@ -109,6 +122,48 @@ func (s *ControlServer) Serve(path string) error {
 		}
 	}()
 	s.log.Info("control socket listening", "path", path)
+	return nil
+}
+
+// lockSocket sets who may drive the tunnel through the control socket. The socket
+// is the privilege seam — a process that can write to it can stop the tunnel or
+// rewrite the config — so it is locked to the owning user (0600) by default. When
+// a group is configured the socket becomes group-owned 0660 and the directory
+// reaching it group-traversable 0750, so an unprivileged UI in that group can
+// attach to a root service; the directory perms matter because a socket inside an
+// unreadable directory is unreachable however its own mode reads. Chowning to a
+// group the caller already belongs to is permitted unprivileged, so this works
+// both under the root systemd service and in a same-user dev run.
+func (s *ControlServer) lockSocket(path string) error {
+	if s.socketGroup == "" {
+		// Belt and braces: the directory is already 0700, but a socket another user
+		// could write to would hand them the tunnel.
+		if err := os.Chmod(path, 0o600); err != nil {
+			return fmt.Errorf("core: control socket perms: %w", err)
+		}
+		return nil
+	}
+	g, err := user.LookupGroup(s.socketGroup)
+	if err != nil {
+		return fmt.Errorf("core: control socket group %q: %w", s.socketGroup, err)
+	}
+	gid, err := strconv.Atoi(g.Gid)
+	if err != nil {
+		return fmt.Errorf("core: control socket group %q has non-numeric gid %q: %w", s.socketGroup, g.Gid, err)
+	}
+	dir := filepath.Dir(path)
+	if err := os.Chown(dir, -1, gid); err != nil {
+		return fmt.Errorf("core: control socket dir group: %w", err)
+	}
+	if err := os.Chmod(dir, 0o750); err != nil {
+		return fmt.Errorf("core: control socket dir perms: %w", err)
+	}
+	if err := os.Chown(path, -1, gid); err != nil {
+		return fmt.Errorf("core: control socket group: %w", err)
+	}
+	if err := os.Chmod(path, 0o660); err != nil {
+		return fmt.Errorf("core: control socket perms: %w", err)
+	}
 	return nil
 }
 

@@ -1,0 +1,19 @@
+// polkit rule: let members of the "lotsman" group start/stop/restart
+// lotsman-client.service without a password, so the unprivileged GUI/tray can
+// control the root daemon it attaches to over the control socket.
+//
+// Install:
+//   sudo install -Dm0644 examples/lotsman-client.rules \
+//        /etc/polkit-1/rules.d/49-lotsman-client.rules
+//
+// This grants ONLY unit management of lotsman-client.service to that one group —
+// not general systemd control. Pairs with Group=lotsman in the unit (which opens
+// the control socket) so the same group both drives the running service and
+// starts/stops it. Reload is automatic; polkitd re-reads rules.d on change.
+polkit.addRule(function(action, subject) {
+    if (action.id == "org.freedesktop.systemd1.manage-units" &&
+        action.lookup("unit") == "lotsman-client.service" &&
+        subject.isInGroup("lotsman")) {
+        return polkit.Result.YES;
+    }
+});
