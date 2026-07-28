@@ -135,4 +135,11 @@ func TestGenerateEmitsSplitDNSWithSurvivingDetour(t *testing.T) {
 	if remote := servers[0].(map[string]any); remote["detour"] != "vpn_url_test" {
 		t.Errorf("remote resolver detour should survive when the pool exists: %v", remote)
 	}
+	// sing-box 1.12 requires route.default_domain_resolver whenever a dns block is
+	// present, else `sing-box check` FATALs on outbounds that dial a hostname.
+	route := cfg["route"].(map[string]any)
+	ddr, ok := route["default_domain_resolver"].(map[string]any)
+	if !ok || ddr["server"] != "dns_direct" {
+		t.Errorf("route.default_domain_resolver must point at the direct resolver: %v", route["default_domain_resolver"])
+	}
 }

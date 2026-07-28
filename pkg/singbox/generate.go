@@ -983,6 +983,17 @@ func Generate(services []registry.Service, devices []registry.Device, nodes []su
 			validDetour := func(tag string) bool { return nonEmptyPool[tag] }
 			if dns, ok := dnsSection(opts.DNS, directRuleSets, validDetour, caps); ok {
 				cfg["dns"] = dns
+				// sing-box 1.12 makes a missing resolver FATAL for any outbound that
+				// dials a HOSTNAME (a node server given as a domain). Point route at the
+				// direct/local resolver so those hostnames resolve OFF-tunnel — the
+				// tunnel isn't up yet when connecting to its own exit node.
+				ddr := opts.DNS.Direct
+				if ddr == "" {
+					ddr = opts.DNS.Final
+				}
+				if ddr != "" {
+					route["default_domain_resolver"] = map[string]any{"server": ddr}
+				}
 			}
 		} else {
 			res.SkippedKnobs = append(res.SkippedKnobs,
