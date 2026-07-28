@@ -811,8 +811,13 @@ func (c *Core) singboxOptions() singbox.Options {
 		opts.Tun = c.tunOptions()
 		// A tun captures DNS system-wide, so the client must carry its own: without a
 		// dns block sing-box has no resolver and lookups fail. Proxy mode doesn't
-		// capture DNS, so it keeps the system resolver (no block).
-		opts.DNS = defaultDNS("vpn_url_test")
+		// capture DNS, so it keeps the system resolver (no block). A user-declared
+		// dns config overrides the built-in split-DNS default.
+		if c.conf.DNS != nil {
+			opts.DNS = dnsFromConfig(c.conf.DNS, "vpn_url_test")
+		} else {
+			opts.DNS = defaultDNS("vpn_url_test")
+		}
 		if c.opts.ProbeProxy != "" {
 			opts.SocksProbeListen = c.opts.ProbeProxy
 		}
@@ -836,6 +841,31 @@ func defaultDNS(pool string) *singbox.DNSOptions {
 		Direct: "dns_direct",
 		Final:  "dns_remote",
 	}
+}
+
+// dnsFromConfig maps a user-declared config.DNS to generator options, resolving the
+// "vpn" detour alias to the primary VPN pool tag and pointing a hostname-addressed
+// server's bootstrap at the direct resolver.
+func dnsFromConfig(d *config.DNS, pool string) *singbox.DNSOptions {
+	out := &singbox.DNSOptions{Direct: d.Direct, Final: d.Final, Strategy: d.Strategy}
+	if d.FakeIP {
+		out.FakeIP = &singbox.FakeIPOptions{} // standard reserved ranges
+	}
+	for _, s := range d.Servers {
+		detour := s.Detour
+		if detour == "vpn" {
+			detour = pool
+		}
+		srv := singbox.DNSServer{
+			Tag: s.Name, Type: s.Type, Server: s.Address, Port: s.Port,
+			Path: s.Path, ServerName: s.ServerName, Detour: detour,
+		}
+		if s.Bootstrap && d.Direct != "" {
+			srv.Bootstrap = d.Direct
+		}
+		out.Servers = append(out.Servers, srv)
+	}
+	return out
 }
 
 // generate fetches subscription nodes and renders the client sing-box config
