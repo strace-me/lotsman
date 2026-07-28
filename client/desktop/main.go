@@ -80,6 +80,7 @@ func main() {
 		wan           = flag.String("wan", "", "egress interface for the desync nft rules (empty = autodetect the default route)")
 		desyncExclude = flag.String("desync-exclude", "", "comma-separated IPs/CIDRs the desync must never touch (the servers of another VPN sharing this host)")
 		desyncForce   = flag.Bool("desync-force", false, "arm the desync even though another tunnel is present on this host")
+		hostDNS       = flag.Bool("host-dns", false, "TUN MODE: redirect the host's own resolver into the tunnel so its browser/shell resolve censored names through the trusted resolver (rewrites /etc/resolv.conf, restores on stop; needs root)")
 		hostlistDir   = flag.String("hostlist-dir", "", "dir for per-service nfqws hostlist files (default /var/lib/lotsman/hostlists as root). MUST stay readable after nfqws drops privileges, so a path under a 0700 home will not work. Empty and non-root inlines domains into argv instead, which costs an engine restart on every membership change")
 		proxyListen   = flag.String("proxy", "", "PROXY MODE: run sing-box on this socks address instead of capturing the system with a tun (no root needed, nothing intercepted)")
 		refreshEvery  = flag.Duration("refresh-interval", 5*time.Minute, "how often to re-fetch subscriptions and reconcile the config (0 = never)")
@@ -168,6 +169,7 @@ func main() {
 		MetricsAddr:   *metricsAddr,
 		BaselineFile:  *baselineFile,
 		DesyncForce:   *desyncForce,
+		HostDNS:       *hostDNS,
 		DesyncExclude: func() []string {
 			if *desyncExclude == "" {
 				return nil

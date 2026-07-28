@@ -38,6 +38,16 @@ func (c *Core) superviseBox(ctx context.Context) {
 			continue
 		}
 
+		// The tun is gone with sing-box, so the host's DNS sentinel now points at a
+		// dead address. Put the host's real resolver back for the outage, or it has no
+		// DNS at all — indefinitely if sing-box refuses to restart (a bad config).
+		// Restore is a no-op if already restored, so this is safe to call every tick.
+		if c.hostDNS != nil {
+			if err := c.hostDNS.Restore(); err != nil {
+				c.log.Warn("host-dns: restore during a sing-box outage", "err", err)
+			}
+		}
+
 		c.log.Warn("sing-box is not running — restarting it", "retry_in", backoff)
 		if err := c.box.Restart(ctx); err != nil {
 			c.log.Error("could not restart sing-box", "err", err, "next_try", backoff)
@@ -47,6 +57,13 @@ func (c *Core) superviseBox(ctx context.Context) {
 			// The brain reasserts selectors every interval, so the data plane
 			// re-converges on its own from here.
 			c.log.Info("sing-box restarted")
+			// The tun is back — redirect the host's DNS into it again (no-op if still
+			// engaged). Not re-verified: the mechanism was proven at first start.
+			if c.hostDNS != nil {
+				if err := c.hostDNS.Redirect(); err != nil {
+					c.log.Warn("host-dns: re-redirect after a restart", "err", err)
+				}
+			}
 			backoff = c.opts.Interval
 			t.Reset(c.opts.Interval)
 			continue
