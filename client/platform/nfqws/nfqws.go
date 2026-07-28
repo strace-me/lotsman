@@ -36,6 +36,7 @@ type Engine struct {
 	bin     string
 	inst    zapret.Instance
 	nftOpts zapret.NftOptions
+	fakeDir string // working dir for nfqws so its bare fake-payload filenames resolve; "" = inherit ours
 	log     *slog.Logger
 
 	mu       sync.Mutex
@@ -45,11 +46,13 @@ type Engine struct {
 }
 
 // New returns an Engine for one nfqws instance. bin "" resolves nfqws on PATH.
-func New(bin string, inst zapret.Instance, nftOpts zapret.NftOptions, log *slog.Logger) *Engine {
+// fakeDir is nfqws's working dir, holding the fake-payload files its strategies name
+// by bare filename (tls_clienthello_*.bin, quic_initial_*.bin); "" inherits ours.
+func New(bin string, inst zapret.Instance, nftOpts zapret.NftOptions, fakeDir string, log *slog.Logger) *Engine {
 	if bin == "" {
 		bin = "nfqws"
 	}
-	return &Engine{bin: bin, inst: inst, nftOpts: nftOpts, log: log}
+	return &Engine{bin: bin, inst: inst, nftOpts: nftOpts, fakeDir: fakeDir, log: log}
 }
 
 // Apply installs the nft rules (idempotent) and (re)starts nfqws with args — the
@@ -80,6 +83,12 @@ func (e *Engine) Apply(ctx context.Context, args []string) (restarted bool, err 
 
 	full := append([]string{fmt.Sprintf("--qnum=%d", e.inst.QNum)}, args...)
 	cmd := exec.Command(e.bin, full...)
+	// nfqws resolves fake-payload files (--dpi-desync-fake-tls=tls_clienthello_*.bin)
+	// relative to its working dir. Point it at the dir that holds them, else it exits
+	// immediately with "could not read <file>.bin".
+	if e.fakeDir != "" {
+		cmd.Dir = e.fakeDir
+	}
 	// Tee the engine's own output: it is the only thing that explains a refusal
 	// (a missing payload, an unreadable hostlist after it drops privileges), and
 	// without it a failure is just "exit status 1".

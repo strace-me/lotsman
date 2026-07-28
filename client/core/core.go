@@ -1087,9 +1087,13 @@ func (c *Core) newZapretExec(ctx context.Context) *zapretExec {
 	// Never desync a tunnel: ours (derived from the live node set) or a foreign
 	// one the operator named.
 	excluded := append(append([]string{}, c.tunnelIPs...), c.opts.DesyncExclude...)
+	// ZapretFiles is nfqws's working dir: the availability check already skips recipes
+	// whose payloads aren't there, and setting it as CWD is what actually lets nfqws
+	// FIND them — a bare --dpi-desync-fake-tls=tls_clienthello_*.bin resolves relative
+	// to CWD, so without this nfqws exits immediately even for a payload we vetted.
 	c.zap = nfqws.New(c.opts.NfqwsBin, inst, zapret.NftOptions{
 		Table: "inet lotsman", WAN: wan, VPNServers: excluded,
-	}, c.log)
+	}, c.opts.ZapretFiles, c.log)
 	c.log.Info("desync rung enabled", "engine", "nfqws", "wan", wan, "qnum", qnum, "excluded_tunnels", len(excluded))
 
 	return &zapretExec{
