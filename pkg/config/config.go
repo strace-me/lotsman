@@ -34,7 +34,8 @@ type Config struct {
 	Strategies      []strategy.Definition // declared strategies, added on top of the builtin catalog
 	UTLSFingerprint string                // default tls.utls fingerprint injected into TCP TLS outbounds lacking one ("" = off)
 	SingboxVersion  string                // target sing-box version (e.g. "1.12.17"); gates version-specific knobs ("" = generator baseline)
-	FakeIP          *FakeIP               // fakeip DNS section (nil = off)
+	FakeIP          *FakeIP               // legacy fakeip-only DNS section (nil = off); superseded by DNS
+	DNS             *DNS                  // split-DNS: multi-server, DoT/DoH/DoQ, VPN-detoured (nil = client default)
 	Multiplex       *Multiplex            // default outbound multiplex for TCP proxies (nil = off)
 	SubViaPool      string                // route subscription endpoint hosts through this VPN pool (LOT-28); needs -probe-proxy ("" = off, direct fetch)
 }
@@ -89,6 +90,7 @@ type Document struct {
 	UTLSFingerprint string                     `yaml:"utls_fingerprint"`
 	SingboxVersion  string                     `yaml:"singbox_version"`
 	FakeIP          *fakeipYAML                `yaml:"fakeip"`
+	DNS             *dnsYAML                   `yaml:"dns"`
 	Multiplex       *multiplexYAML             `yaml:"multiplex"`
 	SubViaPool      string                     `yaml:"subscription_via_pool"`
 }
@@ -259,7 +261,11 @@ func Parse(data []byte) (*Config, error) {
 	if f.Multiplex != nil && f.Multiplex.Enabled {
 		mux = &Multiplex{Protocol: f.Multiplex.Protocol, MaxConnections: f.Multiplex.MaxConnections, MinStreams: f.Multiplex.MinStreams, Padding: f.Multiplex.Padding, BrutalUp: f.Multiplex.BrutalUp, BrutalDown: f.Multiplex.BrutalDown}
 	}
-	return &Config{Registry: reg, Subscriptions: f.Subscriptions, Pools: pl, Zapret: instances, Devices: devices, Hostlists: hostlists, Strategies: strategies, UTLSFingerprint: f.UTLSFingerprint, SingboxVersion: f.SingboxVersion, FakeIP: fakeip, Multiplex: mux, SubViaPool: f.SubViaPool}, nil
+	dns, err := buildDNS(f.DNS)
+	if err != nil {
+		return nil, err
+	}
+	return &Config{Registry: reg, Subscriptions: f.Subscriptions, Pools: pl, Zapret: instances, Devices: devices, Hostlists: hostlists, Strategies: strategies, UTLSFingerprint: f.UTLSFingerprint, SingboxVersion: f.SingboxVersion, FakeIP: fakeip, DNS: dns, Multiplex: mux, SubViaPool: f.SubViaPool}, nil
 }
 
 // LoadDocument reads the config file into its editable Document form (no
