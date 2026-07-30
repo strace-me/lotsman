@@ -33,6 +33,16 @@ func (c *Core) superviseBox(ctx context.Context) {
 		}
 
 		if c.box.Alive(ctx) {
+			// The tun is up: re-assert the host-DNS redirect. Idempotent (a no-op when
+			// already engaged), so this re-covers a box restart the supervisor did not
+			// drive itself — e.g. the reconciler restarting sing-box on a node rotation —
+			// making "resolv.conf points at the sentinel iff the tun is up" hold by
+			// construction rather than by the down-branch's luck.
+			if c.hostDNS != nil {
+				if err := c.hostDNS.Redirect(); err != nil {
+					c.log.Warn("host-dns: re-redirect on a healthy tick", "err", err)
+				}
+			}
 			backoff = c.opts.Interval
 			t.Reset(c.opts.Interval)
 			continue

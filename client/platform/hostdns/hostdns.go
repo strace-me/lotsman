@@ -155,6 +155,9 @@ func (m *Manager) Verify(ctx context.Context) error {
 		if err == nil {
 			return nil
 		}
+		if i == 2 {
+			break // don't wait after the last attempt — there is no retry to wait for
+		}
 		select {
 		case <-ctx.Done():
 			return ctx.Err()

@@ -877,7 +877,9 @@ func (c *Core) singboxOptions() singbox.Options {
 		// When host-DNS has redirected the system resolv.conf into the tun, the
 		// `direct` server can no longer be type:local (it would re-read the redirected
 		// file and loop); pin it to the real LAN resolver captured before the redirect.
-		if c.hostResolver != "" {
+		// Gate on the feature actually being live (hostDNS non-nil), not just a captured
+		// resolver — a failed verify nils hostDNS but leaves hostResolver set.
+		if c.hostDNS != nil && c.hostResolver != "" {
 			pinDirectResolver(opts.DNS, c.hostResolver)
 		}
 		if c.opts.ProbeProxy != "" {
