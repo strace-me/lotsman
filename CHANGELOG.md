@@ -5,9 +5,11 @@ the branch's working dates, not tagged releases (nothing is tagged/released yet)
 
 ## [Unreleased] — branch `prerelease-fixes`
 
-The desktop-client track and pre-release engine hardening. 79 commits ahead of `main`.
-Everything below is validated live on a NixOS ThinkPad (sing-box 1.13.14) unless noted.
-See `docs/DESIGN-client-ui.md` and `docs/DESIGN-dns-and-tun.md` for design + handoff.
+The desktop-client track and pre-release engine hardening. 81 commits ahead of `main`.
+Everything below is validated live on a NixOS ThinkPad (sing-box 1.13.14) unless noted;
+the daily-driver obvyazka below (group socket + host-DNS) is built + unit-tested but its
+live root test is still pending. See `docs/DESIGN-client-ui.md` and
+`docs/DESIGN-dns-and-tun.md` for design + handoff.
 
 ### Desktop client (GUI + tray + control plane)
 
@@ -64,6 +66,33 @@ See `docs/DESIGN-client-ui.md` and `docs/DESIGN-dns-and-tun.md` for design + han
   ThinkPad; SSH survived; the self-heal brain armed, canary-tested, and escalated zapret
   recipes to a converged 5/6.
 
+### Daily-driver obvyazka — group socket + host-DNS (built, live root test pending)
+
+The two pieces needed to run Lotsman as the ThinkPad's VPN in place of the bare system
+sing-box (see `docs/DESIGN-dns-and-tun.md`):
+
+- **Group-owned control socket** (`876e694`) — `-control-socket-group <group>` makes the
+  control socket group-owned `0660` and its directory group-traversable `0750`, so an
+  unprivileged GUI/tray in that group can drive a root systemd service without being
+  root; an unknown group fails loudly. `DefaultSocketPath` now falls back to the system
+  socket (`/run/lotsman/control.sock`) so the UI finds a root service with no `-socket`
+  flag. The systemd unit gains `Group=lotsman` + `RuntimeDirectoryMode=0750` + the flag;
+  a polkit rule (`examples/lotsman-client.rules`) lets the group start/stop the unit
+  without a password. This is the mechanism the unit's own NOTE called "the missing piece".
+- **Host-DNS redirect** (`6b828ba`, `-host-dns`) — with a tun up, the host's own
+  browser/shell resolve censored names through the trusted in-tunnel resolver instead of
+  leaking to the excluded LAN resolver the ISP can NXDOMAIN-poison (routed services
+  already got un-poisoned DNS via DoH-over-VPN; this extends it to the host). New
+  `client/platform/hostdns` rewrites `/etc/resolv.conf` to point at the tun and restores
+  it on stop, crash-safe via a sidecar; sing-box's `direct` server is pinned to the real
+  LAN resolver first so its own bootstrap does not re-read the redirected file and loop.
+  Hardened against an adversarial review that found four host-strands-without-DNS paths:
+  point at the tun PEER not its own address (a packet to the interface's own IP is
+  delivered locally, never hijacked); **verify** a lookup actually resolves through the
+  sentinel after redirecting and **revert** if not; `superviseBox` restores the resolver
+  while sing-box is down and re-redirects when it is back; refuse a symlinked resolv.conf
+  and gate crash-recovery on the live file actually being our sentinel. Off by default.
+
 ### Engine / self-heal / networking (earlier in the branch)
 
 - Per-network knowledge base (netid + `-kb-dir`), roaming (swap the KB on a network
@@ -79,11 +108,13 @@ See `docs/DESIGN-client-ui.md` and `docs/DESIGN-dns-and-tun.md` for design + han
 
 ### Known gaps (see `docs/DESIGN-dns-and-tun.md`)
 
-- The **host's own DNS** (its shell/browser) for domains the ISP NXDOMAINs still escapes
-  to the ISP — closing it needs system-DNS management (point resolv.conf at a captured
-  resolver, restore on stop). SNI-routing saves most TLS in the meantime.
-- **Daemon obvyazka** — running Lotsman as a root systemd daemon at boot with a
-  group-readable socket (+ polkit) so the unprivileged GUI controls it; required to
-  daily-drive Lotsman in place of the bare system sing-box.
+- The daily-driver obvyazka above (group socket + host-DNS) is **built but not yet
+  live-root-tested** on the ThinkPad — the empirical open question is whether sing-box
+  hijacks DNS sent to the tun peer `172.19.0.2` (the `Verify` step reverts safely if not).
+- **DNS auto-failover** — the split-DNS emits one remote provider; if it is blocked/down
+  the client does not yet rotate to another catalogued provider automatically.
+- **Exit / ingress-IP diversity** — the decisive lever against the measured TSPU killers
+  (destination IP/CIDR/ASN reputation + the per-connection ~16 KB volume freeze), which
+  desync and obfuscation do not beat. Still unowned; research in the memory notes.
 
 [Keep a Changelog]: https://keepachangelog.com/
