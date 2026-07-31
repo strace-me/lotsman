@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -93,6 +94,74 @@ services:
 `))
 	if err == nil {
 		t.Fatal("naming an undeclared hostlist must fail — a typo would silently route nothing")
+	}
+}
+
+// A service whose ONLY matcher is an unbuilt pack matches nothing: it gets no route
+// rule, and — worse — counts as uncovered in zaptune, which makes the client refuse to
+// apply the desync for EVERY service. That must be a loud config error, not silence.
+func TestDomainListsRejectAServiceLeftMatchingNothing(t *testing.T) {
+	_, err := Parse([]byte(`
+hostlists:
+  - name: ru-blocked
+    out: /nonexistent/dir/ru-blocked.txt
+    sources: ["https://example.com/list.txt"]
+services:
+  - name: web
+    category: generic
+    probe_target: https://x
+    domain_lists: [ru-blocked]
+`))
+	if err == nil {
+		t.Fatal("a service with only an unbuilt pack must fail loudly — it silently disables the desync for everyone")
+	}
+}
+
+func TestDomainListsStripWildcardsAndDedupCaseInsensitively(t *testing.T) {
+	dir := t.TempDir()
+	out := filepath.Join(dir, "pack.txt")
+	// What real blocklists actually contain: wildcards, and entries that differ from
+	// the inline ones only by case.
+	if err := os.WriteFile(out, []byte("*.foo.com\nyoutube.com\nbar.com\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := Parse([]byte(`
+hostlists:
+  - name: pack
+    out: ` + out + `
+    sources: ["https://example.com/l.txt"]
+services:
+  - name: web
+    category: generic
+    probe_target: https://x
+    domains: [YouTube.com]
+    domain_lists: [pack]
+`))
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	got := cfg.Registry.Services["web"].Domains
+	for _, d := range got {
+		if strings.HasPrefix(d, "*.") {
+			t.Errorf("wildcard %q survived: emitted as domain_suffix it matches nothing", d)
+		}
+	}
+	// YouTube.com (inline) and youtube.com (pack) are the same domain.
+	if len(got) != 3 {
+		t.Errorf("domains = %v, want 3 (YouTube.com, foo.com, bar.com) — case-insensitive dedup", got)
+	}
+}
+
+func TestDuplicateHostlistNamesAreRejected(t *testing.T) {
+	_, err := Parse([]byte(`
+hostlists:
+  - { name: pack, out: /tmp/a.txt, sources: ["https://example.com/a.txt"] }
+  - { name: pack, out: /tmp/b.txt, sources: ["https://example.com/b.txt"] }
+services:
+  - { name: web, category: generic, probe_target: "https://x", domains: [a.com] }
+`))
+	if err == nil {
+		t.Fatal("duplicate hostlist names must be rejected — attachment is by name, so one silently shadows the other")
 	}
 }
 

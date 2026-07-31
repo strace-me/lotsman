@@ -12,7 +12,14 @@
     touch()
   }
   function remove(i) {
+    // Drop the attachments too: a service left naming a deleted list makes the whole
+    // config fail to save, and the checkbox for it is gone, so it could only be cleared
+    // from the raw-YAML escape hatch.
+    const name = doc.Hostlists[i].Name
     doc.Hostlists.splice(i, 1)
+    for (const s of doc.Services || []) {
+      if ((s.DomainLists || []).includes(name)) s.DomainLists = s.DomainLists.filter((n) => n !== name)
+    }
     touch()
   }
   const linesOf = (arr) => (arr || []).join('\n')

@@ -270,11 +270,6 @@ func (c *Core) Start(ctx context.Context) error {
 	// operator asked for it, and only where it can work (Linux + root + tun).
 	c.setupHostDNS()
 
-	// Declared domain lists are merged into services when the config is PARSED, so
-	// they must exist before the first generate — otherwise a fresh install routes
-	// only the inline domains until the next restart.
-	c.refreshHostlists(ctx, hostlistStartTimeout)
-
 	// Generate the client config (tun ingress + secret) and bring sing-box up.
 	cfgJSON, err := c.generate(ctx)
 	if err != nil {

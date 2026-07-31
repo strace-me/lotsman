@@ -27,7 +27,12 @@
 
   // Packs declared in «Списки доменов»; attaching one merges its domains into this
   // service's, so a list is maintained in one place and reused across rules.
-  $: lists = (doc.Hostlists || []).map((h) => h.Name).filter(Boolean)
+  $: declared = (doc.Hostlists || []).map((h) => h.Name).filter(Boolean)
+  // A service can still name a list that was renamed or deleted. Render those too —
+  // otherwise the attachment is invisible here yet fails validation on save, and the
+  // only way out is the raw-YAML editor.
+  const listsFor = (s) => [...new Set([...declared, ...(s.DomainLists || [])])]
+  const isStale = (name) => !declared.includes(name)
   const attached = (s, name) => (s.DomainLists || []).includes(name)
   function toggleList(s, name, on) {
     const cur = new Set(s.DomainLists || [])
@@ -53,13 +58,13 @@
         </div>
         <label class="full">Проба (URL)<input bind:value={s.ProbeTarget} on:input={touch} placeholder="https://…/generate_204" /></label>
         <label class="full">Домены<input value={domainsStr(s)} on:input={(e) => setDomains(s, e.target.value)} placeholder="youtube.com, googlevideo.com" /></label>
-        {#if lists.length}
+        {#if listsFor(s).length}
           <div class="svc-lists">
             <span class="muted">Списки:</span>
-            {#each lists as name}
-              <label class="svc-chip">
+            {#each listsFor(s) as name}
+              <label class="svc-chip" class:stale={isStale(name)} title={isStale(name) ? 'Такого списка нет — сними галочку, иначе конфиг не сохранится' : ''}>
                 <input type="checkbox" checked={attached(s, name)} on:change={(e) => toggleList(s, name, e.target.checked)} />
-                {name}
+                {name}{#if isStale(name)} ⚠{/if}
               </label>
             {/each}
           </div>
@@ -88,5 +93,9 @@
     flex-direction: row;
     align-items: center;
     gap: 0.3rem;
+  }
+  .svc-chip.stale {
+    opacity: 0.75;
+    text-decoration: line-through;
   }
 </style>
