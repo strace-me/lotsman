@@ -97,11 +97,12 @@ services:
 	}
 }
 
-// A service whose ONLY matcher is an unbuilt pack matches nothing: it gets no route
-// rule, and — worse — counts as uncovered in zaptune, which makes the client refuse to
-// apply the desync for EVERY service. That must be a loud config error, not silence.
-func TestDomainListsRejectAServiceLeftMatchingNothing(t *testing.T) {
-	_, err := Parse([]byte(`
+// A service whose only matcher is an unbuilt pack parses fine — the same deliberate
+// tolerance a missing ips_file has (both are caches that legitimately start empty).
+// The protection against it disarming the desync lives in zaptune, which no longer
+// counts a domainless service as "uncovered".
+func TestDomainListsToleratesAServiceWithOnlyAnUnbuiltPack(t *testing.T) {
+	cfg, err := Parse([]byte(`
 hostlists:
   - name: ru-blocked
     out: /nonexistent/dir/ru-blocked.txt
@@ -112,8 +113,11 @@ services:
     probe_target: https://x
     domain_lists: [ru-blocked]
 `))
-	if err == nil {
-		t.Fatal("a service with only an unbuilt pack must fail loudly — it silently disables the desync for everyone")
+	if err != nil {
+		t.Fatalf("an unbuilt pack must be tolerated like a missing ips_file, got: %v", err)
+	}
+	if d := cfg.Registry.Services["web"].Domains; len(d) != 0 {
+		t.Errorf("domains = %v, want none until the pack is fetched", d)
 	}
 }
 

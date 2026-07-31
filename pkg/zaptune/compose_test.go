@@ -233,3 +233,30 @@ func TestComposeThreadsExcludeDomains(t *testing.T) {
 		t.Errorf("exclude domains not threaded into composed args:\n%v", p.Args)
 	}
 }
+
+// A service with no domains — probe-only, IP-only (Discord voice), or carrying a domain
+// pack not yet fetched — must not stop the desync being applied for everyone else. It
+// used to land in Uncovered, which makes Covered false, which makes the client refuse
+// to apply ANY composed strategy: one such service silently disarmed the whole fleet.
+func TestComposeIgnoresDomainlessServicesInsteadOfDisarmingTheFleet(t *testing.T) {
+	cat := []strategycat.Recipe{
+		recipe("tls-1", strategycat.ClassGeneralTLS, "--filter-tcp=443", "--hostlist-domains={{DOMAINS}}", "--dpi-desync=fake"),
+	}
+	services := []registry.Service{
+		svcWithDomains("web", "general", "example.com"),
+		svcWithDomains("voice-only", "voice"), // no domains at all
+	}
+	p := Compose(services, cat, FirstPicker, nil, "")
+	if !p.Covered {
+		t.Fatalf("a domainless service must not make the plan uncovered; uncovered=%v", p.Uncovered)
+	}
+	if len(p.Uncovered) != 0 {
+		t.Errorf("uncovered = %v, want empty — nothing to cover is not a failure to cover", p.Uncovered)
+	}
+	if _, composed := p.Chosen["voice-only"]; composed {
+		t.Error("a domainless service must not get a block of its own")
+	}
+	if !strings.Contains(strings.Join(p.Args, " "), "example.com") {
+		t.Error("the service that DOES have domains must still be composed")
+	}
+}

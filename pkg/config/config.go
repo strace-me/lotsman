@@ -606,11 +606,6 @@ func mergeDomainLists(s serviceYAML, lists map[string]Hostlist) ([]string, error
 			"these are emitted inline into the generated config; use a binary rule_set for a list this large",
 			s.Name, len(out), strings.Join(s.DomainLists, ", "), maxServiceDomains)
 	}
-	if len(out) == 0 && len(s.RuleSets) == 0 && len(s.IPs) == 0 && s.IPsFile == "" {
-		return nil, fmt.Errorf("config: service %q matches nothing: its domain_lists (%s) are empty or not built yet, "+
-			"and it declares no domains, rule_sets or ips — it would get no route and would block the desync for every service",
-			s.Name, strings.Join(s.DomainLists, ", "))
-	}
 	return out, nil
 }
 
