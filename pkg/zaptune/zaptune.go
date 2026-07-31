@@ -146,8 +146,17 @@ func Compose(services []registry.Service, recipes []strategycat.Recipe, pick Pic
 		// skip it (caller keeps the existing config) rather than desync an
 		// incomplete set and regress the missing domains (TM-1).
 		domains, coherent := serviceDomains(svc, resolve)
-		if !coherent || len(domains) == 0 {
+		if !coherent {
 			plan.Uncovered = append(plan.Uncovered, svc.Name)
+			continue
+		}
+		// No domains at all is NOT the same as "could not be covered". A service can
+		// legitimately have none — probe-only, or matched purely by IP like Discord
+		// voice, or carrying a domain pack that has not been fetched yet. Excluding it
+		// from the composition loses nothing, whereas counting it as uncovered makes
+		// Covered false and stops the caller applying the desync for EVERY service:
+		// one IP-only service would silently disarm the whole fleet.
+		if len(domains) == 0 {
 			continue
 		}
 		// Candidates: target-class-narrowed AND domain-renderable (fills {{DOMAINS}};
