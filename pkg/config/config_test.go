@@ -544,3 +544,24 @@ services:
 		t.Errorf("spread_clients = %v, want the two client CIDRs", svc.SpreadClients)
 	}
 }
+
+// A misspelled key used to be indistinguishable from an absent one: the config
+// validated, the feature was silently off, and — because the in-app editor
+// round-trips through Document.YAML(), which serialises only known fields — saving
+// from the GUI would then DELETE the misspelled line from the operator's file.
+func TestParseRejectsUnknownKeys(t *testing.T) {
+	cases := map[string]string{
+		"typo at the top level": "subscription:\n  - { name: s, url: \"https://e/x\" }\n",
+		"typo in a service":     "services:\n  - { name: yt, category: streaming, probe_target: \"https://x\", domain_list: [a] }\n",
+	}
+	for name, y := range cases {
+		if _, err := Parse([]byte(y)); err == nil {
+			t.Errorf("%s: must be rejected, not silently ignored", name)
+		}
+	}
+	// An empty document must still reach the normal validation ("no services defined")
+	// rather than dying in the decoder — strictness must not change what "empty" means.
+	if _, err := Parse(nil); err == nil || !strings.Contains(err.Error(), "no services") {
+		t.Errorf("an empty config should fail validation, not decoding; got %v", err)
+	}
+}

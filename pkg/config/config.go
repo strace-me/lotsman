@@ -6,7 +6,10 @@
 package config
 
 import (
+	"bytes"
+	"errors"
 	"fmt"
+	"io"
 	"os"
 	"strconv"
 	"strings"
@@ -164,7 +167,7 @@ type serviceYAML struct {
 	ProbeTarget    string          `yaml:"probe_target"`
 	RuleSets       []string        `yaml:"rule_sets"`
 	Domains        []string        `yaml:"domains"`
-	DomainLists    []string        `yaml:"domain_lists"` // names of hostlists: whose domains are merged into Domains (declare a pack once, attach it to any service)
+	DomainLists    []string        `yaml:"domain_lists"`    // names of hostlists: whose domains are merged into Domains (declare a pack once, attach it to any service)
 	ExcludeDomains []string        `yaml:"exclude_domains"` // raw-pass through nfqws desync (composer --hostlist-exclude; LOT-36 CDNs)
 	SpreadClients  []string        `yaml:"spread_clients"`  // LAN client CIDRs spread across this service's VPN nodes (LOT-23)
 	IPs            []string        `yaml:"ips"`
@@ -213,9 +216,29 @@ func Load(path string) (*Config, error) {
 }
 
 // Parse parses and validates config bytes.
+// strictUnmarshal decodes YAML and REJECTS keys the schema does not know.
+//
+// Without this a misspelled key ("subscription:" for "subscriptions:", "domain_list:"
+// for "domain_lists:") is indistinguishable from leaving it out: the config validates,
+// the feature is silently off, and the operator is left debugging why a setting they
+// can see in the file does nothing. Worse, the in-app editor round-trips through
+// Document.YAML(), which serialises only known fields — so saving from the GUI would
+// then DELETE the misspelled line from their file.
+func strictUnmarshal(data []byte, into any) error {
+	dec := yaml.NewDecoder(bytes.NewReader(data))
+	dec.KnownFields(true)
+	if err := dec.Decode(into); err != nil {
+		if errors.Is(err, io.EOF) {
+			return nil // an empty document is a valid, empty config
+		}
+		return err
+	}
+	return nil
+}
+
 func Parse(data []byte) (*Config, error) {
 	var f Document
-	if err := yaml.Unmarshal(data, &f); err != nil {
+	if err := strictUnmarshal(data, &f); err != nil {
 		return nil, fmt.Errorf("config: yaml: %w", err)
 	}
 
@@ -285,7 +308,7 @@ func LoadDocument(path string) (*Document, error) {
 // validation Parse does — the raw structural round-trip, not the domain build.
 func ParseDocument(data []byte) (*Document, error) {
 	var d Document
-	if err := yaml.Unmarshal(data, &d); err != nil {
+	if err := strictUnmarshal(data, &d); err != nil {
 		return nil, fmt.Errorf("config: yaml: %w", err)
 	}
 	return &d, nil
