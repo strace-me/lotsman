@@ -19,6 +19,11 @@ func reexec(log *slog.Logger) {
 	}
 	log.Info("applying new config — re-executing", "exe", exe)
 	if err := syscall.Exec(exe, os.Args, os.Environ()); err != nil {
-		log.Error("re-exec failed; start the service again to apply the new config", "err", err)
+		// The data plane is already down (Core.Stop ran before this) and we could not
+		// come back. Exiting 0 here would tell systemd this was a clean shutdown, so
+		// Restart=on-failure would leave the machine with no tunnel and nothing to
+		// restart it. Exit non-zero: a failed recovery is a failure.
+		log.Error("re-exec failed — exiting non-zero so the service manager restarts us", "err", err)
+		os.Exit(1)
 	}
 }

@@ -2,6 +2,7 @@ package core
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os/exec"
 	"strings"
@@ -111,7 +112,10 @@ func (c *Core) refreshLoop(ctx context.Context, rc *reconcile.Reconciler, every 
 		case <-ctx.Done():
 			return
 		case <-t.C:
-			if err := rc.Reconcile(ctx); err != nil {
+			// A deliberate skip (degraded fetch, dry-run) is a no-op, not a failure:
+			// warning on it every tick would train the operator to ignore the log.
+			if err := rc.Reconcile(ctx); err != nil &&
+				!errors.Is(err, reconcile.ErrDeferred) && !errors.Is(err, reconcile.ErrNotApplied) {
 				c.log.Warn("subscription refresh failed (retrying next tick)", "err", err)
 			}
 		}

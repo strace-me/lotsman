@@ -121,8 +121,8 @@ func testReconciler(t *testing.T, run *fakeRunner, ld fakeLoader, dryRun bool) (
 func TestReconcileDryRunDoesNotApply(t *testing.T) {
 	run := &fakeRunner{}
 	r, cfgPath := testReconciler(t, run, fakeLoader{nodes: []subscription.Node{node(t)}}, true)
-	if err := r.Reconcile(context.Background()); err != nil {
-		t.Fatalf("reconcile: %v", err)
+	if err := r.Reconcile(context.Background()); !errors.Is(err, ErrNotApplied) {
+		t.Fatalf("a deliberate skip must report ErrNotApplied so a caller cannot read it as applied, got: %v", err)
 	}
 	if _, err := os.Stat(cfgPath); !os.IsNotExist(err) {
 		t.Error("dry-run must not write the config")
@@ -449,8 +449,8 @@ func TestReconcileSkipsDegradedNodeSet(t *testing.T) {
 	// Now a flaky fetch: error + zero nodes (< baseline) → must skip.
 	r.Loader = fakeLoader{nodes: nil, errs: []error{errors.New("mirror down")}}
 	run.calls = nil
-	if err := r.Reconcile(context.Background()); err != nil {
-		t.Fatalf("reconcile: %v", err)
+	if err := r.Reconcile(context.Background()); !errors.Is(err, ErrNotApplied) {
+		t.Fatalf("a deliberate skip must report ErrNotApplied so a caller cannot read it as applied, got: %v", err)
 	}
 	if len(run.calls) != 0 {
 		t.Errorf("degraded fetch must skip (no check/restart), calls=%v", run.calls)
@@ -470,8 +470,8 @@ func TestReconcileSkipsNodeCollapseWithoutError(t *testing.T) {
 	// Error-free fetch returning zero nodes (the vpn-a flap) → must skip.
 	r.Loader = fakeLoader{nodes: nil}
 	run.calls = nil
-	if err := r.Reconcile(context.Background()); err != nil {
-		t.Fatalf("reconcile: %v", err)
+	if err := r.Reconcile(context.Background()); !errors.Is(err, ErrNotApplied) {
+		t.Fatalf("a deliberate skip must report ErrNotApplied so a caller cannot read it as applied, got: %v", err)
 	}
 	if len(run.calls) != 0 {
 		t.Errorf("error-free node collapse must skip (no check/restart), calls=%v", run.calls)
@@ -510,8 +510,8 @@ func TestReconcileBaselineFileSkipsDegradedFirstFetch(t *testing.T) {
 		t.Fatalf("seeded lastNodes = %d, want 10", r.lastNodes)
 	}
 
-	if err := r.Reconcile(context.Background()); err != nil {
-		t.Fatalf("reconcile: %v", err)
+	if err := r.Reconcile(context.Background()); !errors.Is(err, ErrNotApplied) {
+		t.Fatalf("a deliberate skip must report ErrNotApplied so a caller cannot read it as applied, got: %v", err)
 	}
 	if len(run.calls) != 0 {
 		t.Errorf("degraded first fetch with persisted baseline must skip, calls=%v", run.calls)
@@ -586,8 +586,8 @@ func TestReconcileRetriesStayDegradedThenSkips(t *testing.T) {
 	r.FetchRetries = 3
 	r.FetchBackoff = time.Millisecond
 
-	if err := r.Reconcile(context.Background()); err != nil {
-		t.Fatalf("reconcile: %v", err)
+	if err := r.Reconcile(context.Background()); !errors.Is(err, ErrNotApplied) {
+		t.Fatalf("a deliberate skip must report ErrNotApplied so a caller cannot read it as applied, got: %v", err)
 	}
 	if len(run.calls) != 0 {
 		t.Errorf("persistently degraded fetch must skip after retries, calls=%v", run.calls)

@@ -1031,7 +1031,7 @@ func zapretStrategyIDs(reg *registry.Registry, catalog *strategy.Catalog) []stri
 
 func reconcileMaintenance(rc *reconcile.Reconciler) func(context.Context) error {
 	return func(ctx context.Context) error {
-		if err := rc.Reconcile(ctx); err != nil && !errors.Is(err, reconcile.ErrDeferred) {
+		if err := rc.Reconcile(ctx); err != nil && !errors.Is(err, reconcile.ErrDeferred) && !errors.Is(err, reconcile.ErrNotApplied) {
 			return err
 		}
 		return nil
