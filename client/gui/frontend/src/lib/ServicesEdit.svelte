@@ -5,7 +5,11 @@
   export let doc
   export let touch = () => {}
 
-  const categories = ['streaming', 'messaging', 'gaming', 'social', 'dev', 'web', 'general']
+  // The four categories the config validator ships (registry.BuiltinCategories); a
+  // config may also define its own, which the free-text input still accepts. Offering
+  // categories the validator rejects (social/dev/web, or the "general" typo) only led
+  // to a save that fails validation.
+  const categories = ['streaming', 'messaging', 'gaming', 'generic']
 
   function add() {
     ;(doc.Services ||= []).push({ Name: '', Category: 'streaming', ProbeTarget: '', Domains: [] })
