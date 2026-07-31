@@ -878,6 +878,39 @@ func (c *Core) singboxOptions() singbox.Options {
 	opts.PoolOpts = singbox.PoolOptionsFrom(c.conf.Pools)
 	opts.ClashAPIListen = c.opts.ClashListen
 	opts.ClashAPISecret = c.secret
+	// Config knobs the daemon has always honoured. Without these the client silently
+	// dropped them: a config could ask for a uTLS fingerprint or multiplex and get
+	// neither, with nothing in the logs — and those two are exactly the levers against
+	// TLS-fingerprinting and the parallel-handshake/session-count heuristics.
+	opts.UTLSFingerprint = c.conf.UTLSFingerprint
+	if c.conf.SingboxVersion != "" {
+		// Gates version-specific knobs (e.g. the 1.12+ DNS block) to what the installed
+		// binary can actually load, instead of assuming the baseline.
+		opts.TargetVersion = c.conf.SingboxVersion
+	}
+	// A disabled block parses to nil, so non-nil already means "enabled".
+	if c.conf.FakeIP != nil {
+		opts.FakeIP = &singbox.FakeIPOptions{
+			Inet4Range: c.conf.FakeIP.Inet4Range,
+			Inet6Range: c.conf.FakeIP.Inet6Range,
+			Resolver:   c.conf.FakeIP.Resolver,
+		}
+	}
+	if c.conf.Multiplex != nil {
+		opts.Multiplex = &singbox.MultiplexOptions{
+			Protocol:       c.conf.Multiplex.Protocol,
+			MaxConnections: c.conf.Multiplex.MaxConnections,
+			MinStreams:     c.conf.Multiplex.MinStreams,
+			Padding:        c.conf.Multiplex.Padding,
+			BrutalUp:       c.conf.Multiplex.BrutalUp,
+			BrutalDown:     c.conf.Multiplex.BrutalDown,
+		}
+	}
+	// NOT passed through: subscription_via_pool. The router needs it because tproxy
+	// only catches LAN traffic, so the box's own subscription fetch would go direct;
+	// a tun client's own traffic is already captured by auto_route. Wiring it for
+	// proxy mode would also mean swapping the subscription loader onto the proxy —
+	// a separate change, not a silent half-measure here.
 	// Router-only: a Linux fwmark for the box's own traffic. sing-box refuses to
 	// start with it on darwin/windows, and a tun client does not need it.
 	opts.DefaultMark = 0
