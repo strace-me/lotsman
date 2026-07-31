@@ -1,4 +1,6 @@
-//go:build linux
+// NOTE: plain "linux" also matches ANDROID. SO_MARK needs CAP_NET_ADMIN, which an
+// unprivileged app does not have, so this is desktop/router Linux only.
+//go:build linux && !android
 
 package dataplane
 

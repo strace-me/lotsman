@@ -1,4 +1,6 @@
-//go:build linux
+// NOTE: plain "linux" also matches ANDROID, where there is no external sing-box
+// process to reclaim (libbox runs in-process) — desktop/router Linux only.
+//go:build linux && !android
 
 package externalbox
 
