@@ -495,10 +495,11 @@ func main() {
 			for _, hl := range conf.Hostlists {
 				hl := hl
 				pr.Add(periodic.Task{Name: "hostlist-rebuild:" + hl.Name, Interval: *checkInterval, RunAtStart: true, Fn: func(c context.Context) error {
-					return aggregate.Rebuild(c, agg, aggregate.RebuildSpec{
+					_, err := aggregate.Rebuild(c, agg, aggregate.RebuildSpec{
 						Name: hl.Name, Out: hl.Out, Sources: hl.Sources,
 						Exclude: hl.Exclude, MinKeepRatio: hl.MinKeepRatio,
 					}, *dryRun, log)
+					return err
 				}})
 			}
 			log.Info("hostlist rebuild enabled", "lists", len(conf.Hostlists))

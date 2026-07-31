@@ -523,6 +523,11 @@ func normalizeIPs(service string, ips []string) ([]string, error) {
 	return out, nil
 }
 
+// maxServiceDomains bounds how many domains one service may carry once its packs are
+// merged. Generous for real use (a curated RU blocklist is a few thousand), low enough
+// to catch someone attaching a million-entry dump that would break the engines.
+const maxServiceDomains = 50000
+
 // mergeDomainLists returns the service's own domains plus those of every hostlist it
 // names in domain_lists — so a pack of domains is declared once (with its sources and
 // shrink guard) and attached to any number of services, instead of being pasted inline.
@@ -567,6 +572,16 @@ func mergeDomainLists(s serviceYAML, lists map[string]Hostlist) ([]string, error
 			seen[d] = true
 			out = append(out, d)
 		}
+	}
+	// These domains are emitted INLINE (a domain_suffix array in the sing-box config and
+	// a per-service nfqws hostlist), so an enormous pack does not degrade gracefully: it
+	// bloats every generated config and every reconcile diff, and where the desync has to
+	// inline domains into argv it eventually fails to exec at all. Refuse with the reason
+	// and the alternative rather than let it break far from here.
+	if len(out) > maxServiceDomains {
+		return nil, fmt.Errorf("config: service %q: %d domains after merging domain_lists (%s) exceeds the %d limit — "+
+			"these are emitted inline into the generated config; use a binary rule_set for a list this large",
+			s.Name, len(out), strings.Join(s.DomainLists, ", "), maxServiceDomains)
 	}
 	if len(out) == 0 && len(s.RuleSets) == 0 && len(s.IPs) == 0 && s.IPsFile == "" {
 		return nil, fmt.Errorf("config: service %q matches nothing: its domain_lists (%s) are empty or not built yet, "+

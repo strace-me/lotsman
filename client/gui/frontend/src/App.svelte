@@ -163,7 +163,7 @@
       <div class="banner red">Сервис недоступен — {error}</div>
     {/if}
     {#if tab === 'config'}
-      <Config {backend} />
+      <Config {backend} drifted={report && report.domain_lists_drifted} />
     {:else if report}
       {#if tab === 'dashboard'}
         <Dashboard {report} {events} onRecheck={recheck} />
