@@ -83,6 +83,17 @@ services:
         { Name: 'youtube', Category: 'streaming', ProbeTarget: 'https://www.youtube.com/generate_204', Domains: ['youtube.com', 'googlevideo.com', 'ytimg.com'] },
         { Name: 'discord', Category: 'messaging', ProbeTarget: 'https://discord.com/api/v9/gateway', Domains: ['discord.com', 'discord.gg', 'discordapp.com'] },
       ],
+      DNS: {
+        Servers: [
+          { Name: 'remote', Provider: 'cloudflare', Method: 'https', Type: '', Address: '', ServerName: '', Path: '', Detour: 'vpn' },
+          { Name: 'lan', Provider: '', Method: '', Type: 'local', Address: '', ServerName: '', Path: '', Detour: '' },
+        ],
+        Direct: 'lan',
+        Final: 'remote',
+        Strategy: 'prefer_ipv4',
+        FakeIP: false,
+        Failover: ['cloudflare', 'quad9', 'mullvad'],
+      },
     },
   }
 }

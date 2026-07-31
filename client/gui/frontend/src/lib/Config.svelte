@@ -3,6 +3,7 @@
   import { mockConfig } from './mock.js'
   import SubsEdit from './SubsEdit.svelte'
   import ServicesEdit from './ServicesEdit.svelte'
+  import DnsEdit from './DnsEdit.svelte'
 
   export let backend = null
 
@@ -24,6 +25,7 @@
   const sections = [
     ['subs', 'Подписки'],
     ['services', 'Сервисы'],
+    ['dns', 'DNS'],
   ]
 
   async function load() {
@@ -113,6 +115,8 @@
         <SubsEdit {doc} {touch} />
       {:else if section === 'services'}
         <ServicesEdit {doc} {touch} />
+      {:else if section === 'dns'}
+        <DnsEdit {doc} {touch} />
       {/if}
     {:else}
       <div class="muted">Структурный вид недоступен — конфиг не распарсился. Открой YAML и почини вручную.</div>
