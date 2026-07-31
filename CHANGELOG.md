@@ -108,11 +108,13 @@ sing-box (see `docs/DESIGN-dns-and-tun.md`):
 
 ### Known gaps (see `docs/DESIGN-dns-and-tun.md`)
 
-- The daily-driver obvyazka above (group socket + host-DNS) is **built but not yet
-  live-root-tested** on the ThinkPad — the empirical open question is whether sing-box
-  hijacks DNS sent to the tun peer `172.19.0.2` (the `Verify` step reverts safely if not).
-- **DNS auto-failover** — the split-DNS emits one remote provider; if it is blocked/down
-  the client does not yet rotate to another catalogued provider automatically.
+- The daily-driver obvyazka (group socket + host-DNS) and the **DNS auto-failover loop**
+  (`dns.failover`: probe the active resolver through the tun, rotate `dns.final` to the
+  next catalogued provider on repeated failure, apply via `Core.Reload`) are **built but
+  not yet live-root-tested** on the ThinkPad. Open empirical questions: does sing-box
+  hijack DNS sent to the tun peer `172.19.0.2` (host-DNS `Verify` reverts safely if not),
+  and does the failover probe stay quiet without false-triggering. A structured DNS
+  editor (`DnsEdit.svelte`) makes the block editable in the GUI meanwhile.
 - **Exit / ingress-IP diversity** — the decisive lever against the measured TSPU killers
   (destination IP/CIDR/ASN reputation + the per-connection ~16 KB volume freeze), which
   desync and obfuscation do not beat. Still unowned; research in the memory notes.
