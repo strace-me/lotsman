@@ -80,8 +80,11 @@ services:
         { Name: 'fastsub', URL: 'https://fastsub.example/sub', Format: 'auto', Tags: ['normal'], Enabled: true },
       ],
       Services: [
-        { Name: 'youtube', Category: 'streaming', ProbeTarget: 'https://www.youtube.com/generate_204', Domains: ['youtube.com', 'googlevideo.com', 'ytimg.com'] },
-        { Name: 'discord', Category: 'messaging', ProbeTarget: 'https://discord.com/api/v9/gateway', Domains: ['discord.com', 'discord.gg', 'discordapp.com'] },
+        { Name: 'youtube', Category: 'streaming', ProbeTarget: 'https://www.youtube.com/generate_204', Domains: ['youtube.com', 'googlevideo.com', 'ytimg.com'], DomainLists: ['ru-blocked'] },
+        { Name: 'discord', Category: 'messaging', ProbeTarget: 'https://discord.com/api/v9/gateway', Domains: ['discord.com', 'discord.gg', 'discordapp.com'], DomainLists: [] },
+      ],
+      Hostlists: [
+        { Name: 'ru-blocked', Out: '/var/lib/lotsman/ru-blocked.txt', Sources: ['https://example.com/blocked.txt'], Exclude: [], MinKeepRatio: 0.8 },
       ],
       DNS: {
         Servers: [

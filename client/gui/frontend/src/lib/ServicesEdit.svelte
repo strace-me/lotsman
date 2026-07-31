@@ -24,6 +24,17 @@
     s.Domains = v.split(',').map((x) => x.trim()).filter(Boolean)
     touch()
   }
+
+  // Packs declared in «Списки доменов»; attaching one merges its domains into this
+  // service's, so a list is maintained in one place and reused across rules.
+  $: lists = (doc.Hostlists || []).map((h) => h.Name).filter(Boolean)
+  const attached = (s, name) => (s.DomainLists || []).includes(name)
+  function toggleList(s, name, on) {
+    const cur = new Set(s.DomainLists || [])
+    on ? cur.add(name) : cur.delete(name)
+    s.DomainLists = [...cur]
+    touch()
+  }
 </script>
 
 <div class="row-head">
@@ -42,6 +53,17 @@
         </div>
         <label class="full">Проба (URL)<input bind:value={s.ProbeTarget} on:input={touch} placeholder="https://…/generate_204" /></label>
         <label class="full">Домены<input value={domainsStr(s)} on:input={(e) => setDomains(s, e.target.value)} placeholder="youtube.com, googlevideo.com" /></label>
+        {#if lists.length}
+          <div class="svc-lists">
+            <span class="muted">Списки:</span>
+            {#each lists as name}
+              <label class="svc-chip">
+                <input type="checkbox" checked={attached(s, name)} on:change={(e) => toggleList(s, name, e.target.checked)} />
+                {name}
+              </label>
+            {/each}
+          </div>
+        {/if}
       </div>
     {/each}
   </div>
@@ -51,3 +73,20 @@
 {:else}
   <div class="muted">Пока нет сервисов. Добавь то, что нужно разблокировать.</div>
 {/if}
+
+<style>
+  .svc-lists {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 0.5rem;
+    margin-top: 0.35rem;
+    font-size: 0.85rem;
+  }
+  .svc-chip {
+    display: flex;
+    flex-direction: row;
+    align-items: center;
+    gap: 0.3rem;
+  }
+</style>
