@@ -120,3 +120,46 @@ func TestManagerBuildMergesAndSkipsDeadSource(t *testing.T) {
 		t.Errorf("invalid = %d, want 1", res.Invalid)
 	}
 }
+
+// A dead EXCLUDE source is not symmetric with a dead include source: losing it makes
+// the list GROW, past the zero-domain and shrink guards, silently putting back exactly
+// the domains the operator asked to leave alone. The rebuild must fail instead.
+func TestBuildRefusesWhenAnExcludeSourceIsUnreachable(t *testing.T) {
+	ff := fakeFetcher{
+		data: map[string][]byte{"http://inc": []byte("a.com\nbank.example\n")},
+		err:  map[string]error{"http://exc": errors.New("503")},
+	}
+	m := NewManager(ff)
+	res, errs := m.Build(context.Background(),
+		[]Source{{Name: "inc", URL: "http://inc"}},
+		[]Source{{Name: "exc", URL: "http://exc"}})
+
+	if len(res.Domains) != 0 {
+		t.Errorf("a rebuild with an unreachable exclude source must yield nothing, got %v", res.Domains)
+	}
+	if len(errs) == 0 {
+		t.Fatal("want an error explaining the refusal")
+	}
+	var found bool
+	for _, e := range errs {
+		if errors.Is(e, errExcludeIncomplete) {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("want errExcludeIncomplete among %v", errs)
+	}
+}
+
+// Real lists write the same domain as "foo.com", ".foo.com" and "*.foo.com". An
+// exclusion in one form used to match none of the others, and reported Excluded=0 as a
+// clean run.
+func TestMergeExcludesAcrossWildcardForms(t *testing.T) {
+	res := Merge([][]string{{"foo.com", "keep.com", "bar.com"}}, []string{"*.foo.com", ".bar.com"})
+	if len(res.Domains) != 1 || res.Domains[0] != "keep.com" {
+		t.Errorf("domains = %v, want just keep.com — wildcard/dotted exclusions must match", res.Domains)
+	}
+	if res.Excluded != 2 {
+		t.Errorf("Excluded = %d, want 2", res.Excluded)
+	}
+}
