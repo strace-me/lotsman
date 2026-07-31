@@ -62,6 +62,10 @@ func writeStarter(path, subCSV string, recommended bool) error {
 	return os.WriteFile(path, out, 0o600)
 }
 
+// hostlistFetchTimeout bounds the one-off fetch of domain packs that have no file yet,
+// so an unreachable source delays a fresh install by seconds instead of hanging it.
+const hostlistFetchTimeout = 30 * time.Second
+
 func main() {
 	var (
 		configPath    = flag.String("config", "", "path to the lotsman client config (required)")
@@ -145,6 +149,16 @@ func main() {
 	if err != nil {
 		log.Error("config load failed", "path", *configPath, "err", err)
 		os.Exit(1)
+	}
+	// A service's domain_lists are merged into its domains when the config is PARSED,
+	// so a pack whose file has not been fetched yet is simply absent for the whole run.
+	// Fetch the missing ones and re-parse once, before anything consumes the config —
+	// doing it later (e.g. inside Start) cannot change a domain set that is already fixed.
+	if core.EnsureDomainLists(context.Background(), conf, hostlistFetchTimeout, log) {
+		if conf, err = config.Load(*configPath); err != nil {
+			log.Error("config reload after fetching domain lists failed", "path", *configPath, "err", err)
+			os.Exit(1)
+		}
 	}
 
 	box := externalbox.New(*singboxBin, *singboxCfg, log)

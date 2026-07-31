@@ -355,10 +355,17 @@ func buildStrategies(in []strategyYAML) ([]strategy.Definition, error) {
 
 func buildHostlists(in []hostlistYAML) ([]Hostlist, error) {
 	out := make([]Hostlist, 0, len(in))
+	seen := make(map[string]bool, len(in))
 	for _, h := range in {
 		if h.Name == "" {
 			return nil, fmt.Errorf("config: hostlist with empty name")
 		}
+		// Services attach a list BY NAME, so a duplicate silently resolves last-wins and
+		// the shadowed list is fetched forever with nothing reading it.
+		if seen[h.Name] {
+			return nil, fmt.Errorf("config: duplicate hostlist %q", h.Name)
+		}
+		seen[h.Name] = true
 		if h.Out == "" {
 			return nil, fmt.Errorf("config: hostlist %q has no out path", h.Name)
 		}
@@ -521,10 +528,18 @@ func normalizeIPs(service string, ips []string) ([]string, error) {
 // shrink guard) and attached to any number of services, instead of being pasted inline.
 //
 // Naming a list that does not exist is a config error (a typo would otherwise silently
-// route nothing), but the list FILE being absent is not: it is produced by the periodic
-// rebuild job, so on a fresh install it legitimately does not exist yet and the service
-// simply starts with its inline domains until the first fetch lands. The file is the
-// same plaintext one-domain-per-line format the rebuild writes.
+// route nothing). The list FILE not being readable is NOT fatal on its own — it is a
+// cache produced by the rebuild job, absent on a fresh install and possibly unreadable
+// if written by a privileged run — so an attached service degrades to whatever else it
+// declares. But a service left with NOTHING to match on is rejected loudly: it would
+// otherwise get no route rule at all (singbox.Generate skips it) AND, worse, count as
+// uncovered in zaptune, which makes the client refuse to apply the desync for EVERY
+// service. A silent whole-desync outage is exactly what a config error should prevent.
+//
+// Pack entries are normalised the way the routing layer needs: a leading "*." is
+// stripped, because the generator emits these as domain_suffix and "*.foo.com" as a
+// suffix matches nothing, while real blocklists are full of that form. Dedup is
+// case-insensitive since pack domains arrive lowercased and inline ones do not.
 func mergeDomainLists(s serviceYAML, lists map[string]Hostlist) ([]string, error) {
 	if len(s.DomainLists) == 0 {
 		return s.Domains, nil
@@ -532,7 +547,7 @@ func mergeDomainLists(s serviceYAML, lists map[string]Hostlist) ([]string, error
 	out := append([]string(nil), s.Domains...)
 	seen := make(map[string]bool, len(out))
 	for _, d := range out {
-		seen[d] = true
+		seen[strings.ToLower(d)] = true
 	}
 	for _, name := range s.DomainLists {
 		hl, ok := lists[name]
@@ -541,18 +556,22 @@ func mergeDomainLists(s serviceYAML, lists map[string]Hostlist) ([]string, error
 		}
 		data, err := os.ReadFile(hl.Out)
 		if err != nil {
-			if os.IsNotExist(err) {
-				continue // not built yet; the rebuild job fills it in
-			}
-			return nil, fmt.Errorf("config: service %q: domain list %q (%s): %w", s.Name, name, hl.Out, err)
+			continue // not built yet, or not readable by this run; the rebuild job owns it
 		}
 		domains, _ := aggregate.ParseList(data)
 		for _, d := range domains {
-			if !seen[d] {
-				seen[d] = true
-				out = append(out, d)
+			d = strings.TrimPrefix(d, "*.")
+			if d == "" || seen[d] {
+				continue
 			}
+			seen[d] = true
+			out = append(out, d)
 		}
+	}
+	if len(out) == 0 && len(s.RuleSets) == 0 && len(s.IPs) == 0 && s.IPsFile == "" {
+		return nil, fmt.Errorf("config: service %q matches nothing: its domain_lists (%s) are empty or not built yet, "+
+			"and it declares no domains, rule_sets or ips — it would get no route and would block the desync for every service",
+			s.Name, strings.Join(s.DomainLists, ", "))
 	}
 	return out, nil
 }
