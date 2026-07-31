@@ -11,8 +11,6 @@ import (
 	"os"
 	"os/user"
 	"path/filepath"
-	"strconv"
-	"syscall"
 	"testing"
 
 	"github.com/strace-me/lotsman/pkg/audit"
@@ -150,10 +148,7 @@ func TestControlSocketGroupOpensItTo0660(t *testing.T) {
 	if perm := di.Mode().Perm(); perm != 0o750 {
 		t.Errorf("socket dir perms = %o, want 0750 so the group can traverse to the socket", perm)
 	}
-	wantGID, _ := strconv.Atoi(u.Gid)
-	if st, ok := fi.Sys().(*syscall.Stat_t); ok && int(st.Gid) != wantGID {
-		t.Errorf("socket gid = %d, want %d", st.Gid, wantGID)
-	}
+	assertSocketGID(t, fi, u.Gid)
 }
 
 func TestControlSocketGroupThatDoesNotExistFailsLoudly(t *testing.T) {

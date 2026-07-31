@@ -22,3 +22,41 @@ jobs:
         run: go vet ./...
       - name: test (race)
         run: go test -race ./...
+
+  # The client ships for Windows and Android too, and both have already had silent
+  # breakage: a test file that failed to COMPILE on Windows made the whole client/core
+  # package untestable there, and Go's "linux" build tag quietly matches android. Cross
+  # building + vetting is cheap and catches exactly that class.
+  cross:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - goos: windows
+            goarch: amd64
+          - goos: darwin
+            goarch: arm64
+          - goos: android
+            goarch: arm64
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: build
+        env: { GOOS: "${{ matrix.goos }}", GOARCH: "${{ matrix.goarch }}", CGO_ENABLED: "0" }
+        run: go build ./...
+      - name: vet (includes tests)
+        # android has no test toolchain worth vetting here; the other two must stay clean.
+        if: matrix.goos != 'android'
+        env: { GOOS: "${{ matrix.goos }}", GOARCH: "${{ matrix.goarch }}", CGO_ENABLED: "0" }
+        run: go vet ./...
+      - name: gui + tray build
+        if: matrix.goos == 'windows'
+        env: { GOOS: "${{ matrix.goos }}", GOARCH: "${{ matrix.goarch }}", CGO_ENABLED: "0" }
+        run: |
+          (cd client/gui && go build ./...)
+          (cd client/tray && go build ./...)
+
