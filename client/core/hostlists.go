@@ -46,7 +46,7 @@ func EnsureDomainLists(ctx context.Context, conf *config.Config, timeout time.Du
 	}
 	m := aggregate.NewManager(subscription.NewHTTPFetcher())
 	for _, hl := range missing {
-		if err := aggregate.Rebuild(ctx, m, specOf(hl), false, log); err != nil {
+		if _, err := aggregate.Rebuild(ctx, m, specOf(hl), false, log); err != nil {
 			log.Warn("domain list rebuild failed (the service falls back to what else it declares)", "list", hl.Name, "err", err)
 			continue
 		}
@@ -69,8 +69,17 @@ func (c *Core) refreshHostlists(ctx context.Context, timeout time.Duration) {
 	}
 	m := aggregate.NewManager(subscription.NewHTTPFetcher())
 	for _, hl := range c.conf.Hostlists {
-		if err := aggregate.Rebuild(ctx, m, specOf(hl), false, c.log); err != nil {
+		changed, err := aggregate.Rebuild(ctx, m, specOf(hl), false, c.log)
+		if err != nil {
 			c.log.Warn("hostlist rebuild failed (keeping the existing file)", "list", hl.Name, "err", err)
+			continue
+		}
+		if changed {
+			// The file moved but the RUNNING config still carries the domains it parsed
+			// at startup. Do not re-route under a live tunnel on a background timer —
+			// record it so the UI can offer to apply, and say so plainly in the log.
+			c.listsDrifted.Store(true)
+			c.log.Info("domain list changed — it applies on the next config apply or restart", "list", hl.Name)
 		}
 	}
 }

@@ -15,6 +15,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/strace-me/lotsman/client/platform/hostdns"
@@ -176,6 +177,11 @@ type Core struct {
 	// resolv.conf and loop. Both set once in Start before the loop; read-only after.
 	hostDNS      *hostdns.Manager
 	hostResolver string
+
+	// listsDrifted is set when a background rebuild changed a domain pack, so the
+	// running config is a refresh behind. Surfaced in /status rather than applied on a
+	// timer: re-routing under a live tunnel unasked is worse than being one apply late.
+	listsDrifted atomic.Bool
 
 	// The DNS failover loop runs OUTSIDE the autonomy loop (its own ctx + wg): it
 	// applies a provider rotation via Core.Reload, and Reload waits on the loop's wg —
@@ -505,6 +511,9 @@ func (c *Core) Reload(newConf *config.Config) error {
 	if c.opts.SingboxConfig == "" {
 		return fmt.Errorf("core: reload needs -singbox-config to reconcile in place")
 	}
+	// newConf was parsed just now, so it already carries whatever the background
+	// refresh wrote: the running config is no longer behind.
+	c.listsDrifted.Store(false)
 	c.stateMu.Lock()
 	defer c.stateMu.Unlock()
 

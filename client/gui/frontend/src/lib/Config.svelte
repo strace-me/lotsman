@@ -9,6 +9,10 @@
   import StrategiesEdit from './StrategiesEdit.svelte'
 
   export let backend = null
+  // Set when a background refresh changed a declared domain pack: the running config
+  // routes a slightly older set until something applies it. Applying is the operator's
+  // call, so it is offered here rather than done on a timer.
+  export let drifted = false
 
   let path = ''
   let doc = null // structured config (config.Document as JSON, PascalCase keys)
@@ -138,6 +142,14 @@
     <textarea class="cfg" bind:value={yaml} spellcheck="false" placeholder="загрузка…"></textarea>
   {/if}
 
+  {#if drifted && doc}
+    <div class="cfg-drift">
+      Списки доменов обновились в фоне. Пока применяется прежний набор — применить сейчас? Соединения на пару секунд
+      оборвутся.
+      <button class="fix" on:click={save} disabled={busy !== ''}>Применить списки</button>
+    </div>
+  {/if}
+
   <div class="cfg-actions">
     <button class="fix" on:click={check} disabled={busy !== ''}>Проверить</button>
     <button class="cta" on:click={save} disabled={busy !== '' || !dirty}>Сохранить и применить</button>
@@ -149,3 +161,18 @@
     структурная запись их не переносит.
   </div>
 </section>
+
+<style>
+  .cfg-drift {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 0.6rem;
+    margin: 0.6rem 0 0;
+    padding: 0.5rem 0.7rem;
+    border: 1px solid currentColor;
+    border-radius: 6px;
+    opacity: 0.9;
+    font-size: 0.88rem;
+  }
+</style>

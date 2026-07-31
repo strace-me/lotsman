@@ -21,6 +21,11 @@ type Report struct {
 	Fleet         FleetStatus    `json:"fleet"`
 	Subscriptions []SubStatus    `json:"subscriptions,omitempty"`
 	Services      []NodeStatus   `json:"services"`
+	// DomainListsDrifted reports that a background refresh changed a declared domain
+	// pack, so the running config routes a slightly older set. Deliberately NOT applied
+	// on a timer — re-routing under a live tunnel unasked would drop connections the
+	// operator did not ask to lose — so the UI offers to apply it instead.
+	DomainListsDrifted bool `json:"domain_lists_drifted,omitempty"`
 }
 
 // Verdict is the top-line rollup — is coverage working, partial, or down. It is
@@ -89,6 +94,8 @@ func (c *Core) Report(ctx context.Context) Report {
 		Fleet:         FleetStatus{Total: c.lastNodes},
 		Subscriptions: c.subStatuses(),
 		Services:      services,
+
+		DomainListsDrifted: c.listsDrifted.Load(),
 	}
 }
 

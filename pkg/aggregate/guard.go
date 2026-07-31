@@ -3,6 +3,7 @@ package aggregate
 import (
 	"bytes"
 	"os"
+	"path/filepath"
 )
 
 // ShrinkOK reports whether a refreshed entry count is acceptable against the
@@ -58,8 +59,28 @@ func WriteIfChanged(path string, body []byte, perm os.FileMode) (changed bool, e
 	if cur, err := os.ReadFile(path); err == nil && bytes.Equal(cur, body) {
 		return false, nil
 	}
-	tmp := path + ".tmp"
-	if err := os.WriteFile(tmp, body, perm); err != nil {
+	// A UNIQUE temp name, not path+".tmp": the desktop client and the router daemon
+	// can both rebuild the same list on one machine, and a shared fixed name lets one
+	// writer truncate the other's partial file so the loser renames a spliced list into
+	// place. The rename itself stays atomic, so a reader never sees a torn file.
+	f, err := os.CreateTemp(filepath.Dir(path), "."+filepath.Base(path)+".*")
+	if err != nil {
+		return false, err
+	}
+	tmp := f.Name()
+	if _, err := f.Write(body); err != nil {
+		f.Close()
+		os.Remove(tmp)
+		return false, err
+	}
+	if err := f.Close(); err != nil {
+		os.Remove(tmp)
+		return false, err
+	}
+	// CreateTemp makes the file 0600; the callers' lists must stay readable by nfqws
+	// after it drops privileges.
+	if err := os.Chmod(tmp, perm); err != nil {
+		os.Remove(tmp)
 		return false, err
 	}
 	if err := os.Rename(tmp, path); err != nil {

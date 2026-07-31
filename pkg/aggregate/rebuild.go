@@ -31,13 +31,15 @@ type RebuildSpec struct {
 // (every source unreachable), and a merge that collapsed below MinKeepRatio of the
 // last good count (an upstream that half-broke). A source that fails individually is
 // logged and skipped, since one dead mirror must not discard the others.
-func Rebuild(ctx context.Context, m *Manager, spec RebuildSpec, dryRun bool, log *slog.Logger) error {
+// It reports changed=true only when the file on disk actually moved, which the caller
+// uses to tell the operator the running config is now a refresh behind.
+func Rebuild(ctx context.Context, m *Manager, spec RebuildSpec, dryRun bool, log *slog.Logger) (changed bool, err error) {
 	res, errs := m.Build(ctx, spec.Sources, spec.Exclude)
-	for _, err := range errs {
-		log.Warn("hostlist source issue", "list", spec.Name, "err", err)
+	for _, e := range errs {
+		log.Warn("hostlist source issue", "list", spec.Name, "err", e)
 	}
 	if len(res.Domains) == 0 {
-		return fmt.Errorf("hostlist %q: merged to zero domains, keeping existing file", spec.Name)
+		return false, fmt.Errorf("hostlist %q: merged to zero domains, keeping existing file", spec.Name)
 	}
 	log.Info("hostlist built", "list", spec.Name, "domains", len(res.Domains),
 		"sources", res.Sources, "excluded", res.Excluded, "invalid", res.Invalid, "out", spec.Out)
@@ -45,25 +47,25 @@ func Rebuild(ctx context.Context, m *Manager, spec RebuildSpec, dryRun bool, log
 	if prev := CountLines(spec.Out); !ShrinkOK(prev, len(res.Domains), spec.MinKeepRatio) {
 		log.Warn("hostlist shrink guard tripped, keeping existing file", "list", spec.Name,
 			"prev", prev, "new", len(res.Domains), "min_ratio", spec.MinKeepRatio)
-		return nil
+		return false, nil
 	}
 
 	if dryRun {
 		log.Info("dry-run: would write hostlist", "list", spec.Name, "out", spec.Out)
-		return nil
+		return false, nil
 	}
 
 	body := []byte(strings.Join(res.Domains, "\n") + "\n")
-	changed, err := WriteIfChanged(spec.Out, body, 0o644)
+	changed, err = WriteIfChanged(spec.Out, body, 0o644)
 	if err != nil {
-		return fmt.Errorf("hostlist %q: write: %w", spec.Name, err)
+		return false, fmt.Errorf("hostlist %q: write: %w", spec.Name, err)
 	}
 	if changed {
 		log.Info("hostlist written", "list", spec.Name, "out", spec.Out, "domains", len(res.Domains))
 	} else {
 		log.Info("hostlist unchanged, skipped write", "list", spec.Name, "out", spec.Out)
 	}
-	return nil
+	return changed, nil
 }
 
 // CountLines counts non-blank lines in an existing list file (the last good domain
