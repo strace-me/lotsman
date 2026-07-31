@@ -164,6 +164,7 @@ type serviceYAML struct {
 	ProbeTarget    string          `yaml:"probe_target"`
 	RuleSets       []string        `yaml:"rule_sets"`
 	Domains        []string        `yaml:"domains"`
+	DomainLists    []string        `yaml:"domain_lists"` // names of hostlists: whose domains are merged into Domains (declare a pack once, attach it to any service)
 	ExcludeDomains []string        `yaml:"exclude_domains"` // raw-pass through nfqws desync (composer --hostlist-exclude; LOT-36 CDNs)
 	SpreadClients  []string        `yaml:"spread_clients"`  // LAN client CIDRs spread across this service's VPN nodes (LOT-23)
 	IPs            []string        `yaml:"ips"`
@@ -222,7 +223,13 @@ func Parse(data []byte) (*Config, error) {
 	if err != nil {
 		return nil, err
 	}
-	reg, err := buildRegistry(f.Services, cats)
+	// Hostlists are resolved BEFORE services, because a service may pull a whole pack
+	// of domains from one by name (domain_lists).
+	hostlists, err := buildHostlists(f.Hostlists)
+	if err != nil {
+		return nil, err
+	}
+	reg, err := buildRegistry(f.Services, cats, hostlists)
 	if err != nil {
 		return nil, err
 	}
@@ -240,10 +247,6 @@ func Parse(data []byte) (*Config, error) {
 			return nil, fmt.Errorf("config: device with empty name")
 		}
 		devices = append(devices, registry.Device{Name: d.Name, Sources: d.Sources, Policy: d.Policy})
-	}
-	hostlists, err := buildHostlists(f.Hostlists)
-	if err != nil {
-		return nil, err
 	}
 	// Fill in the standard pools a chain references but the config did not declare,
 	// so a config that leans on the builtin categories does not have to hand-copy
@@ -416,7 +419,11 @@ func portList(items []any) []string {
 	return out
 }
 
-func buildRegistry(svcs []serviceYAML, cats map[string]registry.Category) (*registry.Registry, error) {
+func buildRegistry(svcs []serviceYAML, cats map[string]registry.Category, hostlists []Hostlist) (*registry.Registry, error) {
+	lists := make(map[string]Hostlist, len(hostlists))
+	for _, hl := range hostlists {
+		lists[hl.Name] = hl
+	}
 	if len(svcs) == 0 {
 		return nil, fmt.Errorf("config: no services defined")
 	}
@@ -454,6 +461,10 @@ func buildRegistry(svcs []serviceYAML, cats map[string]registry.Category) (*regi
 				return nil, fmt.Errorf("config: service %q: invalid domain %q", s.Name, d)
 			}
 		}
+		domains, err := mergeDomainLists(s, lists)
+		if err != nil {
+			return nil, err
+		}
 		// Group-level lever (LOT-23): inherit profile/sticky from the category when the
 		// service does not set its own (profile unset = "", sticky unset = nil pointer).
 		cat := cats[s.Category]
@@ -474,7 +485,7 @@ func buildRegistry(svcs []serviceYAML, cats map[string]registry.Category) (*regi
 			ProbeType:      s.ProbeType,
 			ProbeTarget:    s.ProbeTarget,
 			RuleSets:       s.RuleSets,
-			Domains:        s.Domains,
+			Domains:        domains,
 			ExcludeDomains: s.ExcludeDomains,
 			SpreadClients:  s.SpreadClients,
 			IPs:            ips,
@@ -501,6 +512,47 @@ func normalizeIPs(service string, ips []string) ([]string, error) {
 			return nil, fmt.Errorf("config: service %q: invalid ip/cidr %q", service, ip)
 		}
 		out = append(out, c)
+	}
+	return out, nil
+}
+
+// mergeDomainLists returns the service's own domains plus those of every hostlist it
+// names in domain_lists — so a pack of domains is declared once (with its sources and
+// shrink guard) and attached to any number of services, instead of being pasted inline.
+//
+// Naming a list that does not exist is a config error (a typo would otherwise silently
+// route nothing), but the list FILE being absent is not: it is produced by the periodic
+// rebuild job, so on a fresh install it legitimately does not exist yet and the service
+// simply starts with its inline domains until the first fetch lands. The file is the
+// same plaintext one-domain-per-line format the rebuild writes.
+func mergeDomainLists(s serviceYAML, lists map[string]Hostlist) ([]string, error) {
+	if len(s.DomainLists) == 0 {
+		return s.Domains, nil
+	}
+	out := append([]string(nil), s.Domains...)
+	seen := make(map[string]bool, len(out))
+	for _, d := range out {
+		seen[d] = true
+	}
+	for _, name := range s.DomainLists {
+		hl, ok := lists[name]
+		if !ok {
+			return nil, fmt.Errorf("config: service %q: domain_lists names %q, which is not a declared hostlist", s.Name, name)
+		}
+		data, err := os.ReadFile(hl.Out)
+		if err != nil {
+			if os.IsNotExist(err) {
+				continue // not built yet; the rebuild job fills it in
+			}
+			return nil, fmt.Errorf("config: service %q: domain list %q (%s): %w", s.Name, name, hl.Out, err)
+		}
+		domains, _ := aggregate.ParseList(data)
+		for _, d := range domains {
+			if !seen[d] {
+				seen[d] = true
+				out = append(out, d)
+			}
+		}
 	}
 	return out, nil
 }

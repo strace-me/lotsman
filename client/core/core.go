@@ -270,6 +270,11 @@ func (c *Core) Start(ctx context.Context) error {
 	// operator asked for it, and only where it can work (Linux + root + tun).
 	c.setupHostDNS()
 
+	// Declared domain lists are merged into services when the config is PARSED, so
+	// they must exist before the first generate — otherwise a fresh install routes
+	// only the inline domains until the next restart.
+	c.refreshHostlists(ctx, hostlistStartTimeout)
+
 	// Generate the client config (tun ingress + secret) and bring sing-box up.
 	cfgJSON, err := c.generate(ctx)
 	if err != nil {
@@ -475,6 +480,9 @@ func (c *Core) buildLoop() error {
 		runners = append(runners, func(rctx context.Context) { c.refreshLoop(rctx, rc, c.opts.RefreshEvery) })
 	}
 	runners = append(runners, c.observeLoop)
+	if len(c.conf.Hostlists) > 0 {
+		runners = append(runners, c.hostlistLoop)
+	}
 	if c.zapExec != nil {
 		runners = append(runners, c.desyncReconcileLoop)
 	}
