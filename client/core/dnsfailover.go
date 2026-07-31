@@ -89,11 +89,21 @@ func (c *Core) dnsFailoverLoop(ctx context.Context) {
 		if conf == nil || from == to {
 			continue // nothing to rotate to
 		}
-		rotations++
-		c.log.Info("dns: failing over to another provider", "from", from, "to", to)
+		// Only a reload that actually APPLIED means we are now on `to`. Counting the
+		// attempt instead would let a run of skipped reloads (a degraded subscription
+		// fetch during the very outage that triggered us) walk the in-memory provider
+		// through the whole list while sing-box still runs the first one — and then
+		// conclude "every provider failed" about providers it never installed.
 		if err := c.Reload(conf); err != nil {
-			c.log.Warn("dns: failover reload failed", "err", err)
+			c.log.Error("dns: failover could not be applied — still on the old resolver", "from", from, "attempted", to, "err", err)
+			// Put the config back so memory matches what sing-box is actually running.
+			if _, _, _, rerr := c.rotateDNSFailoverTo(from); rerr != nil {
+				c.log.Warn("dns: could not restore the previous provider in the config", "err", rerr)
+			}
+			continue
 		}
+		rotations++
+		c.log.Info("dns: failed over to another provider", "from", from, "to", to)
 	}
 }
 
@@ -119,19 +129,39 @@ func (c *Core) probeResolverViaTun(ctx context.Context, sentinel string) bool {
 // to rotate to.
 func (c *Core) rotateDNSFailover() (from, to string, conf *config.Config, err error) {
 	c.stateMu.Lock()
+	cur := ""
+	if c.conf.DNS != nil {
+		cur = currentFinalProvider(c.conf.DNS)
+	}
+	next := ""
+	if c.conf.DNS != nil {
+		next = nextFailoverProvider(cur, c.conf.DNS.Failover)
+	}
+	c.stateMu.Unlock()
+	if c.conf.DNS == nil || next == "" || next == cur {
+		return cur, cur, nil, nil
+	}
+	return c.rotateDNSFailoverTo(next)
+}
+
+// rotateDNSFailoverTo pins the Final resolver to a named provider. Split out so the
+// loop can put the config BACK when the reload it attempted did not apply — leaving
+// memory on a provider the running sing-box never received is what turns one failed
+// apply into a walk through the whole list without installing any of it.
+func (c *Core) rotateDNSFailoverTo(provider string) (from, to string, conf *config.Config, err error) {
+	c.stateMu.Lock()
 	defer c.stateMu.Unlock()
 	if c.conf.DNS == nil {
 		return "", "", nil, nil
 	}
 	cur := currentFinalProvider(c.conf.DNS)
-	next := nextFailoverProvider(cur, c.conf.DNS.Failover)
-	if next == "" || next == cur {
+	if provider == "" || provider == cur {
 		return cur, cur, nil, nil
 	}
-	if err := c.conf.DNS.SetFinalProvider(next); err != nil {
-		return cur, next, nil, err
+	if err := c.conf.DNS.SetFinalProvider(provider); err != nil {
+		return cur, provider, nil, err
 	}
-	return cur, next, c.conf, nil
+	return cur, provider, c.conf, nil
 }
 
 // currentFinalProvider is the provider alias the Final resolver is currently pinned to.

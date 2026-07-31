@@ -44,6 +44,56 @@ func TestCurrentFinalProviderReadsTheFinalServer(t *testing.T) {
 
 // TestRotateDNSFailoverAdvancesAndRepointsEndpoint drives the Core-level rotation the
 // loop uses: it should move Final to the next provider and re-point the endpoint.
+// A reload that does not apply must leave the config on the provider sing-box is
+// actually running: otherwise memory walks the whole failover list while the box keeps
+// the first one, and the loop then reports "every provider failed" about providers it
+// never installed.
+func TestRotateDNSFailoverCanBePutBackAfterAFailedApply(t *testing.T) {
+	c := &Core{conf: dnsFailoverConf(t)}
+
+	from, to, _, err := c.rotateDNSFailover()
+	if err != nil || from != "cloudflare" || to != "quad9" {
+		t.Fatalf("rotate: %q->%q err=%v", from, to, err)
+	}
+	// The apply failed — put it back.
+	if _, _, _, err := c.rotateDNSFailoverTo(from); err != nil {
+		t.Fatalf("restore: %v", err)
+	}
+	if got := currentFinalProvider(c.conf.DNS); got != "cloudflare" {
+		t.Errorf("after a failed apply the config must read %q again, got %q", "cloudflare", got)
+	}
+	var final config.DNSServer
+	for _, s := range c.conf.DNS.Servers {
+		if s.Name == c.conf.DNS.Final {
+			final = s
+		}
+	}
+	if final.Address != "1.1.1.1" {
+		t.Errorf("the endpoint must be back on cloudflare's, got %q", final.Address)
+	}
+}
+
+func dnsFailoverConf(t *testing.T) *config.Config {
+	t.Helper()
+	conf, err := config.Parse([]byte(`
+subscriptions:
+  - { name: s, url: "https://e/x", format: auto, enabled: true }
+services:
+  - { name: yt, category: streaming, probe_target: https://x }
+dns:
+  servers:
+    - { name: remote, provider: cloudflare, method: tls, detour: vpn }
+    - { name: lan, type: local }
+  final: remote
+  direct: lan
+  failover: [cloudflare, quad9, mullvad]
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return conf
+}
+
 func TestRotateDNSFailoverAdvancesAndRepointsEndpoint(t *testing.T) {
 	d, err := config.ParseDocument([]byte(`
 subscriptions:

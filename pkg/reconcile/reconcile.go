@@ -118,6 +118,14 @@ const (
 // on a config that never landed. Maintenance callers treat it as a benign no-op.
 var ErrDeferred = errors.New("reconcile: apply deferred (active voice/RTC flow)")
 
+// ErrNotApplied is ErrDeferred's sibling for the other paths that deliberately write
+// NOTHING: a degraded node set (a flaky mirror must not churn the config) and dry-run.
+// They used to return a bare nil, so every caller read "skipped" as "applied" — the
+// caller then believes the live box carries the config it just built, which is how a
+// reload reports success over an unchanged data plane and an armed controller enters
+// canary on a config that never landed. Maintenance callers treat it as a benign no-op.
+var ErrNotApplied = errors.New("reconcile: nothing applied")
+
 // Reconcile runs one pass. It is safe to call on a ticker; it is a no-op when
 // the desired config already matches the live file. Calls are serialized (LOT-13):
 // the maintenance ticker and the armed remediation commit both reach this from
@@ -165,7 +173,7 @@ func (r *Reconciler) Reconcile(ctx context.Context) error {
 		}
 		if r.degraded(nodes, errs) {
 			r.Log.Warn("reconcile: skipping, degraded node set", "nodes", len(nodes), "last", r.lastNodes, "fetch_errs", len(errs))
-			return nil
+			return fmt.Errorf("%w: degraded node set (%d nodes, %d fetch errors)", ErrNotApplied, len(nodes), len(errs))
 		}
 	}
 
@@ -214,7 +222,7 @@ func (r *Reconciler) Reconcile(ctx context.Context) error {
 		os.Remove(tmp)
 		r.Log.Info("reconcile: config differs and passes check (dry-run, not applied)",
 			"nodes", len(nodes), "pools", len(memberships), "skipped", len(res.Skipped))
-		return nil
+		return fmt.Errorf("%w: dry-run", ErrNotApplied)
 	}
 
 	// LOT-35: a restart tears active UDP conntrack/NAT and breaks a live voice/RTC

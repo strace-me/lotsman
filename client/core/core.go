@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net"
@@ -34,6 +35,7 @@ import (
 	"github.com/strace-me/lotsman/pkg/metrics"
 	"github.com/strace-me/lotsman/pkg/observe"
 	"github.com/strace-me/lotsman/pkg/probing"
+	"github.com/strace-me/lotsman/pkg/reconcile"
 	"github.com/strace-me/lotsman/pkg/registry"
 	"github.com/strace-me/lotsman/pkg/singbox"
 	"github.com/strace-me/lotsman/pkg/state"
@@ -177,6 +179,9 @@ type Core struct {
 	// resolv.conf and loop. Both set once in Start before the loop; read-only after.
 	hostDNS      *hostdns.Manager
 	hostResolver string
+	// hostDNSBroken means a revert failed, so resolv.conf may still hold the sentinel:
+	// keep the handle (Restore must stay reachable) but never Redirect into it again.
+	hostDNSBroken bool
 
 	// listsDrifted is set when a background rebuild changed a domain pack, so the
 	// running config is a refresh behind. Surfaced in /status rather than applied on a
@@ -334,9 +339,16 @@ func (c *Core) Start(ctx context.Context) error {
 			// feature (nil) so the supervisor does not re-engage it.
 			c.log.Warn("host-dns: reverting — the redirected resolver did not answer a test lookup", "err", err)
 			if rerr := c.hostDNS.Restore(); rerr != nil {
-				c.log.Warn("host-dns: revert after a failed verify", "err", rerr)
+				// The revert FAILED: resolv.conf still points at a sentinel that does not
+				// answer. Dropping the handle here would remove the only way to retry the
+				// restore — on stop, or when the box goes down — and leave the machine
+				// with no working DNS. Keep the handle, but mark it broken so nothing
+				// re-redirects into a sentinel already known not to work.
+				c.log.Error("host-dns: revert FAILED — resolv.conf still points at the sentinel; will retry on stop", "err", rerr)
+				c.hostDNSBroken = true
+			} else {
+				c.hostDNS = nil
 			}
-			c.hostDNS = nil
 		} else {
 			c.log.Info("host-dns: verified — the host now resolves through the tunnel")
 		}
@@ -511,9 +523,6 @@ func (c *Core) Reload(newConf *config.Config) error {
 	if c.opts.SingboxConfig == "" {
 		return fmt.Errorf("core: reload needs -singbox-config to reconcile in place")
 	}
-	// newConf was parsed just now, so it already carries whatever the background
-	// refresh wrote: the running config is no longer behind.
-	c.listsDrifted.Store(false)
 	c.stateMu.Lock()
 	defer c.stateMu.Unlock()
 
@@ -537,6 +546,7 @@ func (c *Core) Reload(newConf *config.Config) error {
 	}
 
 	// Adopt the new config. The KB survives, so learning is not lost.
+	prevConf, prevReg := c.conf, c.reg
 	c.conf = newConf
 	c.reg = newConf.Registry
 	catalog := strategy.BuiltinCatalog()
@@ -545,13 +555,44 @@ func (c *Core) Reload(newConf *config.Config) error {
 	}
 	c.kb.SetZapretSeed(catalog.ZapretIDs())
 
+	// The loop is DOWN from here until buildLoop runs. Every exit past this point must
+	// rebuild it, or the client keeps a live tunnel with nothing steering it: no brain,
+	// no probes, no supervisor — while Healthy() still answers true from the box and
+	// /status keeps replaying the frozen last snapshot. That is the worst failure this
+	// client can have, because it looks healthy.
+	rebuilt := false
+	defer func() {
+		if !rebuilt {
+			if err := c.buildLoop(); err != nil {
+				c.log.Error("reload: the autonomy loop could not be rebuilt — the tunnel is unsupervised", "err", err)
+			}
+		}
+	}()
+
 	// Reconcile the box: regenerate from newConf and restart sing-box only on a real
 	// diff. A non-routing edit produces the same config → no restart → connection kept.
-	if err := c.newReconciler().Reconcile(context.WithoutCancel(root)); err != nil {
+	switch err := c.newReconciler().Reconcile(context.WithoutCancel(root)); {
+	case err == nil:
+		// Applied. newConf carries whatever the background refresh wrote, so the running
+		// config is no longer behind.
+		c.listsDrifted.Store(false)
+	case errors.Is(err, reconcile.ErrDeferred), errors.Is(err, reconcile.ErrNotApplied):
+		// Nothing was written: the live box still runs the PREVIOUS config, so the
+		// registry must go back with it or the brain would steer selectors that the
+		// running config does not contain.
+		c.conf, c.reg = prevConf, prevReg
+		rebuilt = true
+		if berr := c.buildLoop(); berr != nil {
+			return fmt.Errorf("core: reload skipped (%w) and the loop could not be rebuilt: %v", err, berr)
+		}
+		return fmt.Errorf("core: config saved but not applied: %w", err)
+	default:
+		c.conf, c.reg = prevConf, prevReg
 		return fmt.Errorf("core: reload reconcile: %w", err)
 	}
 
 	c.log.Info("config reloaded in place", "services", len(c.reg.Services))
+	rebuilt = true
 	return c.buildLoop()
 }
 
