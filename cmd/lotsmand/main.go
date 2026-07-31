@@ -18,7 +18,6 @@ import (
 	"context"
 	"errors"
 	"flag"
-	"fmt"
 	"log/slog"
 	"net"
 	"net/http"
@@ -496,7 +495,10 @@ func main() {
 			for _, hl := range conf.Hostlists {
 				hl := hl
 				pr.Add(periodic.Task{Name: "hostlist-rebuild:" + hl.Name, Interval: *checkInterval, RunAtStart: true, Fn: func(c context.Context) error {
-					return rebuildHostlist(c, agg, hl, *dryRun, log)
+					return aggregate.Rebuild(c, agg, aggregate.RebuildSpec{
+						Name: hl.Name, Out: hl.Out, Sources: hl.Sources,
+						Exclude: hl.Exclude, MinKeepRatio: hl.MinKeepRatio,
+					}, *dryRun, log)
 				}})
 			}
 			log.Info("hostlist rebuild enabled", "lists", len(conf.Hostlists))
@@ -1026,73 +1028,6 @@ func zapretStrategyIDs(reg *registry.Registry, catalog *strategy.Catalog) []stri
 	return out
 }
 
-// rebuildHostlist fetches and merges a hostlist's sources and writes the result
-// to its Out path (atomically: temp file + rename, so a crashed write never
-// leaves nfqws reading a half-written list). In dry-run it logs counts without
-// touching the file. A merge with zero domains is treated as a failure and does
-// not overwrite a good existing list (a dead mirror must not blank the bypass).
-func rebuildHostlist(ctx context.Context, agg *aggregate.Manager, hl config.Hostlist, dryRun bool, log *slog.Logger) error {
-	res, errs := agg.Build(ctx, hl.Sources, hl.Exclude)
-	for _, err := range errs {
-		log.Warn("hostlist source issue", "list", hl.Name, "err", err)
-	}
-	if len(res.Domains) == 0 {
-		return fmt.Errorf("hostlist %q: merged to zero domains, keeping existing file", hl.Name)
-	}
-	log.Info("hostlist built", "list", hl.Name, "domains", len(res.Domains),
-		"sources", res.Sources, "excluded", res.Excluded, "invalid", res.Invalid, "out", hl.Out)
-
-	// Shrink guard: if the rebuild collapsed below min_keep_ratio of the last
-	// good list (e.g. an upstream half-broke), keep the existing file. A
-	// deliberate protective keep-old, not an error.
-	if prev := countHostlistLines(hl.Out); !aggregate.ShrinkOK(prev, len(res.Domains), hl.MinKeepRatio) {
-		log.Warn("hostlist shrink guard tripped, keeping existing file", "list", hl.Name,
-			"prev", prev, "new", len(res.Domains), "min_ratio", hl.MinKeepRatio)
-		return nil
-	}
-
-	if dryRun {
-		log.Info("dry-run: would write hostlist", "list", hl.Name, "out", hl.Out)
-		return nil
-	}
-
-	body := []byte(strings.Join(res.Domains, "\n") + "\n")
-	changed, err := aggregate.WriteIfChanged(hl.Out, body, 0o644)
-	if err != nil {
-		return fmt.Errorf("hostlist %q: write: %w", hl.Name, err)
-	}
-	if changed {
-		log.Info("hostlist written", "list", hl.Name, "out", hl.Out, "domains", len(res.Domains))
-	} else {
-		log.Info("hostlist unchanged, skipped write", "list", hl.Name, "out", hl.Out)
-	}
-	return nil
-}
-
-// countHostlistLines counts non-blank lines in an existing hostlist file (the
-// last good domain count), or 0 if the file is missing — feeds the shrink guard.
-func countHostlistLines(path string) int {
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return 0
-	}
-	n := 0
-	for _, line := range strings.Split(string(data), "\n") {
-		if strings.TrimSpace(line) != "" {
-			n++
-		}
-	}
-	return n
-}
-
-// newRulesetsUpdater builds the Track-A updater: required tags are every
-// rule-set tag the services reference; on a real swap it triggers the reconciler
-// (re-validate via sing-box check + apply) if one is configured.
-// reconcileMaintenance wraps rc.Reconcile for a maintenance caller (the periodic
-// ticker, the rule-set updater's OnApplied): a LOT-35 deferral (ErrDeferred) is a
-// benign no-op — nothing was applied and the pending diff retries next tick. Only
-// the armed remediation commit observes ErrDeferred directly, so it can stay idle
-// instead of entering canary on a config that never landed.
 func reconcileMaintenance(rc *reconcile.Reconciler) func(context.Context) error {
 	return func(ctx context.Context) error {
 		if err := rc.Reconcile(ctx); err != nil && !errors.Is(err, reconcile.ErrDeferred) {
