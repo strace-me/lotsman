@@ -176,6 +176,13 @@ type Core struct {
 	// resolv.conf and loop. Both set once in Start before the loop; read-only after.
 	hostDNS      *hostdns.Manager
 	hostResolver string
+
+	// The DNS failover loop runs OUTSIDE the autonomy loop (its own ctx + wg): it
+	// applies a provider rotation via Core.Reload, and Reload waits on the loop's wg —
+	// so it must not be one of the loop's goroutines, or Reload would deadlock on
+	// itself. Started once in Start, stopped in Stop; survives the Reloads it triggers.
+	failoverCancel context.CancelFunc
+	failoverWg     sync.WaitGroup
 	tunnelIPs      []string      // proxy server IPs the desync must never touch
 	lastNodes      int           // nodes the last generate loaded; zero with subscriptions declared means no tunnel
 
@@ -373,6 +380,18 @@ func (c *Core) Start(ctx context.Context) error {
 			c.log.Info("metrics enabled", "addr", c.opts.MetricsAddr, "path", "/metrics")
 		}
 	}
+	// DNS failover: probe the active remote resolver and rotate providers when it goes
+	// dark. Runs outside the autonomy loop (its own ctx + wg) so the Reload it applies
+	// does not deadlock on the loop's wg. Only meaningful in tun mode with a failover
+	// list and a reconcilable config.
+	if c.opts.ProxyListen == "" && c.opts.SingboxConfig != "" && c.conf.DNS != nil && len(c.conf.DNS.Failover) > 0 {
+		fctx, fcancel := context.WithCancel(ctx)
+		c.failoverCancel = fcancel
+		c.failoverWg.Add(1)
+		go func() { defer c.failoverWg.Done(); c.dnsFailoverLoop(fctx) }()
+		c.log.Info("dns: failover armed", "providers", c.conf.DNS.Failover)
+	}
+
 	started = true
 	c.log.Info("lotsman client started", "services", len(c.reg.Services), "clash", c.opts.ClashListen)
 	return nil
@@ -691,6 +710,14 @@ func (c *Core) resolveKBPath(ctx context.Context) {
 
 // Stop cancels the autonomy loop, stops sing-box, and persists the KB.
 func (c *Core) Stop() error {
+	// Stop the DNS failover loop first so it cannot begin a Reload mid-shutdown; wait
+	// for any Reload it already started to finish before tearing the loop down.
+	if c.failoverCancel != nil {
+		c.failoverCancel()
+		c.failoverWg.Wait()
+		c.failoverCancel = nil
+	}
+
 	c.mu.Lock()
 	cancel := c.cancel
 	c.mu.Unlock()
