@@ -16,6 +16,11 @@ type DNS struct {
 	Final    string // tag of the default/fallback resolver
 	Strategy string // prefer_ipv4 | prefer_ipv6 | ipv4_only | ipv6_only ("" = prefer_ipv4)
 	FakeIP   bool
+	// Failover is an ordered list of curated provider aliases the Final (remote)
+	// resolver rotates through when it stops answering. Empty => no failover. sing-box
+	// has no native per-rule DNS fallback, so the client drives it: probe the active
+	// resolver, and on repeated failure re-point Final at the next provider here.
+	Failover []string
 }
 
 // DNSServer is one upstream, already expanded from any provider alias to concrete
@@ -31,6 +36,7 @@ type DNSServer struct {
 	ServerName string
 	Detour     string
 	Bootstrap  bool
+	Provider   string // curated alias this server was expanded from ("" = manual); lets failover re-point it
 }
 
 // DNSProvider is a curated public resolver: its verifying hostname (TLS SNI / DoH
@@ -82,6 +88,7 @@ type dnsYAML struct {
 	Final    string          `yaml:"final"`
 	Strategy string          `yaml:"strategy"`
 	FakeIP   bool            `yaml:"fakeip"`
+	Failover []string        `yaml:"failover"` // ordered provider aliases the Final resolver rotates through on failure
 }
 
 type dnsServerYAML struct {
@@ -131,11 +138,68 @@ func buildDNS(y *dnsYAML) (*DNS, error) {
 	if d.Direct != "" && !seen[d.Direct] {
 		return nil, fmt.Errorf("config: dns.direct %q is not a declared server", d.Direct)
 	}
+	if len(y.Failover) > 0 {
+		for _, p := range y.Failover {
+			if _, ok := dnsProviders[p]; !ok {
+				return nil, fmt.Errorf("config: dns.failover has unknown provider %q (known: %s)", p, knownProviders())
+			}
+		}
+		// Failover re-points the Final server at another provider, so Final must be a
+		// provider-based server — there is nothing to rotate on a manual endpoint.
+		var final DNSServer
+		for _, s := range d.Servers {
+			if s.Name == d.Final {
+				final = s
+			}
+		}
+		if final.Provider == "" {
+			return nil, fmt.Errorf("config: dns.failover needs dns.final (%q) to be a provider-based server", d.Final)
+		}
+		d.Failover = y.Failover
+	}
 	return d, nil
 }
 
+// DNSProviderNames returns the curated resolver aliases, sorted. Exported so the
+// GUI can offer them and the failover loop can validate/rotate through them without
+// reaching into the private catalog.
+func DNSProviderNames() []string {
+	ps := make([]string, 0, len(dnsProviders))
+	for p := range dnsProviders {
+		ps = append(ps, p)
+	}
+	sort.Strings(ps)
+	return ps
+}
+
+// SetFinalProvider re-points the Final (remote) resolver at another curated provider,
+// keeping its tag, transport (Type), and detour so the emitted config stays valid —
+// only the endpoint (IP + SNI + DoH path) changes. This is the primitive the failover
+// loop applies once its probe says the active resolver has gone dark. It errors if the
+// alias is unknown or Final is not a provider-based server (nothing to re-point).
+func (d *DNS) SetFinalProvider(alias string) error {
+	p, ok := dnsProviders[alias]
+	if !ok {
+		return fmt.Errorf("config: unknown dns provider %q", alias)
+	}
+	for i := range d.Servers {
+		if d.Servers[i].Name != d.Final {
+			continue
+		}
+		if d.Servers[i].Provider == "" {
+			return fmt.Errorf("config: dns.final %q is not provider-based; cannot re-point it", d.Final)
+		}
+		d.Servers[i].Provider = alias
+		d.Servers[i].Address = p.IP
+		d.Servers[i].ServerName = p.Host
+		d.Servers[i].Path = p.Path
+		return nil
+	}
+	return fmt.Errorf("config: dns.final %q not found among servers", d.Final)
+}
+
 func resolveDNSServer(s dnsServerYAML) (DNSServer, error) {
-	out := DNSServer{Name: s.Name, Port: s.Port, Detour: s.Detour}
+	out := DNSServer{Name: s.Name, Port: s.Port, Detour: s.Detour, Provider: s.Provider}
 	if s.Provider != "" {
 		p, ok := dnsProviders[s.Provider]
 		if !ok {
