@@ -1,6 +1,7 @@
 package config
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"testing"
@@ -40,6 +41,45 @@ services:
 	}
 	if got[0] != "youtube.com" {
 		t.Errorf("inline domains should stay first, got %v", got)
+	}
+}
+
+// TestHostlistDocJSONKeysRoundTrip locks the PascalCase keys the GUI's «Списки» and
+// «Сервисы» forms bind (HostlistsEdit/ServicesEdit) — a declared pack and a service
+// attaching it — through the control server's decode path.
+func TestHostlistDocJSONKeysRoundTrip(t *testing.T) {
+	dir := t.TempDir()
+	out := filepath.Join(dir, "ru-blocked.txt")
+	if err := os.WriteFile(out, []byte("rutracker.org\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	guiDoc := `{
+	  "Hostlists": [{"Name":"ru-blocked","Out":"` + out + `","Sources":["https://example.com/l.txt"],"Exclude":[],"MinKeepRatio":0.8}],
+	  "Services": [{"Name":"web","Category":"generic","ProbeTarget":"https://x","Domains":["a.com"],"DomainLists":["ru-blocked"]}]
+	}`
+	var doc Document
+	if err := json.Unmarshal([]byte(guiDoc), &doc); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if err := doc.Validate(); err != nil {
+		t.Fatalf("validate: %v", err)
+	}
+	y, err := doc.YAML()
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	conf, err := Parse(y)
+	if err != nil {
+		t.Fatalf("re-parse: %v\n%s", err, y)
+	}
+	if len(conf.Hostlists) != 1 || conf.Hostlists[0].Name != "ru-blocked" || conf.Hostlists[0].MinKeepRatio != 0.8 {
+		t.Fatalf("hostlist lost in round-trip: %+v", conf.Hostlists)
+	}
+	// The attachment must survive too: the service ends up with its own domain plus
+	// the pack's.
+	got := conf.Registry.Services["web"].Domains
+	if len(got) != 2 {
+		t.Fatalf("domains = %v, want the inline one plus the attached pack", got)
 	}
 }
 
