@@ -70,3 +70,51 @@ func TestDocumentDNSJSONKeysRoundTrip(t *testing.T) {
 		t.Errorf("provider server not expanded from the round-tripped doc: %+v", conf.DNS.Servers[0])
 	}
 }
+
+// TestDocumentEngineKnobsJSONKeysRoundTrip does the same for the engine-tuning knobs
+// the GUI's «Движки» and «Стратегии» sections bind (EnginesEdit/StrategiesEdit): the
+// uTLS fingerprint, target sing-box version, multiplex, fakeip, and custom desync
+// recipes. These are the supported way to tune the engines, so a key that stops
+// matching would silently drop the operator's settings.
+func TestDocumentEngineKnobsJSONKeysRoundTrip(t *testing.T) {
+	guiDoc := `{
+	  "Services": [{"Name":"yt","Category":"streaming","ProbeTarget":"https://x"}],
+	  "UTLSFingerprint": "firefox",
+	  "SingboxVersion": "1.13.14",
+	  "Multiplex": {"Enabled":true,"Protocol":"h2mux","MaxConnections":1,"MinStreams":4,"Padding":true},
+	  "FakeIP": {"Enabled":true,"Inet4Range":"198.18.0.0/15"},
+	  "Strategies": [
+	    {"ID":"my-split","Class":"zapret","NFQWSArgs":["--dpi-desync=fake,multisplit","--dpi-desync-fooling=md5sig"],"BlockTypes":["rst"],"Notes":"n"}
+	  ]
+	}`
+	var doc Document
+	if err := json.Unmarshal([]byte(guiDoc), &doc); err != nil {
+		t.Fatalf("decode GUI doc: %v", err)
+	}
+	if err := doc.Validate(); err != nil {
+		t.Fatalf("validate: %v", err)
+	}
+	y, err := doc.YAML()
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	conf, err := Parse(y)
+	if err != nil {
+		t.Fatalf("re-parse: %v\n%s", err, y)
+	}
+	if conf.UTLSFingerprint != "firefox" || conf.SingboxVersion != "1.13.14" {
+		t.Errorf("utls/version lost: %q %q", conf.UTLSFingerprint, conf.SingboxVersion)
+	}
+	if conf.Multiplex == nil || conf.Multiplex.Protocol != "h2mux" || conf.Multiplex.MinStreams != 4 {
+		t.Errorf("multiplex lost or wrong: %+v", conf.Multiplex)
+	}
+	if conf.FakeIP == nil || conf.FakeIP.Inet4Range != "198.18.0.0/15" {
+		t.Errorf("fakeip lost or wrong: %+v", conf.FakeIP)
+	}
+	if len(conf.Strategies) != 1 || len(conf.Strategies[0].NFQWSArgs) != 2 {
+		t.Fatalf("strategy lost: %+v", conf.Strategies)
+	}
+	if conf.Strategies[0].NFQWSArgs[0] != "--dpi-desync=fake,multisplit" {
+		t.Errorf("strategy args mangled: %v", conf.Strategies[0].NFQWSArgs)
+	}
+}

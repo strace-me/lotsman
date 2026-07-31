@@ -4,6 +4,8 @@
   import SubsEdit from './SubsEdit.svelte'
   import ServicesEdit from './ServicesEdit.svelte'
   import DnsEdit from './DnsEdit.svelte'
+  import EnginesEdit from './EnginesEdit.svelte'
+  import StrategiesEdit from './StrategiesEdit.svelte'
 
   export let backend = null
 
@@ -26,6 +28,8 @@
     ['subs', 'Подписки'],
     ['services', 'Сервисы'],
     ['dns', 'DNS'],
+    ['engines', 'Движки'],
+    ['strategies', 'Стратегии'],
   ]
 
   async function load() {
@@ -117,6 +121,10 @@
         <ServicesEdit {doc} {touch} />
       {:else if section === 'dns'}
         <DnsEdit {doc} {touch} />
+      {:else if section === 'engines'}
+        <EnginesEdit {doc} {touch} />
+      {:else if section === 'strategies'}
+        <StrategiesEdit {doc} {touch} />
       {/if}
     {:else}
       <div class="muted">Структурный вид недоступен — конфиг не распарсился. Открой YAML и почини вручную.</div>

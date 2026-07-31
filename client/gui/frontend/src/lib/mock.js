@@ -94,6 +94,13 @@ services:
         FakeIP: false,
         Failover: ['cloudflare', 'quad9', 'mullvad'],
       },
+      UTLSFingerprint: 'chrome',
+      SingboxVersion: '1.13.14',
+      Multiplex: { Enabled: true, Protocol: 'h2mux', MaxConnections: 1, MinStreams: 4, Padding: true, BrutalUp: 0, BrutalDown: 0 },
+      FakeIP: null,
+      Strategies: [
+        { ID: 'flowseal-fake-multisplit', Class: 'zapret', NFQWSArgs: ['--dpi-desync=fake,multisplit', '--dpi-desync-fooling=md5sig'], BlockTypes: ['rst'], Notes: 'победитель на этом провайдере' },
+      ],
     },
   }
 }
