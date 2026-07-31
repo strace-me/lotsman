@@ -3,6 +3,8 @@ package brain
 import (
 	"context"
 	"log/slog"
+	"slices"
+	"sort"
 	"testing"
 	"time"
 
@@ -518,5 +520,44 @@ func TestPreferBlockType(t *testing.T) {
 	// no match (or no observed type) -> unchanged EWMA order.
 	if got := preferBlockType([]string{"alt11", "alt10"}, "throttle", lookup); got[0] != "alt11" || got[1] != "alt10" {
 		t.Errorf("no match must keep EWMA order, got %v", got)
+	}
+}
+
+// Snapshot must be ordered: runtimes is a map, and Go randomises map iteration on
+// every call. Callers treat the result as a stable list — the desync composer turns it
+// into an ordered set of nfqws --new blocks — so a reshuffle made the composed argv
+// differ every tick, which made Apply kill and relaunch nfqws continuously.
+func TestSnapshotIsDeterministicallyOrdered(t *testing.T) {
+	reg := &registry.Registry{Services: map[string]registry.Service{}}
+	for _, name := range []string{"zeta", "alpha", "mike", "delta"} {
+		reg.Services[name] = registry.Service{
+			Name: name,
+			Chain: []registry.ChainStep{
+				{Position: 0, State: registry.StatePreferred, StrategyClass: strategy.ClassZapret, StrategyID: "alt12"},
+				{Position: 1, State: registry.StateVPN, StrategyClass: strategy.ClassVPN, StrategyID: "vpn_url_test"},
+			},
+		}
+	}
+	b := New(events.NewBus(), reg, fakeKB{alt: "alt10"}, DefaultConfig(), nil, discardLogger())
+
+	var names []string
+	for _, s := range b.Snapshot() {
+		names = append(names, s.Service)
+	}
+	if len(names) != 4 {
+		t.Fatalf("snapshot has %d services, want 4", len(names))
+	}
+	if !sort.StringsAreSorted(names) {
+		t.Errorf("snapshot must be sorted by service, got %v", names)
+	}
+	// Repeat: map order varies per call, so an unsorted implementation fails here fast.
+	for i := 0; i < 20; i++ {
+		var again []string
+		for _, s := range b.Snapshot() {
+			again = append(again, s.Service)
+		}
+		if !slices.Equal(names, again) {
+			t.Fatalf("snapshot order changed between calls: %v then %v", names, again)
+		}
 	}
 }

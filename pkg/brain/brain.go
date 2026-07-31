@@ -13,6 +13,7 @@ package brain
 import (
 	"context"
 	"log/slog"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -207,6 +208,14 @@ func (b *Brain) Snapshot() []ServiceState {
 			Broken:   rt.broken,
 		})
 	}
+	// Sorted, because runtimes is a MAP and Go randomises its iteration order on every
+	// call. Callers legitimately treat this as a stable list: the desync composer turns
+	// it into an ordered set of nfqws --new blocks, so a reshuffle made the composed
+	// argv differ from the last one, which made Apply believe the strategy had changed
+	// and kill+relaunch nfqws — measured at 78 restarts in two minutes, with the canary
+	// then judging recipes against an engine that had just been restarted. The UI's
+	// service list flapped for the same reason.
+	sort.Slice(out, func(i, j int) bool { return out[i].Service < out[j].Service })
 	return out
 }
 
