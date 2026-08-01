@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Deliberately a platform theme, not a Material Components one: Compose draws
+         everything, so the XML theme only has to give the window a sane background
+         and no action bar. Stage 3 replaces this with a real branded theme. -->
+    <style name="Theme.Lotsman" parent="@android:style/Theme.Material.Light.NoActionBar" />
+</resources>

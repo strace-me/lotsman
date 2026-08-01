@@ -1,0 +1,42 @@
+# Stage-1 placeholder Lotsman client config.
+#
+# This asset is copied to <filesDir>/config.yaml on first run and is NOT the
+# product config: Stage 2 replaces it with one generated from the user's
+# subscription. It exists so the app has something real to hand to
+# Mobile.start() before any UI for entering a subscription exists.
+#
+# Two rules this file obeys, and every Android config must obey:
+#
+#  1. NO ABSOLUTE PATHS. os.TempDir() is /data/local/tmp, os.UserCacheDir() is
+#     /sdcard, and RuleSetDir defaults to /etc/sing-box — all unwritable. Every
+#     path is derived by the Go facade from the filesDir the Kotlin side passes
+#     to Start(); nothing here may name a directory.
+#  2. NO DESYNC RUNG. Unrooted Android has no NFQUEUE, so chains here are VPN
+#     only. client/core drops an unsupported rung and renumbers the chain by
+#     itself, so a zapret rung would not crash — it would just be dead weight.
+
+services:
+  - name: youtube
+    category: streaming
+    probe_target: https://www.youtube.com/generate_204
+    rule_sets: [geosite-youtube]
+    chain:
+      - { state: VPN, class: vpn, strategy_id: vpn_url_test }
+
+  - name: discord
+    category: messaging
+    probe_target: https://discord.com/api/v9/gateway
+    rule_sets: [geosite-discord]
+    chain:
+      - { state: VPN, class: vpn, strategy_id: vpn_url_test_udp }
+
+subscriptions:
+  - { name: placeholder, url: "https://example.invalid/sub", format: auto, tags: [normal], enabled: true }
+
+pools:
+  vpn_url_test:
+    type: url_test
+    filter: { caps: [tcp] }
+  vpn_url_test_udp:
+    type: url_test
+    filter: { caps: [udp_native] }
