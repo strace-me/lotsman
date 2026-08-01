@@ -106,17 +106,31 @@ func (m *Manager) Capture() ([]string, error) {
 
 // Redirect points the host at the in-tun sentinel. It stashes the current
 // resolv.conf to the sidecar first (crash-safe restore), then writes the new file
-// atomically. Call it only after Capture and after the tun is up. Idempotent.
+// atomically. Call it only after Capture and after the tun is up.
+//
+// Idempotency is decided by the FILE, not by an in-memory bool. A laptop's network
+// manager rewrites resolv.conf whenever the link changes — a roam, a DHCP renew, a
+// dock — and believing our own "already engaged" flag meant the periodic re-assert
+// did nothing while the host quietly resolved through the ISP again: a silent leak of
+// exactly the queries this feature exists to protect. If the live file is no longer
+// ours, the network changed underneath us, so re-capture it as the new original
+// before installing the sentinel again.
 func (m *Manager) Redirect() error {
-	if m.engaged {
+	live, readErr := os.ReadFile(m.resolvConf)
+	switch {
+	case readErr == nil && strings.Contains(string(live), m.sentinel):
+		m.engaged = true // already ours; nothing to do
 		return nil
-	}
-	if m.original == nil {
-		raw, err := os.ReadFile(m.resolvConf)
-		if err != nil {
-			return fmt.Errorf("hostdns: read %s: %w", m.resolvConf, err)
-		}
-		m.original = raw
+	case readErr == nil && m.engaged:
+		// We thought we owned it and we do not: somebody rewrote it for the new
+		// network. That file is the truth now — keep it as what we must restore.
+		m.log.Info("hostdns: resolv.conf was rewritten by the system; re-capturing it as the original", "resolv_conf", m.resolvConf)
+		m.original = live
+		m.engaged = false
+	case readErr == nil && m.original == nil:
+		m.original = live
+	case readErr != nil && m.original == nil:
+		return fmt.Errorf("hostdns: read %s: %w", m.resolvConf, readErr)
 	}
 	if err := os.MkdirAll(filepath.Dir(m.sidecar), 0o700); err != nil {
 		return fmt.Errorf("hostdns: sidecar dir: %w", err)
@@ -141,18 +155,9 @@ func (m *Manager) Redirect() error {
 // no working DNS. It sends real queries to the sentinel over UDP:53 and retries a
 // few times to let a just-started tunnel settle. Returns nil once one answers.
 func (m *Manager) Verify(ctx context.Context) error {
-	r := &net.Resolver{
-		PreferGo: true,
-		Dial: func(ctx context.Context, _, _ string) (net.Conn, error) {
-			return (&net.Dialer{Timeout: 4 * time.Second}).DialContext(ctx, "udp", net.JoinHostPort(m.sentinel, "53"))
-		},
-	}
 	var err error
 	for i := 0; i < 3; i++ {
-		lctx, cancel := context.WithTimeout(ctx, 5*time.Second)
-		_, err = r.LookupHost(lctx, "cloudflare.com")
-		cancel()
-		if err == nil {
+		if err = m.Probe(ctx); err == nil {
 			return nil
 		}
 		if i == 2 {
@@ -167,6 +172,26 @@ func (m *Manager) Verify(ctx context.Context) error {
 	return fmt.Errorf("hostdns: no answer through the sentinel %s after 3 tries: %w", m.sentinel, err)
 }
 
+// Probe resolves one name through the sentinel, once. It is the cheap building block
+// Verify retries and the supervisor can afford to run periodically: a redirect that
+// stops working while the tunnel is otherwise healthy leaves the host with no DNS and
+// nothing else in the system notices, because every other health signal is still green.
+func (m *Manager) Probe(ctx context.Context) error {
+	r := &net.Resolver{
+		PreferGo: true,
+		Dial: func(ctx context.Context, _, _ string) (net.Conn, error) {
+			return (&net.Dialer{Timeout: 4 * time.Second}).DialContext(ctx, "udp", net.JoinHostPort(m.sentinel, "53"))
+		},
+	}
+	lctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	_, err := r.LookupHost(lctx, "cloudflare.com")
+	return err
+}
+
+// Engaged reports whether resolv.conf currently carries our sentinel.
+func (m *Manager) Engaged() bool { return m.engaged }
+
 // Restore puts back the resolv.conf captured before Redirect and clears the
 // sidecar. Idempotent: a no-op if it never redirected. A failure leaves the host
 // on the sentinel — which still resolves while the tun is up but breaks once it is
@@ -174,6 +199,16 @@ func (m *Manager) Verify(ctx context.Context) error {
 func (m *Manager) Restore() error {
 	if !m.engaged {
 		// Might still have a sidecar from a crash recovered by a later start; leave it.
+		return nil
+	}
+	// Only restore over OUR OWN sentinel. If the live file is something else, the
+	// system replaced it for the network the machine is on NOW, and writing the old
+	// one back would break DNS at the moment the user is switching Lotsman off —
+	// making "turn it off" the thing that kills their internet.
+	if live, err := os.ReadFile(m.resolvConf); err == nil && !strings.Contains(string(live), m.sentinel) {
+		os.Remove(m.sidecar)
+		m.engaged = false
+		m.log.Info("hostdns: resolv.conf is no longer ours — leaving the system's own file in place")
 		return nil
 	}
 	if err := m.restoreFromSidecar(); err != nil {

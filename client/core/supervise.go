@@ -16,6 +16,17 @@ const maxBoxBackoff = 2 * time.Minute
 // host, which is strictly worse than the wedge it is trying to fix.
 const notReadyGrace = 3
 
+// hostDNSMissGrace is how many consecutive unanswered probes through the sentinel are
+// tolerated before the host's own resolver is handed back.
+//
+// The case this exists for is the nastiest one on a laptop: the tunnel is up and every
+// other health signal is green, but DNS through the sentinel has stopped working (a
+// roam moved the ground under it). Nothing else in the system can see that — the box is
+// alive, the Clash API answers — so without this the machine sits with no DNS while the
+// tray says everything is fine. Handing the real resolver back is the safe direction:
+// the worst case is queries leaking to the ISP, which beats no queries at all.
+const hostDNSMissGrace = 3
+
 // superviseBox brings sing-box back when it dies.
 //
 // Without this the client keeps steering a data plane that is gone: the brain
@@ -26,9 +37,39 @@ const notReadyGrace = 3
 // The restart is deliberately paired with a readiness wait: sing-box binds its
 // control port a moment after starting, and driving it before then is what made
 // the very first apply fail on every startup.
+// watchHostDNS probes the redirected resolver and, after hostDNSMissGrace consecutive
+// misses, gives the host its own resolver back. It only runs while the box is alive, so
+// a probe failing here means the REDIRECT is broken rather than the tunnel being down —
+// the case no other health signal can see.
+func (c *Core) watchHostDNS(ctx context.Context, misses *int) {
+	if !c.hostDNS.Engaged() {
+		*misses = 0
+		return
+	}
+	if err := c.hostDNS.Probe(ctx); err == nil {
+		*misses = 0
+		return
+	}
+	*misses++
+	c.log.Warn("host-dns: the redirected resolver did not answer while the tunnel is up",
+		"misses", *misses, "restore_after", hostDNSMissGrace)
+	if *misses < hostDNSMissGrace {
+		return
+	}
+	*misses = 0
+	if err := c.hostDNS.Restore(); err != nil {
+		c.log.Error("host-dns: could not hand the host resolver back", "err", err)
+		c.hostDNSBroken = true
+		return
+	}
+	c.log.Warn("host-dns: handed the host's own resolver back — its DNS was going nowhere; " +
+		"the redirect will be re-asserted once it answers again")
+}
+
 func (c *Core) superviseBox(ctx context.Context) {
 	backoff := c.opts.Interval
-	notReady := 0 // consecutive ticks with a live process whose control plane is silent
+	notReady := 0  // consecutive ticks with a live process whose control plane is silent
+	dnsMisses := 0 // consecutive host-DNS probes that went unanswered while the box was alive
 	t := time.NewTimer(c.opts.Interval)
 	defer t.Stop()
 
@@ -62,6 +103,7 @@ func (c *Core) superviseBox(ctx context.Context) {
 				if err := c.hostDNS.Redirect(); err != nil {
 					c.log.Warn("host-dns: re-redirect on a healthy tick", "err", err)
 				}
+				c.watchHostDNS(ctx, &dnsMisses)
 			}
 			backoff = c.opts.Interval
 			t.Reset(c.opts.Interval)

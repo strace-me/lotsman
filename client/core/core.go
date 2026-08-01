@@ -333,11 +333,14 @@ func (c *Core) Start(ctx context.Context) error {
 			c.log.Warn("host-dns: could not redirect the host resolver (continuing; the host's own DNS may leak to the ISP)", "err", err)
 			c.hostDNS = nil
 		} else if err := c.hostDNS.Verify(ctx); err != nil {
-			// The redirect installed but a lookup through the sentinel did not answer:
-			// the tun-gateway hijack may not work on this host. Revert so the host keeps
-			// its original (working) resolver instead of a dead sentinel, and disable the
-			// feature (nil) so the supervisor does not re-engage it.
-			c.log.Warn("host-dns: reverting — the redirected resolver did not answer a test lookup", "err", err)
+			// The redirect installed but a lookup through the sentinel did not answer.
+			// Revert so the host keeps its original (working) resolver instead of a dead
+			// sentinel. Do NOT give up on the feature: this verify runs seconds after
+			// boot, when DHCP and the node pool are least settled, so the likeliest cause
+			// is "not ready yet", not "this host cannot hijack". Keep the handle so the
+			// supervisor's healthy-tick re-assert can try again — one nervous lookup at
+			// boot should not silently cost the operator host-DNS for the whole session.
+			c.log.Warn("host-dns: reverting for now — the redirected resolver did not answer a test lookup; will retry", "err", err)
 			if rerr := c.hostDNS.Restore(); rerr != nil {
 				// The revert FAILED: resolv.conf still points at a sentinel that does not
 				// answer. Dropping the handle here would remove the only way to retry the
@@ -346,9 +349,9 @@ func (c *Core) Start(ctx context.Context) error {
 				// re-redirects into a sentinel already known not to work.
 				c.log.Error("host-dns: revert FAILED — resolv.conf still points at the sentinel; will retry on stop", "err", rerr)
 				c.hostDNSBroken = true
-			} else {
-				c.hostDNS = nil
 			}
+			// The handle stays either way: Restore must remain reachable, and a later
+			// healthy tick may well succeed where this one did not.
 		} else {
 			c.log.Info("host-dns: verified — the host now resolves through the tunnel")
 		}
