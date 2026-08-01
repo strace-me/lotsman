@@ -177,7 +177,11 @@ type Core struct {
 	// hostResolver is the real LAN resolver captured before the redirect, pinned as the
 	// sing-box `direct` DNS server so its bootstrap does not re-read the mutated
 	// resolv.conf and loop. Both set once in Start before the loop; read-only after.
-	hostDNS      *hostdns.Manager
+	hostDNS *hostdns.Manager
+	// hostResolver is the host's own resolver, pinned as the tunnel's `direct` DNS
+	// server. It used to be written once in Start; roaming now re-captures it, and the
+	// config generator reads it, so it is guarded.
+	hostMu       sync.Mutex
 	hostResolver string
 	// hostDNSBroken means a revert failed, so resolv.conf may still hold the sentinel:
 	// keep the handle (Restore must stay reachable) but never Redirect into it again.
@@ -711,7 +715,52 @@ func (c *Core) maybeRoam(ctx context.Context, net netid.Network) bool {
 	c.roamMu.Unlock()
 	c.log.Info("network changed — swapped knowledge base",
 		"network", net.Id, "kind", net.Kind, "carrier", net.Carrier, "iface", net.IFace, "kb", newPath)
+	c.recaptureForNetwork(ctx)
 	return true
+}
+
+// recaptureForNetwork re-derives everything the generated config pinned to the OLD
+// network and applies it.
+//
+// Two values are captured once at startup and were then carried forever: the host's own
+// resolver (pinned as the tunnel's `direct` DNS server) and the machine's directly
+// connected subnets (excluded from the tun so the LAN keeps working). Close the lid at
+// home, open it on cafe wifi, and both are wrong: `direct` points at a router that is
+// not on this network, and the cafe's own resolver is NOT excluded, so queries to it are
+// swallowed by the tun and hijacked. Both DNS exits dead — while every health signal
+// stays green, because the box is alive and the Clash API answers. That is the single
+// most ordinary laptop event, so it must not depend on a restart to recover.
+//
+// A FRESH reconciler is what makes this land: the running one snapshotted its options
+// when the loop was built, so it would regenerate the old excludes forever. Reconcile
+// then restarts sing-box only if the regenerated config actually differs, which on a
+// real network change it does.
+func (c *Core) recaptureForNetwork(ctx context.Context) {
+	if c.hostDNS != nil && !c.hostDNSBroken {
+		// Content-based: if the system rewrote resolv.conf for the new network, this
+		// re-captures it as the original before reinstalling the sentinel.
+		if err := c.hostDNS.Redirect(); err != nil {
+			c.log.Warn("roam: could not re-assert the host DNS redirect", "err", err)
+		}
+		if res := c.hostDNS.Resolvers(); len(res) > 0 {
+			c.hostMu.Lock()
+			changed := c.hostResolver != res[0]
+			c.hostResolver = res[0]
+			c.hostMu.Unlock()
+			if changed {
+				c.log.Info("roam: re-pinned the tunnel's direct resolver to this network's", "resolver", res[0])
+			}
+		}
+	}
+	if c.opts.SingboxConfig == "" {
+		return // nothing to reconcile against
+	}
+	if err := c.newReconciler().Reconcile(ctx); err != nil &&
+		!errors.Is(err, reconcile.ErrDeferred) && !errors.Is(err, reconcile.ErrNotApplied) {
+		c.log.Warn("roam: could not regenerate the config for the new network", "err", err)
+		return
+	}
+	c.log.Info("roam: config regenerated for the new network")
 }
 
 // observeLoop refreshes the passive eye's snapshot each interval, feeding both the
@@ -995,8 +1044,11 @@ func (c *Core) singboxOptions() singbox.Options {
 		// file and loop); pin it to the real LAN resolver captured before the redirect.
 		// Gate on the feature actually being live (hostDNS non-nil), not just a captured
 		// resolver — a failed verify nils hostDNS but leaves hostResolver set.
-		if c.hostDNS != nil && c.hostResolver != "" {
-			pinDirectResolver(opts.DNS, c.hostResolver)
+		c.hostMu.Lock()
+		resolver := c.hostResolver
+		c.hostMu.Unlock()
+		if c.hostDNS != nil && resolver != "" {
+			pinDirectResolver(opts.DNS, resolver)
 		}
 		if c.opts.ProbeProxy != "" {
 			opts.SocksProbeListen = c.opts.ProbeProxy
@@ -1040,7 +1092,11 @@ func (c *Core) setupHostDNS() {
 		return
 	}
 	c.hostDNS = m
+	// No contention here (Start runs before any loop goroutine), but the field is
+	// mutable now that roaming re-captures it, so take the lock everywhere.
+	c.hostMu.Lock()
 	c.hostResolver = res[0]
+	c.hostMu.Unlock()
 }
 
 // tunSentinel is the in-tun address the host's resolver is pointed at. It is the

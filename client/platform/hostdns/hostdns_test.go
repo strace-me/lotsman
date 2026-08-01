@@ -261,3 +261,33 @@ func TestRestoreLeavesAFileThatIsNoLongerOurs(t *testing.T) {
 		t.Error("the stale sidecar must be dropped")
 	}
 }
+
+// The tunnel's `direct` DNS server is pinned to a concrete address, so after a roam the
+// caller must be able to learn the NEW network's resolver — otherwise it keeps sending
+// direct lookups to a router that is not on this network.
+func TestResolversFollowTheNetworkAfterARoam(t *testing.T) {
+	m, resolv, _ := newManager(t)
+	if err := os.WriteFile(resolv, []byte("nameserver 192.168.1.1\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := m.Capture(); err != nil {
+		t.Fatal(err)
+	}
+	if err := m.Redirect(); err != nil {
+		t.Fatal(err)
+	}
+	if got := m.Resolvers(); len(got) != 1 || got[0] != "192.168.1.1" {
+		t.Fatalf("before the roam Resolvers() = %v, want the home router", got)
+	}
+
+	// Roam: the system writes the new network's resolver over our sentinel.
+	if err := os.WriteFile(resolv, []byte("nameserver 10.0.0.1\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := m.Redirect(); err != nil { // re-assert: also re-captures
+		t.Fatalf("re-assert: %v", err)
+	}
+	if got := m.Resolvers(); len(got) != 1 || got[0] != "10.0.0.1" {
+		t.Errorf("after the roam Resolvers() = %v, want this network's resolver [10.0.0.1]", got)
+	}
+}

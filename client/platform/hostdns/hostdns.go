@@ -192,6 +192,13 @@ func (m *Manager) Probe(ctx context.Context) error {
 // Engaged reports whether resolv.conf currently carries our sentinel.
 func (m *Manager) Engaged() bool { return m.engaged }
 
+// Resolvers returns the host's own usable resolvers as last captured — which, after a
+// network change, Redirect has already re-read from the file the system rewrote. The
+// caller needs this because the tunnel's `direct` DNS server is pinned to a concrete
+// address: on a new network the old pin points at a router that is not there, and every
+// direct lookup goes nowhere.
+func (m *Manager) Resolvers() []string { return m.usableResolvers(m.original) }
+
 // Restore puts back the resolv.conf captured before Redirect and clears the
 // sidecar. Idempotent: a no-op if it never redirected. A failure leaves the host
 // on the sentinel — which still resolves while the tun is up but breaks once it is
