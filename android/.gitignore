@@ -1,0 +1,14 @@
+*.iml
+.gradle/
+/local.properties
+.idea/
+.DS_Store
+build/
+/captures
+.externalNativeBuild
+.cxx
+local.properties
+
+# The gomobile output is a build artifact, not source: reproduce it with the
+# command in README.md. Never commit it (size, and it pins a Go toolchain).
+/app/libs/*.aar
