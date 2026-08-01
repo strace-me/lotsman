@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
 	"os/exec"
 	"strings"
 	"time"
@@ -17,23 +18,53 @@ import (
 // sing-box process instead of an init service.
 //
 // The reconciler issues exactly two commands: the `check` that validates a
-// candidate config, and the restart that puts it into force. The check is a
-// genuine subprocess, the same one the router runs. Anything else is the
-// restart, which for a client means asking the ProxyCore to re-read the file the
-// reconciler has already swapped into place — deliberately NOT rewriting it,
-// since the reconciler is the one holding the backup it may need to roll back to.
+// candidate config, and the restart that puts it into force. Anything that is not
+// a check is the restart, which for a client means asking the ProxyCore to re-read
+// the file the reconciler has already swapped into place — deliberately NOT
+// rewriting it, since the reconciler is the one holding the backup it may need to
+// roll back to.
+//
+// The check runs as a subprocess only where there IS a binary to run. An embedded
+// core (Android/libbox) has no `sing-box` on disk, so exec'ing the empty binary name
+// would fail every refresh tick and skip the apply — silently, since the reconciler
+// treats a failed check as "do not apply". There the ProxyCore validates the config
+// in-process instead, which is the same validation, just not through a shell.
 type boxRunner struct {
 	box ProxyCore
 }
 
 func (r boxRunner) Run(ctx context.Context, name string, args ...string) error {
 	if len(args) > 0 && args[0] == "check" {
+		if name == "" {
+			return r.checkInProcess(ctx, args)
+		}
 		if out, err := exec.CommandContext(ctx, name, args...).CombinedOutput(); err != nil {
 			return fmt.Errorf("%s check: %w: %s", name, err, strings.TrimSpace(string(out)))
 		}
 		return nil
 	}
 	return r.box.Restart(ctx)
+}
+
+// checkInProcess validates the candidate config the reconciler just wrote, without a
+// subprocess. The reconciler's contract is `check -c <path>`, so the path is the
+// argument after -c; anything else is a caller bug rather than a bad config, and must
+// not be reported as one.
+func (r boxRunner) checkInProcess(ctx context.Context, args []string) error {
+	var path string
+	for i, a := range args {
+		if a == "-c" && i+1 < len(args) {
+			path = args[i+1]
+		}
+	}
+	if path == "" {
+		return fmt.Errorf("core: in-process check: no -c <path> in %v", args)
+	}
+	cfg, err := os.ReadFile(path)
+	if err != nil {
+		return fmt.Errorf("core: in-process check: %w", err)
+	}
+	return r.box.Check(ctx, cfg)
 }
 
 // newReconciler builds the config reconciler that keeps the running sing-box in
