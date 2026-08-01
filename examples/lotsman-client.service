@@ -66,6 +66,11 @@ ExecStart=/usr/local/bin/lotsman-client \
 # back to 0700 if you remove the group.
 RuntimeDirectory=lotsman
 RuntimeDirectoryMode=0750
+# Survives a restart because it holds the crash-safe copy of the host's original
+# resolv.conf (-host-dns). Wiping it on every restart means an unclean death loses the
+# only record of what DNS looked like before the redirect — and then nothing can put
+# it back: the next start reads our own sentinel as if it were the real resolver.
+RuntimeDirectoryPreserve=restart
 StateDirectory=lotsman
 StateDirectoryMode=0700
 

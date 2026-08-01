@@ -73,6 +73,11 @@ in
       Group = "lotsman";
       RuntimeDirectory = "lotsman";
       RuntimeDirectoryMode = "0750"; # the group must traverse to the socket
+      # Keep /run/lotsman across a restart: it holds the crash-safe copy of the host's
+      # original resolv.conf. Letting systemd wipe it on every restart means an unclean
+      # death loses the only record of what DNS looked like before we redirected it —
+      # and then nothing can ever put it back.
+      RuntimeDirectoryPreserve = "restart";
       StateDirectory = "lotsman";
       StateDirectoryMode = "0700"; # singbox.json carries node credentials
       # on-failure, NOT always: a clean stop is a DECISION. The tray's "off" and
