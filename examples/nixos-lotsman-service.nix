@@ -75,7 +75,13 @@ in
       RuntimeDirectoryMode = "0750"; # the group must traverse to the socket
       StateDirectory = "lotsman";
       StateDirectoryMode = "0700"; # singbox.json carries node credentials
-      Restart = "always";
+      # on-failure, NOT always: a clean stop is a DECISION. The tray's "off" and
+      # `systemctl stop` both end in a normal exit, and Restart=always would undo them
+      # ten seconds later — a stop button that does not stop. Every genuine failure
+      # still exits non-zero (a refused config, a start that could not reach the
+      # subscription, a panic), so those are still retried, including the boot case
+      # where the network is not up yet.
+      Restart = "on-failure";
       RestartSec = "10s";
     };
   };
