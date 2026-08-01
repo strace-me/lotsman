@@ -23,7 +23,13 @@
 { config, lib, pkgs, ... }:
 
 let
-  bin = "/var/lib/lotsman/bin/lotsman-client";
+  # Deliberately NOT under /var/lib/lotsman: that is the service's StateDirectory and
+  # systemd chmods it to 0700 (it holds singbox.json with node credentials). The GUI and
+  # tray are launched BY THE DESKTOP USER, so their binaries must live somewhere that
+  # user can traverse — putting them in the state dir makes the app launcher stop
+  # working the moment the service first starts.
+  binDir = "/var/lib/lotsman-bin";
+  bin = "${binDir}/lotsman-client";
   zapretFiles = "${pkgs.zapret}/usr/share/zapret/files/fake";
   user = "operator"; # the desktop user whose unprivileged GUI/tray drives the service
 in
@@ -38,7 +44,12 @@ in
 
   # nfqws re-reads its hostlists AFTER dropping privileges, so they cannot live under
   # the 0700 state directory (which also holds singbox.json with node credentials).
-  systemd.tmpfiles.rules = [ "d /var/lib/lotsman-hostlists 0755 root root -" ];
+  systemd.tmpfiles.rules = [
+    "d /var/lib/lotsman-hostlists 0755 root root -"
+    # Traversable by the desktop user: the GUI and tray are launched from the app
+    # launcher, not by the service.
+    "d ${binDir} 0755 root root -"
+  ];
 
   systemd.services.lotsman-client = {
     description = "Lotsman — self-healing censorship bypass (tun + desync)";
@@ -65,7 +76,12 @@ in
         "-hostlist-dir /var/lib/lotsman-hostlists"
         "-control-socket /run/lotsman/control.sock"
         "-control-socket-group lotsman"
-        "-host-dns"
+        # -host-dns is deliberately OFF for a first daily-drive. The tun tract alone is
+        # proven and its worst failure is "no VPN"; host-DNS rewrites /etc/resolv.conf,
+        # and until the roam path re-captures the resolver, moving between networks can
+        # leave the machine resolving nothing while every health signal still reads
+        # green. Turn it on once the re-capture lands.
+        # "-host-dns"
         "-metrics-addr 127.0.0.1:9091"
         "-refresh-interval 5m"
         # -wan is deliberately unset: autodetection survives docking and network changes.
