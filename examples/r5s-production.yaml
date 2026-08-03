@@ -1,0 +1,187 @@
+# The ACTUAL production config from the NanoPi R5S, copied 2026-08-03 after 30 days of
+# uptime with no escalations and no failed services. Kept alongside the annotated
+# examples/r5s.yaml (which stays the teaching one, and carries a hostlists demo this
+# machine does not use) because a config that has genuinely survived a month in front of
+# live TSPU says things no hand-written example can.
+#
+# SCRUBBED, and nothing here is a working credential:
+#   * the subscription URL (the token in it IS the credential)
+#   * every inline node: uuid, obfs-password, server address, SNI
+#   * real server IPs and hostnames anywhere, INCLUDING in comments — they identify the
+#     owner's machines just as well as a key does
+# Public addresses are replaced with the RFC5737 documentation range (203.0.113.0/24),
+# so nothing here resolves to anything real. Private/loopback addresses are left alone:
+# they are structural, not secret.
+#
+# Note the shape of the inline nodes (format: single_url): that is how a node the
+# subscription does not carry — your own server, or one with obfs the provider omits —
+# is declared. The parameters are real in FORM, only the values are not.
+# Lotsman config for the R5S — COMPOSED LOCALLY, NOT YET DEPLOYED (draft for review).
+#
+# Rule/group model (per the home-network mermaid): each service is a routing rule
+# = match (rule_sets/domains/ips) -> chain (which pool first, fallbacks) + behavior
+# (sticky = never flap off a working node; profile = node-quality weighting).
+#
+# Node allocation with ONE hysteria node (the only UDP-native one):
+#   - UDP-sensitive (YouTube QUIC, Discord voice) -> hy2 first (vpn_url_test_udp),
+#     VLESS fallback. Sticky so sing-box never swaps a working hy2 for a low-ping
+#     but worse VLESS node.
+#   - Everything else (TCP/web, AI) -> the redundant VLESS pool (vpn_url_test).
+
+subscription_via_pool: vpn_url_test
+singbox_version: "1.14.0"
+
+subscriptions:
+  - { name: acme, url: "https://example.com/sub/REPLACE-ME", format: auto, tags: [normal], enabled: true }
+  # The single paid hysteria2 node, declared inline (the url IS the node — no
+  # fetch). It is the only UDP-native node, so it backs vpn_url_test_udp.
+  - { name: fastvpn, url: "hysteria2://REPLACE-UUID@203.0.113.10:443?sni=vpn.example.net&obfs=salamander&obfs-password=REPLACE-ME", format: single_url, tags: [normal], enabled: true }
+  # Our own German server (a hoster 203.0.113.10) — hy2+salamander on UDP/2096 (NOT
+  # 443: TSPU drops UDP/443/QUIC there, but other UDP ports pass). Self-signed cert
+  # (no domain) -> insecure=1. A node WE control, verified working under TSPU
+  # (~63 Mbit/s). Also UDP-native -> backs vpn_url_test_udp alongside fastvpn.
+  - { name: operator-de, url: "hysteria2://REPLACE-UUID@203.0.113.10:2096/?obfs=salamander&obfs-password=REPLACE-ME&sni=vpn.example.net&insecure=1", format: single_url, tags: [normal], enabled: true }
+  - { name: operator-de-gecko, url: "hysteria2://REPLACE-UUID@203.0.113.10:2098/?obfs=gecko&obfs-password=REPLACE-ME&sni=vpn.example.net&insecure=1", format: single_url, tags: [normal], enabled: true }
+  # TODO: demo / liberty / tunnel-out subscriptions.
+
+pools:
+  # countries_exclude: [ru] keeps RF-blocked services off RU-exit nodes (a RU exit
+  # is behind the same TSPU). "Smart location" nodes (no country flag in the name)
+  # have unknown country and are never excluded, so they still pass.
+  vpn_url_test:     { type: url_test, filter: { caps: [tcp],        tags_exclude: [emergency], countries_exclude: [ru] } } # VLESS+hy2, foreign exit
+  vpn_url_test_udp: { type: url_test, warmup: true, filter: { caps: [udp_native], tags_exclude: [emergency], countries_exclude: [ru] } } # hy2 (UDP-native), foreign exit; warmup=always hot for instant voice/QUIC failover
+  emergency_pool:   { type: url_test, filter: { tags_include: [emergency] } }
+
+services:
+  # RU-direct — Russian sites (banks, gov, RU content) ALWAYS direct, никогда в VPN.
+  # priority: -10 emits this FIRST, so a domain that appears in BOTH geosite-ru and
+  # a blocked list goes direct (RU wins). A direct/LOCKED chain (no VPN step) makes
+  # the generator route geosite-ru straight to the "direct" outbound — NOT a
+  # flippable selector — so it can never leak to a VPN exit.
+  - name: ru-direct
+    rule_sets: [geosite-category-ru]
+    priority: -10
+    chain:
+      - { state: LOCKED, class: direct, strategy_id: direct }
+
+  # YouTube — QUIC/UDP, wants the UDP-native (hy2) node, sticky (no flap to a
+  # low-ping-but-bad VLESS node — exactly what degraded it). geosite-youtube
+  # covers the domains; the inline ones are the QUIC-critical CDN hosts
+  # (from Flowseal list-google.txt) as belt-and-suspenders.
+  - name: youtube
+    probe_target: https://www.youtube.com/generate_204
+    rule_sets: [geosite-youtube]
+    domains: [googlevideo.com, ytimg.com, youtubei.googleapis.com, jnn-pa.googleapis.com]
+    sticky: true
+    profile: streaming
+    chain:
+      - { state: VPN,       class: vpn,       strategy_id: vpn_url_test_udp } # hy2, native UDP
+      - { state: VPN,       class: vpn,       strategy_id: vpn_url_test }     # VLESS fallback if hy2 dies
+      - { state: EMERGENCY, class: emergency, strategy_id: emergency_pool }
+
+  # Discord — WHOLE service one path (gateway + media + voice), UDP-sensitive,
+  # sticky. geosite-discord covers gateway domains; discord.media is media TCP;
+  # 203.0.113.10/18 is the voice/media IP block (voice UDP carries no SNI, so it
+  # must be matched by IP here). Voice UDP ports (19294-19344, 50000-50100) and
+  # media TCP ports (2053/2083/2087/2096/8443) are a ZAPRET/nfqws concern — the
+  # sing-box selector routes the whole IP block, it does not filter by port.
+  - name: discord
+    probe_target: https://discord.com/api/v9/gateway
+    rule_sets: [geosite-discord]
+    domains: [discord.media, dis.gd]
+    ips: [203.0.113.10/18]   # Discord's voice/media block (all regional voice servers)
+    ips_file: /opt/lotsman/discord-voice.cidr
+    sticky: true
+    profile: voice
+    escalate_after: 1
+    chain:
+      - { state: VPN,       class: vpn,       strategy_id: vpn_url_test_udp }
+      - { state: PREFERRED,  class: zapret }                              # direct + nfqws desync (Flowseal) - low ping, no VPN detour, immune to VPN-pool flaps
+      - { state: VPN,       class: vpn,       strategy_id: vpn_url_test }
+      - { state: EMERGENCY, class: emergency, strategy_id: emergency_pool }
+
+  # AI services — blocked in RF. Just need to reach them via VPN; speed is nice
+  # but not required; sticky so login/session does not drop on a node switch.
+  - name: ai
+    probe_target: https://api.openai.com/
+    domains: [openai.com, chatgpt.com, oaistatic.com, claude.ai, anthropic.com, gemini.google.com, perplexity.ai]
+    sticky: true
+    profile: general
+    chain:
+      - { state: VPN,       class: vpn,       strategy_id: vpn_url_test }
+      - { state: EMERGENCY, class: emergency, strategy_id: emergency_pool }
+
+  # General blocked TCP/web — the catch-all (ru-blocked) plus Cloudflare/Telegram/
+  # Fastly. Redundant VLESS pool, not sticky (no long session to keep). These are
+  # the 8 rule-sets actually present on the router (runetfreedom).
+  # The broad catch-all (geosite-ru-blocked). priority: 10 emits it LAST, so every
+  # specific service above (youtube/discord/ai/gaming/social/dev) wins first and
+  # only the leftover blocked traffic falls here -> VPN.
+  - name: web-blocked
+    probe_target: https://www.cloudflare.com/cdn-cgi/trace
+    rule_sets: [geosite-ru-blocked, geoip-ru-blocked, geosite-cloudflare, geoip-cloudflare, geoip-telegram, geoip-fastly]
+    priority: 10
+    profile: general
+    chain:
+      - { state: VPN,       class: vpn,       strategy_id: vpn_url_test }
+      - { state: EMERGENCY, class: emergency, strategy_id: emergency_pool }
+
+  # ── Gaming launchers/stores ─────────────────────────────────────────────────
+  # Only the LAUNCHER/STORE/auth domains are DPI-throttled. Prefer ZAPRET: nfqws
+  # desync while traffic stays DIRECT = low ping + anti-cheat-safe (no VPN detour).
+  # VPN is a last resort for login only; real game-server traffic is by IP, not
+  # matched here, so it falls through to `final: direct` (low ping preserved).
+  # sticky = never flap mid-session. NOTE: these domains must land in the zapret
+  # nfqws hostlist for the PREFERRED step to act — to be fed by the autoupdate
+  # pipeline (design pending approval). profile: gaming weights tail-latency + jitter.
+  - name: gaming-epic   # Epic Games + Rocket League
+    probe_target: https://www.epicgames.com/
+    domains: [epicgames.com, unrealengine.com, fortnite.com, rocketleague.com, psyonix.com, helpshift.com, easy.ac]
+    sticky: true
+    profile: gaming
+    chain:
+      - { state: PREFERRED,  class: zapret }                              # nfqws desync, traffic direct (low ping)
+      - { state: ALT_ZAPRET, class: zapret }                             # next-best zapret strategy from KB
+      - { state: VPN,        class: vpn,       strategy_id: vpn_url_test } # last resort: foreign VLESS (login only)
+      - { state: EMERGENCY,  class: emergency, strategy_id: emergency_pool }
+
+  - name: gaming-battlenet
+    probe_target: https://www.battle.net/
+    domains: [battle.net, blizzard.com, bnetcdn.com, battlenet.com]
+    sticky: true
+    profile: gaming
+    chain:
+      - { state: PREFERRED,  class: zapret }
+      - { state: ALT_ZAPRET, class: zapret }
+      - { state: VPN,        class: vpn,       strategy_id: vpn_url_test }
+      - { state: EMERGENCY,  class: emergency, strategy_id: emergency_pool }
+
+  # ── Social ──────────────────────────────────────────────────────────────────
+  # Blocked, want reach not speed. Reddit rides Fastly (also covered by
+  # web-blocked's geoip-fastly; here by domain too). Not sticky — no critical
+  # long session. Foreign VLESS pool.
+  - name: social   # Instagram, Facebook, Reddit, Pinterest
+    probe_target: https://www.instagram.com/
+    domains: [instagram.com, cdninstagram.com, facebook.com, fbcdn.net, reddit.com, redd.it, redditstatic.com, redditmedia.com, pinterest.com, pinimg.com]
+    profile: general
+    chain:
+      - { state: VPN,       class: vpn,       strategy_id: vpn_url_test }
+      - { state: EMERGENCY, class: emergency, strategy_id: emergency_pool }
+
+  # ── Dev tools ────────────────────────────────────────────────────────────────
+  # GitHub (raw/assets/registry) + Adobe Creative Cloud (activation/CDN throttled).
+  # Foreign VLESS, not sticky.
+  - name: dev   # GitHub, Adobe
+    probe_target: https://github.com/
+    domains: [github.com, githubusercontent.com, githubassets.com, ghcr.io, github.io, adobe.com, adobe.io, adobelogin.com, creativecloud.adobe.com, adobestatic.com]
+    profile: general
+    chain:
+      - { state: VPN,       class: vpn,       strategy_id: vpn_url_test }
+      - { state: EMERGENCY, class: emergency, strategy_id: emergency_pool }
+
+# The working hysteria2 node (fastvpn-nl) is currently a manual outbound in the
+# router's sing-box config, NOT a subscription. To put it under vpn_url_test_udp
+# (so UDP-sensitive services actually use it) the daemon needs inline-node support
+# + hysteria2 salamander-obfs in the generator. Details to declare it (from the
+# live config): server 203.0.113.10:443, sni vpn.example.net, obfs salamander.
+# TODO: implement inline nodes + hy2 obfs, then add it here as a node.
