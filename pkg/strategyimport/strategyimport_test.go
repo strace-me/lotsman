@@ -1,6 +1,7 @@
 package strategyimport
 
 import (
+	"os"
 	"strings"
 	"testing"
 
@@ -175,16 +176,65 @@ func TestTechniquesAreDerivedFromTheArguments(t *testing.T) {
 	}
 }
 
+// A real Flowseal 1.10.0 batch file, kept because the synthetic one did not
+// catch what it does: `set "BIN=%~dp0bin\"` with references as %BIN%, and the
+// quote wrapping the VALUE rather than the token. Both left `"%BIN%` sitting
+// inside filenames, which silently turned recipes we already knew into new ones
+// — 18 of 24 matches were being missed.
+func TestRealBatchFileResolvesItsVariables(t *testing.T) {
+	body, err := os.ReadFile("testdata/flowseal-1.10.0-alt12.bat")
+	if err != nil {
+		t.Fatal(err)
+	}
+	res := Import([]Source{{Name: "Flowseal 1.10.0", Kind: KindBat, Body: body}})
+	if len(res.Recipes) == 0 {
+		t.Fatal("no recipes read from the batch file")
+	}
+	for _, r := range res.Recipes {
+		for _, a := range r.NfqwsArgs {
+			if strings.ContainsAny(a, `"'`) {
+				t.Errorf("quote survived into an argument: %q", a)
+			}
+			if strings.Contains(a, "%") {
+				t.Errorf("unresolved batch variable survived into an argument: %q", a)
+			}
+			if strings.ContainsAny(a, `\`) {
+				t.Errorf("a path survived where a bare filename was expected: %q", a)
+			}
+		}
+	}
+	// The game-filter profiles take their ports from a variable that service.bat
+	// computes at launch, so they cannot be read statically. Refusing them is
+	// correct; silently keeping a filter that selects nothing would not be.
+	var gameSkips int
+	for _, s := range res.Skipped {
+		if strings.Contains(s.Reason, "GameFilter") {
+			gameSkips++
+		}
+	}
+	if gameSkips == 0 {
+		t.Error("the runtime-valued game filters were not refused")
+	}
+}
+
 // The ground truth for this whole package: testdata holds the strategy scripts
 // actually deployed on the router, and the catalog holds the recipes a PERSON
 // derived from those same files by hand. Reading them automatically must produce
 // exactly what the person produced — otherwise the normalizer is inventing a
 // recipe that no one has ever run.
 func TestImportDirReproducesTheHandCuratedCatalog(t *testing.T) {
-	res, err := ImportDir("testdata")
-	if err != nil {
-		t.Fatal(err)
+	// Only the router scripts: those are the ones a person transcribed into the
+	// catalog. The 1.10.0 bundle beside them is two versions newer and is
+	// SUPPOSED to bring recipes the catalog has never seen.
+	var srcs []Source
+	for _, name := range []string{"alt11.sh", "alt12.sh"} {
+		body, err := os.ReadFile("testdata/" + name)
+		if err != nil {
+			t.Fatal(err)
+		}
+		srcs = append(srcs, Source{Name: name, Kind: KindShell, Body: body})
 	}
+	res := Import(srcs)
 	catalog := map[string]string{}
 	for _, r := range strategycat.Load() {
 		catalog[strings.Join(r.NfqwsArgs, " ")] = r.ID
@@ -214,6 +264,29 @@ func TestImportDirReproducesTheHandCuratedCatalog(t *testing.T) {
 	}
 	if shared == 0 {
 		t.Error("no recipe was recognised in both scripts; dedup across sources is not working")
+	}
+}
+
+// ImportDir must pick up every container in a bundle, not just the one it was
+// written against: a directory holding both .sh and .bat has to yield both.
+func TestImportDirReadsEveryContainer(t *testing.T) {
+	res, err := ImportDir("testdata")
+	if err != nil {
+		t.Fatal(err)
+	}
+	seen := map[string]bool{}
+	for _, r := range res.Recipes {
+		for _, part := range strings.Split(r.Provenance, " | also: ") {
+			seen[part] = true
+		}
+	}
+	for _, want := range []string{"alt12.sh", "flowseal-1.10.0-alt12.bat"} {
+		if !seen[want] {
+			t.Errorf("no recipe attributed to %s; the walk missed it", want)
+		}
+	}
+	if len(res.Recipes) <= 7 {
+		t.Errorf("got %d recipes from three files; the newer bundle contributed nothing", len(res.Recipes))
 	}
 }
 

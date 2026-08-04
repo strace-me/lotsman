@@ -77,8 +77,12 @@ var (
 	firstFlag = regexp.MustCompile(`(^|\s)--[a-z]`)
 	// VAR=value / VAR="value" / VAR='value' at the start of a line.
 	assignment = regexp.MustCompile(`(?m)^[ \t]*([A-Za-z_][A-Za-z0-9_]*)=("([^"]*)"|'([^']*)'|([^\s#]*))[ \t]*$`)
-	fence      = regexp.MustCompile("(?s)```[a-zA-Z0-9]*\\n(.*?)```")
-	varRef     = regexp.MustCompile(`\$\{?([A-Za-z_][A-Za-z0-9_]*)\}?`)
+	// Batch spells the same thing `set NAME=value` or `set "NAME=value"`, the
+	// quote wrapping the whole assignment rather than the value.
+	batchAssignment = regexp.MustCompile(`(?mi)^[ \t]*set[ \t]+"?([A-Za-z_][A-Za-z0-9_]*)=([^"\r\n]*)"?[ \t]*$`)
+	fence           = regexp.MustCompile("(?s)```[a-zA-Z0-9]*\\n(.*?)```")
+	varRef          = regexp.MustCompile(`\$\{?([A-Za-z_][A-Za-z0-9_]*)\}?`)
+	batchVarRef     = regexp.MustCompile(`%([A-Za-z_][A-Za-z0-9_]*)%`)
 )
 
 // Import reads every source and returns the deduplicated recipes.
@@ -186,7 +190,8 @@ func chunks(src Source) []string {
 	body := string(src.Body)
 	switch src.Kind {
 	case KindBat:
-		return []string{argsAfterInvocation(joinContinuations(body, "^"))}
+		joined := joinContinuations(body, "^")
+		return []string{argsAfterInvocation(expandBatchVars(joined, batchAssignments(joined)))}
 	case KindMarkdown:
 		var out []string
 		for _, m := range fence.FindAllStringSubmatch(body, -1) {
@@ -232,6 +237,39 @@ func assignments(body string) map[string]string {
 		vars[m[1]] = val
 	}
 	return vars
+}
+
+// batchAssignments collects `set NAME=value` pairs. %~dp0 is left in the value:
+// it means "the directory holding me", and reducing the reference to a basename
+// later throws it away anyway.
+func batchAssignments(body string) map[string]string {
+	vars := map[string]string{}
+	for _, m := range batchAssignment.FindAllStringSubmatch(body, -1) {
+		vars[m[1]] = strings.TrimSpace(m[2])
+	}
+	return vars
+}
+
+// expandBatchVars resolves %NAME% until it stops changing, since one assignment
+// routinely refers to another. An unknown name is left for the normalizer to
+// reject.
+func expandBatchVars(body string, vars map[string]string) string {
+	if len(vars) == 0 {
+		return body
+	}
+	for range 4 { // assignments nest a level or two; the bound stops a cycle
+		next := batchVarRef.ReplaceAllStringFunc(body, func(ref string) string {
+			if v, ok := vars[strings.Trim(ref, "%")]; ok {
+				return v
+			}
+			return ref
+		})
+		if next == body {
+			break
+		}
+		body = next
+	}
+	return body
 }
 
 // expandVars substitutes known variables. An unknown reference is left as-is so

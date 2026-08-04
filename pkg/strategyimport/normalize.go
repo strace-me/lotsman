@@ -50,7 +50,10 @@ const domainsPlaceholder = "--hostlist-domains={{DOMAINS}}"
 // would put a verdict in the knowledge base about a strategy that never ran.
 var unsupported = []string{"--ipset=", "--ipset-auto="}
 
-var unresolvedVar = regexp.MustCompile(`\$\{?[A-Za-z_]`)
+// A reference the extractor could not resolve — shell $NAME or batch %NAME%.
+// %~dp0 is not one of these: it means "the directory holding me", which the
+// basename reduction discards on purpose.
+var unresolvedVar = regexp.MustCompile(`\$\{?[A-Za-z_]|%[A-Za-z_][A-Za-z0-9_]*%`)
 
 // Normalize turns one block's raw arguments into the canonical form the catalog
 // stores: deployment-specific arguments removed, payload paths reduced to the
@@ -60,6 +63,12 @@ func Normalize(raw []string) ([]string, error) {
 	var out []string
 	for _, a := range raw {
 		a = strings.Trim(a, `"'`)
+		// Batch quotes the VALUE, not the token: --flag="%BIN%x.bin". Trimming
+		// the token alone leaves the quote sitting inside, where it becomes part
+		// of a filename and silently makes two spellings of one recipe.
+		if k, v, ok := strings.Cut(a, "="); ok {
+			a = k + "=" + strings.Trim(v, `"'`)
+		}
 		if a == "" || dropExact[a] {
 			continue
 		}
