@@ -42,7 +42,8 @@ type Engine struct {
 	mu       sync.Mutex
 	cmd      *exec.Cmd
 	lastArgs []string
-	armed    bool // nft table installed
+	armed    bool   // nft table installed
+	crashLog string // file that unexpected exits are appended to; "" = log only
 }
 
 // New returns an Engine for one nfqws instance. bin "" resolves nfqws on PATH.
@@ -120,14 +121,21 @@ func (e *Engine) Apply(ctx context.Context, args []string) (restarted bool, err 
 	go func() {
 		err := <-done
 		e.mu.Lock()
+		stopping := e.cmd != cmd // Stop/replace already took ownership; this exit was asked for
 		if e.cmd == cmd {
 			e.cmd = nil
 			e.lastArgs = nil
 		}
 		e.mu.Unlock()
-		if err != nil {
-			e.log.Warn("nfqws exited", "err", err)
+		if err == nil || stopping {
+			return
 		}
+		// The engine died on its own. "exit status 1" says nothing; nfqws says exactly
+		// what it refused, and it says it on the way out — so carry its own last words,
+		// and the argv that provoked them, or the next reader is left guessing the way
+		// the router's operator was for eight days.
+		e.log.Warn("nfqws exited on its own", "err", err, "argv", strings.Join(full, " "), "said", said.String())
+		e.recordCrash(full, err, said.String())
 	}()
 	e.log.Info("nfqws applied", "qnum", e.inst.QNum, "blocks", strings.Count(strings.Join(args, " "), "--new")+1)
 	return true, nil
@@ -193,6 +201,40 @@ func (e *Engine) stopProcessLocked() {
 
 // tailBuffer keeps the last few KB of a stream — enough to carry the reason in
 // an error without letting a chatty engine grow unbounded.
+// SetCrashLog names a file that unexpected engine exits are appended to. Empty
+// disables it and the exit is only logged. The file is the durable half: the log
+// line goes wherever the service's stderr goes, which on a box nobody reads is
+// nowhere, whereas this survives the client dying too.
+func (e *Engine) SetCrashLog(path string) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	e.crashLog = path
+}
+
+// recordCrash appends one record for an engine that exited by itself. Best effort:
+// failing to write a diagnostic must never be louder than the fault it describes.
+func (e *Engine) recordCrash(argv []string, exitErr error, said string) {
+	e.mu.Lock()
+	path := e.crashLog
+	e.mu.Unlock()
+	if path == "" {
+		return
+	}
+	rec := fmt.Sprintf("=== %s  nfqws exited: %v\nargv: %s\n%s\n",
+		time.Now().Format(time.RFC3339), exitErr, strings.Join(argv, " "), strings.TrimRight(said, "\n"))
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o640)
+	if err != nil {
+		e.log.Warn("nfqws: could not write the crash record", "path", path, "err", err)
+		return
+	}
+	defer f.Close()
+	if _, err := f.WriteString(rec); err != nil {
+		e.log.Warn("nfqws: could not write the crash record", "path", path, "err", err)
+	}
+}
+
+// tailBuffer keeps only the last 4KiB written to it — enough for nfqws's own
+// complaint, bounded so a chatty engine cannot grow it without limit.
 type tailBuffer struct {
 	mu  sync.Mutex
 	buf []byte
