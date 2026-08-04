@@ -66,7 +66,104 @@ live root test is still pending. See `docs/DESIGN-client-ui.md` and
   ThinkPad; SSH survived; the self-heal brain armed, canary-tested, and escalated zapret
   recipes to a converged 5/6.
 
-### Daily-driver obvyazka — group socket + host-DNS (built, live root test pending)
+### Daily driver — proven live, and the failures found by proving it
+
+Both root tests passed on the ThinkPad, and running them found more than they were
+written to check. See `docs/HANDOFF-2026-08-04.md`.
+
+- **host-DNS works, and the sentinel had to be the tun PEER** — a packet to the tun's own
+  address is delivered locally and never reaches sing-box to be hijacked. Proven by four
+  ISP-NXDOMAINed domains resolving through the tunnel, with `resolv.conf` restored
+  byte-identically on stop.
+- **Roaming re-capture** — the host's resolver and the machine's excluded subnets were
+  captured once at startup and then carried forever, so "close the lid at home, open it
+  in a café" left both DNS exits dead while every health signal stayed green. Roaming now
+  re-captures both and regenerates through a *fresh* reconciler (the running one had
+  snapshotted its options). `Redirect`/`Restore` decide from the file rather than an
+  in-memory flag, so a network manager rewriting `resolv.conf` no longer causes either a
+  silent leak or — when switching Lotsman off — a clobbered resolver.
+- **A watchdog for the case nothing else can see**: the tunnel up, the Clash API
+  answering, and DNS going nowhere. Three unanswered probes hand the host's own resolver
+  back.
+- **nfqws was being restarted 78 times in two minutes.** `brain.Snapshot()` iterated a
+  map, so Go reshuffled the service order on every call, the composed argv differed each
+  tick, and `Apply` read that as a strategy change — with the canary then judging recipes
+  against an engine that had just restarted. Sorting at the source fixed every consumer.
+- **A NixOS module** (`examples/nixos-lotsman-service.nix`) — `/etc/systemd/system` is a
+  read-only symlink farm there, so the unit must be declared; a service declared by
+  another module cannot be `systemctl disable`d, so the system sing-box's `wantedBy` is
+  overridden instead. `Restart=on-failure`, because with `always` the tray's off button
+  would be undone ten seconds later.
+- **The service was missing a sixth of the desync catalog**: it pointed at nixpkgs'
+  zapret, which ships 31 payloads, while 11 of 67 recipes need three Flowseal-derived
+  ones. Those are now vendored in `assets/zapret-payloads/` and merged into one directory
+  at start.
+
+### Error-handling audit — six root causes
+
+A 16-agent adversarial audit found the confirmed defects were not independent bugs.
+
+- **"Applied" now means applied.** `Reconcile` returned bare `nil` on paths that wrote
+  nothing (degraded fetch, dry-run), so every caller read "skipped" as "applied";
+  `ErrDeferred` had existed for exactly this reason on a third path and was never
+  generalised. `Reload` was a teardown followed by a fallible step with no rebuild, so any
+  reconcile error left the client with a live tunnel and nothing steering it — painted
+  green, because the box was alive and the Clash API answered.
+- **Bookkeeping committed before the effect it recorded**: the DNS failover loop counted
+  rotations before `Reload` confirmed anything, so a run of skipped reloads walked memory
+  through the whole provider list while sing-box still ran the first one — then concluded
+  every provider had failed.
+- **A failed re-exec exited 0**, so `Restart=on-failure` saw a clean shutdown after the
+  data plane was already down. The non-unix path now starts a fresh process rather than
+  claiming a service manager will.
+- **Liveness of a process taken as health of a subsystem** — `superviseBox` restarted a
+  wedged box, then declared it healthy on the next tick because the process existed.
+- **A compensating action's failure discarded along with the handle to retry it** — the
+  host-DNS manager was dropped even when its restore had failed, leaving `resolv.conf`
+  pointing at a dead sentinel with nothing able to put it back.
+- **A transient miss amputating a rung forever**: `dropUnsupportedRungs` wrote its trimmed
+  chains into the shared registry, so a rung dropped once because its executor happened to
+  be unavailable — the desync gives up when there is no default route, exactly a laptop's
+  state after a resume — never came back.
+
+### Config and lists
+
+- **Domain packs** — `hostlists:` declares a pack once (sources, excludes, shrink guard)
+  and `domain_lists:` attaches it to any service, so both engines get the same domains.
+  Wildcards are normalised (`*.foo.com` as a `domain_suffix` matches nothing), dedup is
+  case-insensitive, duplicate pack names are rejected, and a pack is bounded at 50k
+  domains because these are emitted inline.
+- **A failed *exclude*-source fetch used to make a list GROW**, sailing past both guards
+  and silently putting back the domains it was asked to leave out.
+- **Strict YAML** (`KnownFields`): a misspelled key was indistinguishable from an absent
+  one, and the in-app editor would then rewrite the file *without* it.
+- **The client silently dropped half its config knobs** — `utls_fingerprint`, `multiplex`,
+  `fakeip` and `singbox_version` were honoured by the daemon and ignored by the client;
+  the first two are precisely the anti-fingerprinting and anti-parallel-handshake levers.
+- A service that matches nothing no longer disarms the desync for the whole fleet:
+  "nothing to cover" and "could not be covered" are different outcomes.
+
+### GUI
+
+Structured editors for **DNS**, **Движки** (uTLS/multiplex/fakeip/version), **Стратегии**
+(custom nfqws recipes) and **Списки** (domain packs, with a live cross-reference of which
+services use each). All Mac-validated in mock mode; a Go round-trip test pins the
+PascalCase keys the forms bind against the config structs.
+
+### Android and Windows
+
+- **Android Stage-1 scaffolding**: `client/mobile` (its own module, so sing-box's
+  dependency graph stays out of the root one) with an `AndroidProxyCore` over libbox, plus
+  a Kotlin/VpnService shell. The Go half **builds for android/arm64, arm and amd64** — and
+  established that the build tags are mandatory, or the app links a clash-server stub and
+  every start fails. Nothing Kotlin has been compiled.
+- **Windows**: `GOOS=windows go vet` had never passed (a test used `syscall.Stat_t`), so
+  the package with the most Windows-sensitive logic could not compile its own tests there.
+  CI now cross-builds and vets windows/darwin/android — the last because Go's `linux`
+  build tag silently matches android, which had already let two desktop-only files into an
+  Android build.
+
+### Daily-driver obvyazka — group socket + host-DNS
 
 The two pieces needed to run Lotsman as the ThinkPad's VPN in place of the bare system
 sing-box (see `docs/DESIGN-dns-and-tun.md`):
