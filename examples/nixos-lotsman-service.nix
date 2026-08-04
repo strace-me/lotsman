@@ -14,7 +14,7 @@
 #
 # The BINARY is deliberately not in the store: it is rebuilt from source many times a
 # day, and wrapping every rebuild in nixos-rebuild is misery. Install it by hand to
-# /var/lib/lotsman/bin/. The CONFIG is a plain file in /etc/lotsman/ because it holds a
+# /var/lib/lotsman-bin/. The CONFIG is a plain file in /etc/lotsman/ because it holds a
 # subscription URL and node credentials, which have no business in a world-readable
 # store — the same reasoning sing-box.nix already applies to its own config.
 #
@@ -30,7 +30,19 @@ let
   # working the moment the service first starts.
   binDir = "/var/lib/lotsman-bin";
   bin = "${binDir}/lotsman-client";
-  zapretFiles = "${pkgs.zapret}/usr/share/zapret/files/fake";
+
+  # Fake payloads for the desync. NOT the store path directly: nixpkgs' zapret ships
+  # only upstream's payloads, and 11 of the 67 catalog recipes need Flowseal-derived
+  # ones it does not carry (tls_clienthello_4pda_to.bin, tls_clienthello_max_ru.bin,
+  # quic_initial_dbankcloud_ru.bin). Pointing at the store therefore silently removes a
+  # sixth of the strategies the brain can try — not fatal, since the recipe that beat
+  # live TSPU here needs only a payload upstream does ship, but it narrows the search
+  # exactly when the current winner stops working and breadth matters most.
+  #
+  # So: a directory that holds both. ExecStartPre refreshes the store's copies on every
+  # start (they follow the pinned package) and leaves anything else alone.
+  payloadDir = "/var/lib/lotsman-payloads";
+  storePayloads = "${pkgs.zapret}/usr/share/zapret/files/fake";
   user = "operator"; # the desktop user whose unprivileged GUI/tray drives the service
 in
 {
@@ -49,6 +61,8 @@ in
     # Traversable by the desktop user: the GUI and tray are launched from the app
     # launcher, not by the service.
     "d ${binDir} 0755 root root -"
+    # 0755 because nfqws re-reads these AFTER dropping privileges.
+    "d ${payloadDir} 0755 root root -"
   ];
 
   systemd.services.lotsman-client = {
@@ -63,12 +77,15 @@ in
     path = [ pkgs.sing-box pkgs.zapret pkgs.nftables pkgs.iproute2 ];
 
     serviceConfig = {
+      # Keep the store's payloads current without clobbering the extra ones: -u copies
+      # only what is newer, and nothing here removes files.
+      ExecStartPre = "${pkgs.coreutils}/bin/cp -ru ${storePayloads}/. ${payloadDir}/";
       ExecStart = lib.concatStringsSep " " [
         bin
         "-config /etc/lotsman/client.yaml"
         "-singbox-bin ${pkgs.sing-box}/bin/sing-box"
         "-nfqws-bin ${pkgs.zapret}/bin/nfqws"
-        "-zapret-files ${zapretFiles}"
+        "-zapret-files ${payloadDir}"
         "-singbox-config /var/lib/lotsman/singbox.json"
         "-state-file /var/lib/lotsman/state.json"
         "-kb-dir /var/lib/lotsman/kb"
