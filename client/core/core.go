@@ -1458,6 +1458,16 @@ func (c *Core) newZapretExec(ctx context.Context) *zapretExec {
 	c.zap = nfqws.New(c.opts.NfqwsBin, inst, zapret.NftOptions{
 		Table: "inet lotsman", WAN: wan, VPNServers: excluded,
 	}, c.opts.ZapretFiles, c.log)
+	// Give the engine somewhere durable to leave its last words. An engine that dies
+	// on its own is the one failure the desync rung cannot see — nft keeps the queue
+	// rules with `flags bypass`, so traffic keeps flowing undesynced and everything
+	// downstream still reads healthy. Reuse whichever persistent dir the operator
+	// already named rather than inventing a knob; with none, the exit is only logged.
+	if dir := c.opts.HostlistDir; dir != "" {
+		c.zap.SetCrashLog(filepath.Join(dir, "nfqws-crash.log"))
+	} else if c.opts.StateFile != "" {
+		c.zap.SetCrashLog(filepath.Join(filepath.Dir(c.opts.StateFile), "nfqws-crash.log"))
+	}
 	c.log.Info("desync rung enabled", "engine", "nfqws", "wan", wan, "qnum", qnum, "excluded_tunnels", len(excluded))
 
 	return &zapretExec{
