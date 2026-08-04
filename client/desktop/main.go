@@ -66,6 +66,12 @@ func writeStarter(path, subCSV string, recommended bool) error {
 // so an unreachable source delays a fresh install by seconds instead of hanging it.
 const hostlistFetchTimeout = 30 * time.Second
 
+// startFailureGrace is how long the control socket stays up after a failed start, so a
+// UI can attach, read why, and push a fix. Long enough to be useful to somebody already
+// looking, short enough that the boot-before-network case still recovers promptly by
+// exiting non-zero and letting the service manager retry.
+const startFailureGrace = 30 * time.Second
+
 func main() {
 	var (
 		configPath    = flag.String("config", "", "path to the lotsman client config (required)")
@@ -208,16 +214,17 @@ func main() {
 		return
 	}
 
-	if err := c.Start(ctx); err != nil {
-		log.Error("client start failed", "err", err)
-		os.Exit(1)
-	}
-
-	// The control socket is what an unprivileged tray/GUI attaches to. A failure here
-	// must not take the tunnel down with it — the service is useful headless.
-	// applyRestart lets the config-editing endpoint apply a saved config by re-exec:
-	// it flags the intent, then cancels, so the run loop tears the data plane down
-	// (Core.Stop) BEFORE we replace the process — no orphaned sing-box/nfqws.
+	// The control socket goes up BEFORE the data plane, and deliberately so.
+	//
+	// It used to be bound only after a successful Start, which meant the one failure
+	// the GUI's config editor exists to repair — a config the client refuses — was
+	// exactly the failure that made the editor unreachable. The operator was left with
+	// a service that exits, restarts, exits, and a UI that cannot attach to say why.
+	//
+	// A failure binding it must not take the tunnel down with it: the service is useful
+	// headless. applyRestart lets the config-editing endpoint apply a saved config by
+	// re-exec: it flags the intent, then cancels, so the run loop tears the data plane
+	// down (Core.Stop) BEFORE we replace the process — no orphaned sing-box/nfqws.
 	var applyRestart atomic.Bool
 	restart := func() { applyRestart.Store(true); cancel() }
 	ctl := core.NewControlServer(c, cancel, log).WithConfig(*configPath, restart)
@@ -228,6 +235,25 @@ func main() {
 		log.Warn("control API unavailable (continuing headless)", "err", err)
 	} else {
 		defer ctl.Close()
+	}
+
+	if err := c.Start(ctx); err != nil {
+		// Hold the socket open for a moment before giving up, so a UI that is attached
+		// (or attaches now) can read the failure and push a corrected config, which
+		// re-execs us into a clean process — Core.Start is not re-entrant, so retrying
+		// it in place is not an option. Then exit non-zero: a service manager retries,
+		// and the boot-before-network case recovers on its own.
+		log.Error("client start failed — the control socket stays up briefly so a UI can read this and fix the config",
+			"err", err, "grace", startFailureGrace)
+		select {
+		case <-ctx.Done(): // a config save (or a signal) arrived
+		case <-time.After(startFailureGrace):
+		}
+		if applyRestart.Load() {
+			ctl.Close()
+			reexec(log)
+		}
+		os.Exit(1)
 	}
 
 	// Report the active node per service each interval until signalled.

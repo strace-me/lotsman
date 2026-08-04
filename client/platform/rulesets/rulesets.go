@@ -11,10 +11,12 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"net"
 	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 )
 
 // BundleURL is the upstream sing-box rule-set bundle — the same source the
@@ -37,6 +39,27 @@ func RelPath(tag string) (string, bool) {
 // Ensure guarantees every tag exists under dir, downloading and extracting the
 // upstream bundle only when something is missing. A warm cache is a no-op, so
 // this is safe to call on every start.
+// bundleClient downloads the rule-set bundle with deadlines of its own.
+//
+// http.DefaultClient has NO timeout, and this runs inside Start, before the control
+// socket is even bound. Behind a captive portal or on a half-associated tether the
+// connection is accepted and then goes quiet, so the download hangs forever: no tunnel,
+// no socket, no way to ask what is wrong — and systemd reports the unit as active
+// (running), because from its side the process is alive and doing something. A bounded
+// failure that retries is strictly better than an unbounded wait that looks healthy.
+//
+// The overall Timeout covers the whole body read, not just the handshake, because the
+// failure mode here is a stalled transfer rather than a refused connection. It is
+// generous: the bundle is ~27 MB and some of the users this ships for are on slow links.
+var bundleClient = &http.Client{
+	Timeout: 5 * time.Minute,
+	Transport: &http.Transport{
+		DialContext:           (&net.Dialer{Timeout: 15 * time.Second}).DialContext,
+		TLSHandshakeTimeout:   15 * time.Second,
+		ResponseHeaderTimeout: 30 * time.Second,
+	},
+}
+
 func Ensure(ctx context.Context, dir string, tags []string, log *slog.Logger) error {
 	want := map[string]string{} // bundle-relative path -> destination
 	for _, tag := range tags {
@@ -66,7 +89,7 @@ func Ensure(ctx context.Context, dir string, tags []string, log *slog.Logger) er
 	if err != nil {
 		return fmt.Errorf("rulesets: request: %w", err)
 	}
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := bundleClient.Do(req)
 	if err != nil {
 		return fmt.Errorf("rulesets: download: %w", err)
 	}
