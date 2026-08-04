@@ -97,7 +97,9 @@ lotsmanctl generate -config /etc/lotsman/r5s.yaml -out /tmp/sb.json && sing-box 
 ## Конфигурация
 
 Полностью прокомментированные примеры — [`examples/r5s.yaml`](examples/r5s.yaml) и
-[`examples/config.yaml`](examples/config.yaml). Ниже — разбор по секциям.
+[`examples/config.yaml`](examples/config.yaml); боевой конфиг R5S целиком, со скрубленными
+адресами и кредами — [`examples/r5s-production.yaml`](examples/r5s-production.yaml).
+Ниже — разбор по секциям.
 
 > ⚠️ **Никогда не коммитьте реальные URL подписок и креды узлов.** Держите их только в
 > `/etc/lotsman/r5s.yaml` на роутере. В репозитории — только плейсхолдеры.
@@ -140,6 +142,7 @@ services:
 | `escalate_after` | int | Сколько провалов пробы до эскалации (0 = глобальный дефолт). |
 | `exclude_domains` | []string | Передаётся в nfqws-композитор как `--hostlist-exclude-domains` (десинк ОТМЕНЯЕТСЯ для этих доменов — CDN, что ломаются под десинком). **Маршрут не меняется.** |
 | `spread_clients` | []string | CIDR'ы LAN-клиентов, размазанные по узлам VPN-пула (rendezvous-hash, LOT-23). |
+| `domain_lists` | []string | Имена объявленных `hostlists`, чьи домены вливаются в `domains` при парсинге (пак объявляется один раз — цепляется к любому сервису). |
 | `chain` | []step | Цепочка фолбэков (если пусто — наследуется из категории). |
 
 **Рунг цепочки (`chain[]`):**
