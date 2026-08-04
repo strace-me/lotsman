@@ -19,14 +19,31 @@ type FileInstaller struct {
 	Base        string // parent dir, e.g. /opt
 	DirPrefix   string // versioned dir prefix, e.g. "flowseal-"
 	CurrentLink string // stable symlink, e.g. /opt/flowseal-current
+
+	// PreserveDirs names subdirectories holding files that are OUR state rather
+	// than the bundle's artifact — user exclude lists, above all. A release ships
+	// none of them, so a stateless extract silently drops them and the strategy
+	// script that requires them stops starting. That has happened three times:
+	// 1.9.9c (a nested archive root emptied lists/), then 1.9.9d and 1.10.0 (no
+	// -user files). Any file present in the OLD bundle and absent from the new one
+	// is copied forward.
+	PreserveDirs []string
+
+	// Verify, when set, must accept the newly extracted directory before the
+	// symlink is repointed. Returning an error leaves the old bundle in service:
+	// a broken new release costs an unapplied update, never a dead engine. The
+	// check is injected because deciding "does this bundle work" means launching
+	// the engine, which this package has no business knowing how to do.
+	Verify func(dir string) error
 }
 
 // NewFileInstaller builds an installer with the R5S layout.
 func NewFileInstaller(base string) *FileInstaller {
 	return &FileInstaller{
-		Base:        base,
-		DirPrefix:   "flowseal-",
-		CurrentLink: filepath.Join(base, "flowseal-current"),
+		Base:         base,
+		DirPrefix:    "flowseal-",
+		CurrentLink:  filepath.Join(base, "flowseal-current"),
+		PreserveDirs: []string{"lists"},
 	}
 }
 
@@ -40,8 +57,10 @@ func (i *FileInstaller) CurrentVersion() string {
 	return strings.TrimPrefix(filepath.Base(target), i.DirPrefix)
 }
 
-// Install extracts the release zip into <Base>/<DirPrefix><tag> and repoints the
-// current symlink at it.
+// Install extracts the release zip into <Base>/<DirPrefix><tag>, carries our own
+// state forward into it, and repoints the current symlink — but only if the new
+// bundle passes Verify. A release that does not is left on disk unreferenced, and
+// the previously working one stays in service.
 func (i *FileInstaller) Install(_ context.Context, rel Release, raw []byte) error {
 	dir := filepath.Join(i.Base, i.DirPrefix+rel.Tag)
 	if err := os.MkdirAll(dir, 0o755); err != nil {
@@ -50,6 +69,19 @@ func (i *FileInstaller) Install(_ context.Context, rel Release, raw []byte) erro
 	if err := unzip(raw, dir); err != nil {
 		return err
 	}
+	if old, err := os.Readlink(i.CurrentLink); err == nil && old != dir {
+		if err := i.carryForward(old, dir); err != nil {
+			return fmt.Errorf("flowseal: carry state into %s: %w", rel.Tag, err)
+		}
+	}
+	if i.Verify != nil {
+		if err := i.Verify(dir); err != nil {
+			// Deliberately NOT a rollback: nothing was changed yet. The old
+			// symlink still points where it did, so the engine keeps running on
+			// the bundle that works.
+			return fmt.Errorf("flowseal: %s rejected, staying on %s: %w", rel.Tag, i.CurrentVersion(), err)
+		}
+	}
 	// Repoint symlink atomically: write a temp link then rename over the old one.
 	tmp := i.CurrentLink + ".tmp"
 	os.Remove(tmp)
@@ -57,6 +89,38 @@ func (i *FileInstaller) Install(_ context.Context, rel Release, raw []byte) erro
 		return err
 	}
 	return os.Rename(tmp, i.CurrentLink)
+}
+
+// carryForward copies files the old bundle had and the new one lacks, within the
+// preserved subdirectories. It never overwrites: a file the release ships is the
+// release's to own.
+func (i *FileInstaller) carryForward(oldDir, newDir string) error {
+	for _, sub := range i.PreserveDirs {
+		entries, err := os.ReadDir(filepath.Join(oldDir, sub))
+		if err != nil {
+			continue // the old bundle had no such dir; nothing to keep
+		}
+		for _, e := range entries {
+			if e.IsDir() {
+				continue
+			}
+			dst := filepath.Join(newDir, sub, e.Name())
+			if _, err := os.Stat(dst); err == nil {
+				continue // shipped by the release
+			}
+			body, err := os.ReadFile(filepath.Join(oldDir, sub, e.Name()))
+			if err != nil {
+				return err
+			}
+			if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
+				return err
+			}
+			if err := os.WriteFile(dst, body, 0o644); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
 }
 
 // unzip extracts a zip archive into dir, rejecting path-traversal entries.
