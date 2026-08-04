@@ -173,6 +173,11 @@ type Core struct {
 	zap            *nfqws.Engine // local desync engine (nil = no desync rung on this platform)
 	zapExec        *zapretExec   // the zapret executor, reconciled periodically (nil = no desync rung)
 
+	// pristineChains keeps every service's chain exactly as the config declared it, so
+	// dropUnsupportedRungs can trim from the original on every rebuild instead of
+	// compounding its own earlier trims into a permanent amputation.
+	pristineChains map[string][]registry.ChainStep
+
 	// hostDNS redirects the host's own resolver into the tun (nil = off / unsupported).
 	// hostResolver is the real LAN resolver captured before the redirect, pinned as the
 	// sing-box `direct` DNS server so its bootstrap does not re-read the mutated
@@ -226,7 +231,10 @@ func New(conf *config.Config, box ProxyCore, opts Options, log *slog.Logger) *Co
 	opts.HostlistDir = absDir(opts.HostlistDir)
 	opts.ZapretFiles = absDir(opts.ZapretFiles)
 	opts.SingboxConfig = absDir(opts.SingboxConfig)
-	return &Core{conf: conf, reg: conf.Registry, box: box, opts: opts, log: log, detect: netid.Detect}
+	return &Core{
+		conf: conf, reg: conf.Registry, box: box, opts: opts, log: log,
+		detect: netid.Detect, pristineChains: snapshotChains(conf.Registry),
+	}
 }
 
 // Start generates the sing-box config, brings the box up, and launches the
@@ -499,7 +507,7 @@ func (c *Core) buildLoop() error {
 		rc := c.newReconciler()
 		runners = append(runners, func(rctx context.Context) { c.refreshLoop(rctx, rc, c.opts.RefreshEvery) })
 	}
-	runners = append(runners, c.observeLoop)
+	runners = append(runners, c.observeLoop, c.kbDecayLoop)
 	if len(c.conf.Hostlists) > 0 {
 		runners = append(runners, c.hostlistLoop)
 	}
@@ -556,6 +564,7 @@ func (c *Core) Reload(newConf *config.Config) error {
 	prevConf, prevReg := c.conf, c.reg
 	c.conf = newConf
 	c.reg = newConf.Registry
+	c.pristineChains = snapshotChains(newConf.Registry)
 	catalog := strategy.BuiltinCatalog()
 	for _, d := range newConf.Strategies {
 		catalog.Add(d)
@@ -761,6 +770,39 @@ func (c *Core) recaptureForNetwork(ctx context.Context) {
 		return
 	}
 	c.log.Info("roam: config regenerated for the new network")
+}
+
+// kbDecayInterval and kbDecayFactor mirror the daemon's: 0.95 every 15 minutes, a
+// ~3.4h half-life on observation counts.
+const (
+	kbDecayInterval = 15 * time.Minute
+	kbDecayFactor   = 0.95
+)
+
+// kbDecayLoop ages the knowledge base the way the daemon does, and — the part that
+// matters on a laptop — counts down the circuit breaker's quarantines.
+//
+// Only the router ever called Decay, so on the client a quarantine was PERMANENT: three
+// consecutive canary failures banished a (service, recipe) pair for the life of the
+// process. That is a lot on a machine that suspends, because every resume spends its
+// first half-minute with no route, every probe in that window fails, and the recipes
+// being blamed had nothing to do with it. Left alone, a few weeks of lid-opens quietly
+// quarantine every recipe that works on the home network — the tool slowly forgets what
+// it learned, and nothing says so.
+//
+// Decaying also lifts the exploration bonus on strategies nobody has retried lately, so
+// "worked before" gets re-validated instead of trusted forever.
+func (c *Core) kbDecayLoop(ctx context.Context) {
+	t := time.NewTicker(kbDecayInterval)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+			c.kb.Decay(kbDecayFactor)
+		}
+	}
 }
 
 // observeLoop refreshes the passive eye's snapshot each interval, feeding both the
@@ -1449,6 +1491,17 @@ func (c *Core) dropUnsupportedRungs(execs []executor.StrategyExecutor) {
 		have[e.Class()] = true
 	}
 	for name, svc := range c.reg.Services {
+		// Always trim from the PRISTINE chain, never from whatever the last pass left
+		// behind. Writing the trimmed chain back into the shared registry made the loss
+		// permanent: a rung dropped once because its executor happened to be
+		// unavailable — the desync engine gives up when there is no default route, which
+		// is exactly the state a laptop is in for the first seconds after a resume — was
+		// gone from the registry, so no later rebuild could ever bring it back. The
+		// desync stayed amputated until the process was restarted, and since the process
+		// does not exit, Restart=on-failure never fired either.
+		if orig, ok := c.pristineChains[name]; ok {
+			svc.Chain = orig
+		}
 		kept := make([]registry.ChainStep, 0, len(svc.Chain))
 		var dropped []string
 		for _, step := range svc.Chain {
@@ -1460,6 +1513,11 @@ func (c *Core) dropUnsupportedRungs(execs []executor.StrategyExecutor) {
 			dropped = append(dropped, step.StrategyClass)
 		}
 		if len(dropped) == 0 {
+			// Nothing to drop — but still write back, because the chain we just rebuilt
+			// came from the pristine copy and may be RESTORING rungs a previous pass
+			// trimmed. Skipping the write here was what made the restore never land.
+			svc.Chain = kept
+			c.reg.Services[name] = svc
 			continue
 		}
 		if len(kept) == 0 {
@@ -1478,6 +1536,15 @@ func (c *Core) dropUnsupportedRungs(execs []executor.StrategyExecutor) {
 		svc.Chain = kept
 		c.reg.Services[name] = svc
 	}
+}
+
+// snapshotChains records the chains as declared, before any host-capability trimming.
+func snapshotChains(reg *registry.Registry) map[string][]registry.ChainStep {
+	out := make(map[string][]registry.ChainStep, len(reg.Services))
+	for name, svc := range reg.Services {
+		out[name] = append([]registry.ChainStep(nil), svc.Chain...)
+	}
+	return out
 }
 
 // hasZapretStep reports whether any service declares a zapret chain step.
