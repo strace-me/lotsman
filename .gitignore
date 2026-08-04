@@ -2,8 +2,14 @@
 /bin/
 /lotsmand
 /lotsmanctl
+/lotsman-client
 *.elf
 *.bin
+# ...except the desync fake payloads, which are DATA, not build output: recorded
+# packets nixpkgs does not ship, and 11 recipes are useless without them. The blanket
+# *.bin above silently swallowed them once already — the commit went through with only
+# the README, describing files that were not there.
+!assets/zapret-payloads/*.bin
 
 # user data (lives in /etc/lotsman/, never in repo)
 /etc/
