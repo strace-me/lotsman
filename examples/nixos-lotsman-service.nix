@@ -40,7 +40,10 @@ let
   # exactly when the current winner stops working and breadth matters most.
   #
   # So: a directory that holds both. ExecStartPre refreshes the store's copies on every
-  # start (they follow the pinned package) and leaves anything else alone.
+  # start (they follow the pinned package) and leaves anything else alone. The three
+  # missing ones are vendored in the repo — see assets/zapret-payloads/README.md — and
+  # are installed there once:
+  #   sudo install -m0644 assets/zapret-payloads/*.bin /var/lib/lotsman-payloads/
   payloadDir = "/var/lib/lotsman-payloads";
   storePayloads = "${pkgs.zapret}/usr/share/zapret/files/fake";
   user = "operator"; # the desktop user whose unprivileged GUI/tray drives the service
