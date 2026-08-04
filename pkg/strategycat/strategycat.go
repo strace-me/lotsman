@@ -48,6 +48,10 @@ type Recipe struct {
 	Techniques  []string    `yaml:"techniques"`
 	NfqwsArgs   []string    `yaml:"nfqws_args"`
 	Notes       string      `yaml:"notes"`
+	// Consensus counts the independent bundles shipping this exact recipe.
+	// Set by pkg/strategyimport; absent (0) in the hand-curated catalog, where
+	// the same fact lives in Provenance as prose.
+	Consensus int `yaml:"consensus,omitempty"`
 }
 
 type catalog struct {
