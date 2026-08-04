@@ -29,6 +29,12 @@ type Box struct {
 
 	mu  sync.Mutex
 	cmd *exec.Cmd
+	// exited is closed by the reaper goroutine when THIS cmd has been waited on.
+	// Stopping waits on it instead of calling Wait() a second time: two waiters race
+	// for one exit status, so whichever loses reports "waitid: no child processes" —
+	// and that is precisely the log line that would otherwise name why a crash loop is
+	// crashing.
+	exited chan struct{}
 }
 
 var _ core.ProxyCore = (*Box)(nil)
@@ -126,11 +132,14 @@ func (b *Box) spawnLocked() error {
 		return fmt.Errorf("externalbox: sing-box run: %w", err)
 	}
 	b.cmd = cmd
+	exited := make(chan struct{})
+	b.exited = exited
 	if err := recordPid(b.pidFile, cmd.Process.Pid); err != nil {
 		b.log.Warn("could not record the sing-box pid (a crash will leave it running)", "err", err)
 	}
 	go func() {
 		err := cmd.Wait()
+		close(exited)
 		b.mu.Lock()
 		if b.cmd == cmd {
 			b.cmd = nil
@@ -150,15 +159,26 @@ func (b *Box) spawnLocked() error {
 // a graceful exit, and SIGKILL denies it that, leaving the host's routing altered
 // after we are gone. SIGKILL only as a backstop for a process that will not go.
 func (b *Box) stopLocked() {
-	if b.cmd != nil && b.cmd.Process != nil {
-		done := make(chan struct{})
-		go func() { b.cmd.Process.Wait(); close(done) }()
-		_ = b.cmd.Process.Signal(syscall.SIGTERM)
+	// Copy both out under the caller's lock. The old code read b.cmd from inside a
+	// goroutine while this function and the reaper were nilling it — an unsynchronised
+	// read of a pointer being written, i.e. a nil dereference away from taking the whole
+	// client down with it.
+	cmd, exited := b.cmd, b.exited
+	if cmd != nil && cmd.Process != nil {
+		_ = cmd.Process.Signal(syscall.SIGTERM)
 		select {
-		case <-done:
+		case <-exited: // the reaper already has the exit status; do not race it for one
 		case <-time.After(5 * time.Second):
 			b.log.Warn("sing-box did not exit on SIGTERM, killing it (its routes may survive)")
-			_ = b.cmd.Process.Kill()
+			_ = cmd.Process.Kill()
+			// Let the reaper finish so no zombie is left behind — but bounded. A process
+			// stuck in uninterruptible sleep cannot be killed, and blocking here forever
+			// would wedge the caller with b.mu held, taking the whole client with it.
+			select {
+			case <-exited:
+			case <-time.After(5 * time.Second):
+				b.log.Error("sing-box did not die after SIGKILL — leaving it and continuing", "pid", cmd.Process.Pid)
+			}
 		}
 		b.cmd = nil
 	}
