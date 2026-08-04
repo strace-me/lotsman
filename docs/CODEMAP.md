@@ -181,7 +181,7 @@ plus a thin unprivileged UI, since only the tun and the NFQUEUE rules need root.
   gateway's MAC, with fallbacks), so the KB is kept per network instead of pooled.
 - `client/scaffold` — write a working starter config from nothing but a
   subscription URL, or ship the curated `recommended.yaml`; first-run onboarding.
-- `client/desktop` — headless entrypoint.
+- `client/desktop` — headless entrypoint (the privileged service).
 - `client/gui` — the desktop window (Wails v2 + Svelte), its own module, linking
   only `client/control`: dashboard plus configurator sections (services,
   subscriptions, DNS, engines, strategies, lists).
