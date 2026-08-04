@@ -4,8 +4,10 @@ import (
 	"archive/zip"
 	"bytes"
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -97,4 +99,92 @@ func TestUnzipRejectsTraversal(t *testing.T) {
 	if err := unzip(raw, dir); err == nil {
 		t.Error("expected zip-slip rejection")
 	}
+}
+
+// The failure that has bitten three times: a release ships no -user exclude
+// lists, the extract is stateless, and the strategy script that requires them
+// stops starting — silently, because the nft rules carry `flags bypass`.
+func TestInstallCarriesOurStateIntoTheNewBundle(t *testing.T) {
+	base := t.TempDir()
+	old := filepath.Join(base, "flowseal-1.0.0")
+	mustMkdir(t, filepath.Join(old, "lists"))
+	mustWrite(t, filepath.Join(old, "lists", "ipset-exclude-user.txt"), "10.0.0.0/8\n")
+	mustWrite(t, filepath.Join(old, "lists", "list-general.txt"), "old-shipped\n")
+	link := filepath.Join(base, "flowseal-current")
+	if err := os.Symlink(old, link); err != nil {
+		t.Fatal(err)
+	}
+
+	i := NewFileInstaller(base)
+	// The new release ships list-general.txt but no -user file, like 1.10.0.
+	// Two top-level entries, like a real bundle: a single one would be stripped as
+	// a wrapper dir by the 1.9.9c defence and never land under lists/.
+	zipped := makeZip(t, map[string]string{
+		"lists/list-general.txt": "new-shipped\n",
+		"general.bat":            "@echo off\n",
+	})
+	if err := i.Install(context.Background(), Release{Tag: "1.1.0"}, zipped); err != nil {
+		t.Fatalf("install: %v", err)
+	}
+
+	newDir := filepath.Join(base, "flowseal-1.1.0")
+	if got := readFile(t, filepath.Join(newDir, "lists", "ipset-exclude-user.txt")); got != "10.0.0.0/8\n" {
+		t.Errorf("our exclude list was not carried forward, got %q", got)
+	}
+	// A file the release ships is the release's to own.
+	if got := readFile(t, filepath.Join(newDir, "lists", "list-general.txt")); got != "new-shipped\n" {
+		t.Errorf("carry-forward overwrote a shipped file: %q", got)
+	}
+	if target, _ := os.Readlink(link); target != newDir {
+		t.Errorf("symlink = %s, want %s", target, newDir)
+	}
+}
+
+// A bundle that does not pass verification must cost an unapplied update, never
+// a dead engine.
+func TestRejectedBundleLeavesTheWorkingOneInService(t *testing.T) {
+	base := t.TempDir()
+	old := filepath.Join(base, "flowseal-1.0.0")
+	mustMkdir(t, filepath.Join(old, "lists"))
+	link := filepath.Join(base, "flowseal-current")
+	if err := os.Symlink(old, link); err != nil {
+		t.Fatal(err)
+	}
+
+	i := NewFileInstaller(base)
+	i.Verify = func(dir string) error { return errors.New("nfqws would not start") }
+	err := i.Install(context.Background(), Release{Tag: "1.1.0"}, makeZip(t, map[string]string{"a.txt": "x", "b.txt": "y"}))
+	if err == nil {
+		t.Fatal("a rejected bundle was installed anyway")
+	}
+	if !strings.Contains(err.Error(), "staying on 1.0.0") {
+		t.Errorf("the error does not say what is still in service: %v", err)
+	}
+	if target, _ := os.Readlink(link); target != old {
+		t.Errorf("symlink moved to %s despite the rejection; want %s", target, old)
+	}
+}
+
+func mustMkdir(t *testing.T, p string) {
+	t.Helper()
+	if err := os.MkdirAll(p, 0o755); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func mustWrite(t *testing.T, p, body string) {
+	t.Helper()
+	mustMkdir(t, filepath.Dir(p))
+	if err := os.WriteFile(p, []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func readFile(t *testing.T, p string) string {
+	t.Helper()
+	b, err := os.ReadFile(p)
+	if err != nil {
+		t.Fatalf("read %s: %v", p, err)
+	}
+	return string(b)
 }

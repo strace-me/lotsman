@@ -125,6 +125,7 @@ func main() {
 		remediateHot    = flag.Bool("remediate-hot-reload", false, "LOT-34: apply reject-QUIC/ip-fallback by rewriting sing-box LOCAL rule_set toggle files (hot-reloaded, NO restart) instead of rebuilding+restarting sing-box (which drops ALL connections). Requires -remediate + -reconcile. The reconciler emits permanent rules matching the toggle rule_sets for tunnel-intended services. DEFAULT OFF.")
 		incidentLog     = flag.String("incident-log", "", "append armed-remediation lifecycle events (detected/applied/resolved/rolled-back/escalated) as JSONL to this path (empty = disabled)")
 		flowsealBase    = flag.String("flowseal-base", "/opt", "parent dir for Flowseal bundles (holds flowseal-current symlink)")
+		flowsealUpdate  = flag.Bool("flowseal-update", true, "auto-install new Flowseal releases. This has no off switch before now, and an unvalidated bundle swap has stopped the desync engine three times; set false to pin the bundle and update it by hand.")
 		reconcileSB     = flag.Bool("reconcile", false, "daemon owns the sing-box config: regenerate from config+subs and apply on structural change (needs -singbox-config + a config with subscriptions; -dry-run gates whether it actually applies)")
 		singboxConfig   = flag.String("singbox-config", "", "path to the sing-box config the daemon reconciles/owns")
 		singboxBin      = flag.String("singbox-bin", "sing-box", "sing-box binary used for `check`")
@@ -473,14 +474,27 @@ func main() {
 	runners := []func(context.Context){br.Run, ap.Run, eng.Run}
 	if *checkInterval > 0 {
 		pr := periodic.New(log)
-		upd := flowseal.NewUpdater(subscription.NewHTTPFetcher(), flowseal.NewFileInstaller(*flowsealBase))
-		pr.Add(periodic.Task{Name: "flowseal-update", Interval: *checkInterval, Fn: func(c context.Context) error {
-			out, err := upd.CheckAndUpdate(c)
-			if err == nil {
-				log.Info("flowseal check", "current", out.Current, "latest", out.Latest, "updated", out.Updated)
-			}
-			return err
-		}})
+		if *flowsealUpdate {
+			upd := flowseal.NewUpdater(subscription.NewHTTPFetcher(), flowseal.NewFileInstaller(*flowsealBase))
+			pr.Add(periodic.Task{Name: "flowseal-update", Interval: *checkInterval, Fn: func(c context.Context) error {
+				out, err := upd.CheckAndUpdate(c)
+				if err == nil {
+					// Swapping the bundle under a running engine is the single
+					// riskiest thing this daemon does unprompted, so say so at
+					// the moment it happens rather than leaving it to be
+					// reconstructed from directory mtimes weeks later.
+					if out.Updated {
+						log.Warn("flowseal bundle REPLACED — the desync engine now runs a new release",
+							"from", out.Current, "to", out.Latest)
+					} else {
+						log.Info("flowseal check", "current", out.Current, "latest", out.Latest, "updated", false)
+					}
+				}
+				return err
+			}})
+		} else {
+			log.Info("flowseal auto-update disabled; the installed bundle is pinned", "base", *flowsealBase)
+		}
 		if conf != nil && len(conf.Subscriptions) > 0 {
 			pr.Add(periodic.Task{Name: "subscription-refresh", Interval: *checkInterval, Fn: func(c context.Context) error {
 				ui := loadPools(c, conf, log)
