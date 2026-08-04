@@ -128,13 +128,13 @@ aggregate: subscription          applier: events executor          balancer: qua
 blockcheck: strategy             brain: anomaly audit events policy registry strategy
 burstprobe: quality              coherence: registry strategy
 config: aggregate dataplane pools registry strategy subscription zapret
-dataplane: events quality stunprobe   desynctune: desyncgen tester   executor: dataplane registry strategy
+dataplane: events quality registry strategy stunprobe   desynctune: desyncgen tester   executor: dataplane registry strategy
 flowseal: subscription           kb: strategy
 metrics: brain misroute noderank observe remediate subscription
 misroute: observe                nfqwsgen: aggregate strategycat    noderank: balancer dataplane quality
 observe: registry                pathhealth: dataplane registry strategy   policy: anomaly
 pools: subscription              probing: dataplane events faillog kb registry
-reconcile: executor pools registry singbox subscription
+reconcile: pools registry singbox subscription
 registry: strategy               remctl: incident misroute remediate singbox   remediate: iplearn misroute
 rulesets: aggregate              scoring: kb   singbox: affinity pools registry subscription   stunprobe: quality
 tester: quality                  tspu: strategy   tuner: quality   vpnbalance: balancer dataplane quality
@@ -158,7 +158,13 @@ plus a thin unprivileged UI, since only the tun and the NFQUEUE rules need root.
 
 - `client/core` — spine composition (bus/kb/brain/applier/probing), client config
   generation, preflight refusals, subscription reconcile, box supervisor, canary
-  verdicts into the KB, unix control socket.
+  verdicts into the KB, the rich `/status` report, domain-pack refresh, DNS
+  auto-failover, a per-network KB that follows a roam, and the unix control
+  socket — group-ownable (0660) so an unprivileged UI can drive a root service,
+  owner-only 0600 by default.
+- `client/control` — dependency-light client for that socket; the window and the
+  tray talk to the service ONLY through this, so an unprivileged UI never links
+  the engine.
 - `client/platform/externalbox` — `ProxyCore` over an external sing-box run as a
   managed child; pid recorded so a SIGKILLed client's orphan is reclaimed.
 - `client/platform/nfqws` — zapret desync on Linux: nft NFQUEUE rules via
@@ -167,7 +173,23 @@ plus a thin unprivileged UI, since only the tun and the NFQUEUE rules need root.
 - `client/platform/rulesets` — provisions the `.srs` the config references from the
   same upstream bundle the router's updater consumes, and decompiles them back to
   domains so the desync covers what sing-box routes.
+- `client/platform/hostdns` — point the host's OWN resolver at an in-tun sentinel
+  so its DNS stops escaping past the deliberately-excluded LAN resolver; the
+  original is stashed in a sidecar so even a crash restores it. Linux+root+tun,
+  off by default.
+- `client/platform/netid` — short stable id for the attached network (the default
+  gateway's MAC, with fallbacks), so the KB is kept per network instead of pooled.
+- `client/scaffold` — write a working starter config from nothing but a
+  subscription URL, or ship the curated `recommended.yaml`; first-run onboarding.
 - `client/desktop` — headless entrypoint.
+- `client/gui` — the desktop window (Wails v2 + Svelte), its own module, linking
+  only `client/control`: dashboard plus configurator sections (services,
+  subscriptions, DNS, engines, strategies, lists).
+- `client/tray` — the systray companion, a separate unprivileged process and its
+  own module: polls `/status`, recolours the sextant by verdict, Open / Stop / Quit.
+- `client/mobile` — the only surface Kotlin touches, bound with gomobile over
+  libbox; its own module so sing-box's dependency graph never reaches the root
+  one. The VpnService shell lives in `android/`.
 
 ## Other durable state
 
