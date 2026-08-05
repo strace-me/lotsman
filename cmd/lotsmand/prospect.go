@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"sync"
 	"time"
 
 	"github.com/strace-me/lotsman/pkg/brain"
@@ -33,37 +34,53 @@ import (
 // at a time with a long cooldown, and the search itself runs in a sandbox whose
 // engine no real traffic ever reaches.
 type prospector struct {
-	reg      *registry.Registry
-	brain    *brain.Brain
-	clash    *dataplane.ClashClient
-	store    *prospect.Store
-	gate     *desynctune.Gate
-	sandbox  *zapret.Sandbox
-	probeVia string // socks addr the measurements dial through
+	reg     *registry.Registry
+	brain   *brain.Brain
+	clash   *dataplane.ClashClient
+	store   *prospect.Store
+	gate    *desynctune.Gate
+	sandbox *zapret.Sandbox
+	// probeVia is used only for the link-health baseline, which asks whether the
+	// box reaches the internet at all. The candidate measurements are direct and
+	// marked — see dataplane.MarkedClient.
+	probeVia string
 	// healthURL is the baseline every strategy is measured against: can this box
 	// reach the internet with no desync at all. It gates the collapse detector.
 	healthURL      string
 	collapseWindow time.Duration
 	collapseMin    int
 	log            *slog.Logger
+
+	mu          sync.Mutex
+	lastDecline map[string]time.Time
 }
 
 // run performs at most one pass. It is a periodic.Task body: refusing is the
 // normal outcome and must never be an error, or a quiet box would log a failure
 // every tick.
 func (p *prospector) run(ctx context.Context) error {
-	if dataplane.RealtimeActive(ctx, p.clash) {
-		return nil // somebody is playing; the search can wait hours
+	// Every refusal says which one it was, at INFO and throttled. Debug would have
+	// been invisible by default, which is how this was diagnosed by hand on the
+	// box; unthrottled INFO would make a permanently-busy link produce a line
+	// every tick forever. Once per reason, then once an hour, is enough to tell a
+	// feature that is deferring from one that is dead — and those looked identical
+	// from outside, which is the ambiguity that hid a month-long outage here.
+	if busy, why := dataplane.RealtimeActiveWhy(ctx, p.clash); busy {
+		p.declined("link busy", why)
+		return nil
 	}
 	p.checkCollapse(ctx)
 	svc, ok := p.pick()
 	if !ok {
+		p.declined("no service on a zapret rung", "nothing to search a desync for")
 		return nil
 	}
 	release, ok := p.gate.Begin(svc.Name)
 	if !ok {
+		p.declined("gate closed", "a pass ran recently, or one is running now")
 		return nil
 	}
+	p.log.Info("prospect: starting a pass", "service", svc.Name)
 	defer release()
 	defer func() {
 		if err := p.sandbox.Close(ctx); err != nil {
@@ -95,7 +112,10 @@ func (p *prospector) run(ctx context.Context) error {
 		seed = m
 		p.log.Info("prospect: searching around a proven strategy", "service", svc.Name)
 	}
-	res, err := desynctune.TwoPhase(ctx, engine, desynctune.Candidates(engine, seed, 48),
+	cands := desynctune.Candidates(engine, seed, 48)
+	p.log.Info("prospect: search space", "service", svc.Name, "candidates", len(cands),
+		"seeded", seed != nil)
+	res, err := desynctune.TwoPhase(ctx, engine, cands,
 		p.sandbox.Apply, cheap, burst, 2*time.Second, 6, tester.ThroughputConfig())
 	if err != nil {
 		p.log.Warn("prospect: pass failed", "service", svc.Name, "err", err)
@@ -117,6 +137,24 @@ func (p *prospector) run(ctx context.Context) error {
 	p.log.Info("prospect: strategy won a pass", "service", svc.Name, "id", id,
 		"confirmed", len(p.store.Recipes()), "pending", p.store.Pending())
 	return nil
+}
+
+// declined reports a refusal the first time it happens and at most hourly after,
+// so a box with a permanently busy link says so without filling the log.
+func (p *prospector) declined(reason, detail string) {
+	p.mu.Lock()
+	last, seen := p.lastDecline[reason]
+	now := time.Now()
+	if seen && now.Sub(last) < time.Hour {
+		p.mu.Unlock()
+		return
+	}
+	if p.lastDecline == nil {
+		p.lastDecline = map[string]time.Time{}
+	}
+	p.lastDecline[reason] = now
+	p.mu.Unlock()
+	p.log.Info("prospect: no pass this tick", "reason", reason, "detail", detail)
 }
 
 // checkCollapse notices when several proven strategies stopped working at once.
@@ -215,7 +253,7 @@ func (p *prospector) probe(svc registry.Service, target int64) tester.Probe {
 		if url == "" {
 			return quality.Quality{}
 		}
-		return burstprobe.Probe(ctx, dataplane.MarkedClient(zapret.TuneMark, p.probeVia, 15*time.Second),
+		return burstprobe.Probe(ctx, dataplane.MarkedClient(zapret.TuneMark, 15*time.Second),
 			[]string{url}, target, 1)
 	}
 }
