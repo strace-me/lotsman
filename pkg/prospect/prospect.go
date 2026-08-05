@@ -142,6 +142,25 @@ func (s *Store) Recipes() []strategycat.Recipe {
 	return out
 }
 
+// Leads are findings that have won but are not confirmed yet. They must be
+// re-tested DELIBERATELY: a discovery pass generates its candidates fresh each
+// time, so a lead that is never offered again never earns its second win and the
+// store fills with strategies that are permanently one measurement short.
+func (s *Store) Leads() []Finding {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	var out []Finding
+	for _, f := range s.all {
+		if !f.Confirmed() && f.Fails < demoteAt {
+			out = append(out, *f)
+		}
+	}
+	// Oldest first: a lead that has waited longest is the one whose evidence is
+	// going stalest.
+	sort.Slice(out, func(i, j int) bool { return out[i].LastWin.Before(out[j].LastWin) })
+	return out
+}
+
 // Pending is the leads: found once, not yet confirmed. For logs and the UI.
 func (s *Store) Pending() int {
 	s.mu.Lock()
