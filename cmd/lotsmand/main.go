@@ -303,6 +303,11 @@ func main() {
 	// refuses leaves it dead — invisibly, since nft's `flags bypass` keeps traffic
 	// flowing undesynced — and the switcher records it as current anyway. With it,
 	// a refused strategy rolls back to the last one the engine was seen running.
+	if !*dryRun && conf != nil && len(conf.Zapret) == 0 {
+		// Silently skipping a safety feature is how a switch that leaves the
+		// engine dead goes unnoticed. Say what is missing and what it costs.
+		log.Warn("zapret switches are NOT verified: the config declares no `zapret:` instance, so there is no queue to check liveness on — a strategy the engine refuses will leave it down instead of rolling back")
+	}
 	if !*dryRun && conf != nil && len(conf.Zapret) > 0 {
 		qnum := conf.Zapret[0].QNum
 		zapretEx.VerifyWith(func(context.Context) bool { return nfqueueBound(qnum) })
@@ -658,6 +663,11 @@ func main() {
 		}
 		// The prospector needs the composer's pool refresher, so it is started
 		// after it — a finding is only useful once it can reach the pool.
+		if *desyncProspect && (conf == nil || len(conf.Zapret) == 0) {
+			// The flag was accepted and would have done nothing. A feature asked
+			// for and quietly not delivered is worse than one that refuses.
+			log.Error("desync prospecting requested but NOT started: the config declares no `zapret:` instance, and the sandbox needs its queue number to avoid colliding with production. Add a zapret: section naming the live qnum.")
+		}
 		if *desyncProspect && prospectStoreRef != nil && conf != nil && len(conf.Zapret) > 0 {
 			inst := conf.Zapret[0]
 			pp := &prospector{
