@@ -64,6 +64,14 @@ func (p *prospector) run(ctx context.Context) error {
 		}
 	}()
 
+	// A lead first, always. A discovery pass generates candidates fresh, so a
+	// strategy that won once may never be offered again — and would sit at one
+	// measurement forever while the store looked busy. Confirming is also the
+	// cheaper pass: a handful of known arms rather than a grid of fifty.
+	if leads := p.store.Leads(); len(leads) > 0 {
+		return p.verify(ctx, svc, leads)
+	}
+
 	engine := zapret.NfqwsEngine{}
 	// Cheap first over everything, volume only over the survivors. Both probes
 	// dial the same path a service would, so a strategy that wins here won on
@@ -92,6 +100,44 @@ func (p *prospector) run(ctx context.Context) error {
 	// and not a decision.
 	p.log.Info("prospect: strategy won a pass", "service", svc.Name, "id", id,
 		"confirmed", len(p.store.Recipes()), "pending", p.store.Pending())
+	return nil
+}
+
+// verify re-measures leads against the no-desync baseline. A lead that wins here
+// is confirmed by the store and joins the pool; one that loses is recorded as
+// such, and enough losses drop it — a strategy that cannot repeat was luck, and
+// luck is exactly what the second pass exists to catch.
+func (p *prospector) verify(ctx context.Context, svc registry.Service, leads []prospect.Finding) error {
+	baseline := tester.Arm{ID: "no-desync", Apply: func(c context.Context) error { return p.sandbox.Apply(c, nil) }}
+	arms := make([]tester.Arm, 0, len(leads))
+	for _, f := range leads {
+		args := append([]string(nil), f.Args...)
+		arms = append(arms, tester.Arm{ID: f.ID, Apply: func(c context.Context) error { return p.sandbox.Apply(c, args) }})
+	}
+	v, trials, err := tester.Resolve(ctx, baseline, arms, p.probe(svc, 64<<10), 2*time.Second, tester.ThroughputConfig())
+	if err != nil {
+		p.log.Warn("prospect: verification pass failed", "service", svc.Name, "err", err)
+		return nil
+	}
+	byID := map[string][]string{}
+	for _, f := range leads {
+		byID[f.ID] = f.Args
+	}
+	for _, t := range trials {
+		// Only the winner is credited. Crediting every arm that merely connected
+		// would confirm strategies on the strength of a link that was working
+		// anyway, which is the whole failure the second pass exists to prevent.
+		if t.RecipeID == v.RecipeID && v.Outcome == tester.OutcomeRecipe {
+			p.store.Won(t.RecipeID, byID[t.RecipeID], svc.Name)
+			continue
+		}
+		p.store.Lost(t.RecipeID)
+	}
+	if err := p.store.Save(); err != nil {
+		p.log.Warn("prospect: could not persist verification", "err", err)
+	}
+	p.log.Info("prospect: verified leads", "service", svc.Name, "tested", len(trials),
+		"winner", v.RecipeID, "confirmed", len(p.store.Recipes()), "pending", p.store.Pending())
 	return nil
 }
 
