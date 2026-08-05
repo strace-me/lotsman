@@ -322,6 +322,34 @@ func expandVars(body string, vars map[string]string) string {
 	})
 }
 
+// Program returns the engine binary a script invokes — the last token before its
+// first flag, with the launcher noise (exec, quotes) removed. Blocks throws this
+// away on purpose, since a recipe is not tied to a binary; a canary that means to
+// run the very command production runs needs it back.
+func Program(src Source) string {
+	body := string(src.Body)
+	switch src.Kind {
+	case KindBat:
+		body = expandBatchVars(joinContinuations(body, "^"), batchAssignments(joinContinuations(body, "^")))
+	default:
+		joined := joinContinuations(body, `\`)
+		body = expandVars(joined, assignments(joined))
+	}
+	loc := firstFlag.FindStringIndex(body)
+	if loc == nil {
+		return ""
+	}
+	fields := strings.Fields(body[:loc[0]])
+	for i := len(fields) - 1; i >= 0; i-- {
+		tok := strings.Trim(fields[i], `"'`)
+		if tok == "" || tok == "exec" || strings.HasPrefix(tok, "$") {
+			continue
+		}
+		return tok
+	}
+	return ""
+}
+
 // argsAfterInvocation drops everything before the first flag, which is the
 // program and how it was launched, and keeps the rest.
 func argsAfterInvocation(s string) string {

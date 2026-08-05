@@ -18,6 +18,7 @@ import (
 	"context"
 	"errors"
 	"flag"
+	"fmt"
 	"log/slog"
 	"net"
 	"net/http"
@@ -84,62 +85,63 @@ var version = "dev"
 
 func main() {
 	var (
-		configPath      = flag.String("config", "", "path to YAML config (registry+subscriptions+pools); empty = builtin youtube only")
-		dryRun          = flag.Bool("dry-run", true, "log data-plane actions instead of executing them")
-		simulate        = flag.Bool("simulate", false, "use a scripted prober timeline instead of real HTTP probes")
-		interval        = flag.Duration("interval", 5*time.Minute, "probe period")
-		duration        = flag.Duration("duration", 0, "run for this long then exit (0 = until SIGINT)")
-		clashBase       = flag.String("clash-base", "http://127.0.0.1:9090", "sing-box clash-api base URL")
-		probeProxy      = flag.String("probe-proxy", "", "SOCKS5 host:port (sing-box socks inbound) to route probes through, so box probes follow the LAN path; empty = probe direct")
-		vpnSelector     = flag.String("vpn-selector", "", "Clash selector tag to actively rebalance across its concrete nodes (empty = off); needs -check-interval and a selector outbound in sing-box")
-		vpnProbeURL     = flag.String("vpn-probe-url", "https://www.gstatic.com/generate_204", "URL for per-node Clash /delay health checks used by -vpn-selector")
-		nodeRank        = flag.Bool("noderank", false, "per-service node ranker: probe each VPN-pool node THROUGH the service's own URL and pin sel-<svc> to the best (country-narrowed); off = pools ride plain url-test")
-		clashSecret     = flag.String("clash-secret", "", "clash-api secret")
-		zapretDir       = flag.String("zapret-script-dir", "/opt/zapret-lotsman", "dir holding <strategy>.sh nfqws launchers")
-		zapretActive    = flag.String("zapret-active-link", "/opt/zapret-lotsman/active.sh", "symlink the nfqws init runs (Lotsman repoints it)")
-		zapretInit      = flag.String("zapret-init", "/etc/init.d/nfqws", "nfqws init script to restart on strategy switch")
-		byedpiDir       = flag.String("byedpi-script-dir", "/opt/byedpi-lotsman", "dir holding <strategy>.sh byedpi launchers")
-		byedpiActive    = flag.String("byedpi-active-link", "/opt/byedpi-lotsman/active.sh", "symlink the byedpi init runs")
-		byedpiInit      = flag.String("byedpi-init", "/etc/init.d/byedpi", "byedpi init script to restart on strategy switch")
-		auditLog        = flag.String("audit-log", "", "append state transitions as JSONL to this path (empty = disabled)")
-		failLog         = flag.String("fail-log", "", "append individual probe failures as JSONL to this path for later review (empty = disabled)")
-		metricsAddr     = flag.String("metrics-addr", "", "expose Prometheus /metrics on this addr, e.g. 127.0.0.1:9101 (empty = disabled)")
-		stateFile       = flag.String("state-file", "", "persist/restore chain positions to this JSON file (empty = disabled)")
-		kbFile          = flag.String("kb-file", "", "persist/restore learned strategy success (KB) to this JSON file so experience survives restart (empty = disabled)")
-		remMemFile      = flag.String("remediation-memory", "", "persist/restore learned remediation outcomes (LOT-19) to this JSON file so the controller recalls known-working remediations across restarts (empty = in-memory only)")
-		strategyCatalog = flag.String("strategy-catalog-file", "", "load blockcheck-discovered zapret strategies (LOT-10a) from this JSON file, written by `lotsmanctl harvest -out`; they join the catalog the KB ranks over (empty = builtin+config only)")
-		zapretCompose   = flag.Bool("zapret-compose", false, "PROPOSE-ONLY (LOT-10b): on -check-interval, compose a per-rule nfqws config from the services currently on a zapret rung and LOG what it would switch to (semantic-diff, only on change). Does NOT touch the live nfqws strategy. Needs a config.")
-		zapretArm       = flag.Bool("zapret-arm", false, "ARM the per-rule nfqws composer (LOT-10b-arm): it becomes the SINGLE WRITER of the nfqws strategy (symlink+restart) with a canary + rollback-to-last-good and KB feedback; the zapret executor yields strategy-switching to it. DEFAULT OFF. Requires -zapret-compose; ignored under -dry-run (stays propose-only).")
-		engineHealth    = flag.Bool("engine-health", false, "engine watchdog (LOT-33): when the WAN is up but a data-plane engine is WEDGED (sing-box can't route / nfqws not desyncing), restart it. Self-heals the cold-boot race (engines up before WAN) regardless of boot order. DEFAULT OFF.")
-		engineHealthInt = flag.Duration("engine-health-interval", time.Minute, "engine-health watchdog check period")
-		engineHealthCan = flag.String("engine-health-nfqws-canary", "", "a DPI'd URL probed via -probe-proxy to verify nfqws is desyncing (empty = nfqws check off; sing-box check is always on with -engine-health). e.g. https://discord.com/api/v9/gateway")
-		pathHealth      = flag.Bool("path-health", false, "escalation-v2 DETECT (LOT-33-design E-1, PROPOSE-ONLY): fan-out probe of EVERY chain step out-of-band (box-direct for zapret/direct, clash NodeDelay for vpn/emergency) and LOG the best working tier vs current position. Changes nothing. DEFAULT OFF.")
-		pathHealthInt   = flag.Duration("path-health-interval", time.Minute, "path-health detect period (escalation-v2 E-1)")
-		pathHealthURL   = flag.String("path-health-test-url", "http://www.gstatic.com/generate_204", "generic connectivity URL for the vpn-tier NodeDelay probe of non-HTTP (tcp/stun) services")
-		captureLearn    = flag.Bool("capture-learn", false, "TM-5 PROPOSE-ONLY: learn NAT-sensitive flows (game/voice UDP) from clash connections and reconcile the capture nft table (Lotsman-owned tproxy) with bypass `return` rules for them. Logs what it would change; does NOT apply (no -capture-arm yet). DEFAULT OFF.")
-		captureRuleset  = flag.String("capture-ruleset-file", "/etc/nftables.d/10-lotsman-capture.nft", "path the capture reconciler writes the generated nft table to (only when armed)")
-		captureArm      = flag.Bool("capture-arm", false, "ARM the capture reconciler (TM-2c): it becomes the single writer of the tproxy nft table — validate (nft -c) → backup → atomic add+delete+recreate (nft -f) → rollback on failure. Requires -capture-learn; DEFAULT OFF (propose-only).")
-		pathHealthAct   = flag.Bool("path-health-act", false, "escalation-v2 ACT (E-2): let Brain escalate straight to the best WORKING tier from the path-health detector (skip known-down rungs) instead of one rung at a time. Requires -path-health. DEFAULT OFF.")
-		smart           = flag.Bool("smart", true, "enable the intelligence layer (policy/correlate/damper/adaptive/anomaly) in escalation decisions")
-		checkInterval   = flag.Duration("check-interval", 0, "run background maintenance (Flowseal update, subscription refresh) every interval (0 = disabled)")
-		observeInterval = flag.Duration("observe-interval", 30*time.Second, "run the passive-observation eye (observe/detect/propose, PROPOSE-ONLY) every interval, independent of -check-interval (0 = disabled)")
-		remediateArm    = flag.Bool("remediate", false, "ARM the self-heal remediation ladder (LOT-18b): the observe loop AUTO-APPLIES remediations to the live sing-box config with canary+auto-rollback. DEFAULT OFF = propose-only. Requires -reconcile + -singbox-config; refuses to arm otherwise. -dry-run still gates whether reconcile actually writes.")
-		remediateHot    = flag.Bool("remediate-hot-reload", false, "LOT-34: apply reject-QUIC/ip-fallback by rewriting sing-box LOCAL rule_set toggle files (hot-reloaded, NO restart) instead of rebuilding+restarting sing-box (which drops ALL connections). Requires -remediate + -reconcile. The reconciler emits permanent rules matching the toggle rule_sets for tunnel-intended services. DEFAULT OFF.")
-		incidentLog     = flag.String("incident-log", "", "append armed-remediation lifecycle events (detected/applied/resolved/rolled-back/escalated) as JSONL to this path (empty = disabled)")
-		flowsealBase    = flag.String("flowseal-base", "/opt", "parent dir for Flowseal bundles (holds flowseal-current symlink)")
-		flowsealUpdate  = flag.Bool("flowseal-update", true, "auto-install new Flowseal releases. This has no off switch before now, and an unvalidated bundle swap has stopped the desync engine three times; set false to pin the bundle and update it by hand.")
-		reconcileSB     = flag.Bool("reconcile", false, "daemon owns the sing-box config: regenerate from config+subs and apply on structural change (needs -singbox-config + a config with subscriptions; -dry-run gates whether it actually applies)")
-		singboxConfig   = flag.String("singbox-config", "", "path to the sing-box config the daemon reconciles/owns")
-		singboxBin      = flag.String("singbox-bin", "sing-box", "sing-box binary used for `check`")
-		singboxRestart  = flag.String("singbox-restart", "/etc/init.d/sing-box restart", "command to restart sing-box (space-separated)")
-		reconcileBackup = flag.String("reconcile-backup-dir", "", "dir for pre-apply sing-box config backups (empty = no backup)")
-		reconcileBase   = flag.String("reconcile-baseline-file", "", "persist the reconcile anti-churn node-count baseline to this JSON file so the degraded-fetch guard survives restart (empty = in-memory only)")
-		rulesetsUpdate  = flag.Bool("rulesets-update", false, "Track A autoupdate: fetch the rule-set release, shrink-guard, swap changed .srs, trigger reconcile")
-		rulesetsRepo    = flag.String("rulesets-repo", "runetfreedom/russia-v2ray-rules-dat", "GitHub repo whose release ships sing-box.zip (.srs bundle)")
-		rulesetsPin     = flag.String("rulesets-pin", "", "pin a release tag (empty = track latest)")
-		rulesetsBump    = flag.Bool("rulesets-autobump", true, "evaluate latest even when pinned; move the pin only if it validates")
-		rulesetsRatio   = flag.Float64("rulesets-min-ratio", 0.7, "shrink guard: reject a tag dropping below this fraction of its last good count (0 = off)")
-		rulesetsDir     = flag.String("rulesets-dir", "/etc/sing-box", "rule-set root holding rule-set-{geosite,geoip}/*.srs")
+		configPath         = flag.String("config", "", "path to YAML config (registry+subscriptions+pools); empty = builtin youtube only")
+		dryRun             = flag.Bool("dry-run", true, "log data-plane actions instead of executing them")
+		simulate           = flag.Bool("simulate", false, "use a scripted prober timeline instead of real HTTP probes")
+		interval           = flag.Duration("interval", 5*time.Minute, "probe period")
+		duration           = flag.Duration("duration", 0, "run for this long then exit (0 = until SIGINT)")
+		clashBase          = flag.String("clash-base", "http://127.0.0.1:9090", "sing-box clash-api base URL")
+		probeProxy         = flag.String("probe-proxy", "", "SOCKS5 host:port (sing-box socks inbound) to route probes through, so box probes follow the LAN path; empty = probe direct")
+		vpnSelector        = flag.String("vpn-selector", "", "Clash selector tag to actively rebalance across its concrete nodes (empty = off); needs -check-interval and a selector outbound in sing-box")
+		vpnProbeURL        = flag.String("vpn-probe-url", "https://www.gstatic.com/generate_204", "URL for per-node Clash /delay health checks used by -vpn-selector")
+		nodeRank           = flag.Bool("noderank", false, "per-service node ranker: probe each VPN-pool node THROUGH the service's own URL and pin sel-<svc> to the best (country-narrowed); off = pools ride plain url-test")
+		clashSecret        = flag.String("clash-secret", "", "clash-api secret")
+		zapretDir          = flag.String("zapret-script-dir", "/opt/zapret-lotsman", "dir holding <strategy>.sh nfqws launchers")
+		zapretActive       = flag.String("zapret-active-link", "/opt/zapret-lotsman/active.sh", "symlink the nfqws init runs (Lotsman repoints it)")
+		zapretInit         = flag.String("zapret-init", "/etc/init.d/nfqws", "nfqws init script to restart on strategy switch")
+		byedpiDir          = flag.String("byedpi-script-dir", "/opt/byedpi-lotsman", "dir holding <strategy>.sh byedpi launchers")
+		byedpiActive       = flag.String("byedpi-active-link", "/opt/byedpi-lotsman/active.sh", "symlink the byedpi init runs")
+		byedpiInit         = flag.String("byedpi-init", "/etc/init.d/byedpi", "byedpi init script to restart on strategy switch")
+		auditLog           = flag.String("audit-log", "", "append state transitions as JSONL to this path (empty = disabled)")
+		failLog            = flag.String("fail-log", "", "append individual probe failures as JSONL to this path for later review (empty = disabled)")
+		metricsAddr        = flag.String("metrics-addr", "", "expose Prometheus /metrics on this addr, e.g. 127.0.0.1:9101 (empty = disabled)")
+		stateFile          = flag.String("state-file", "", "persist/restore chain positions to this JSON file (empty = disabled)")
+		kbFile             = flag.String("kb-file", "", "persist/restore learned strategy success (KB) to this JSON file so experience survives restart (empty = disabled)")
+		remMemFile         = flag.String("remediation-memory", "", "persist/restore learned remediation outcomes (LOT-19) to this JSON file so the controller recalls known-working remediations across restarts (empty = in-memory only)")
+		strategyCatalog    = flag.String("strategy-catalog-file", "", "load blockcheck-discovered zapret strategies (LOT-10a) from this JSON file, written by `lotsmanctl harvest -out`; they join the catalog the KB ranks over (empty = builtin+config only)")
+		zapretCompose      = flag.Bool("zapret-compose", false, "PROPOSE-ONLY (LOT-10b): on -check-interval, compose a per-rule nfqws config from the services currently on a zapret rung and LOG what it would switch to (semantic-diff, only on change). Does NOT touch the live nfqws strategy. Needs a config.")
+		zapretArm          = flag.Bool("zapret-arm", false, "ARM the per-rule nfqws composer (LOT-10b-arm): it becomes the SINGLE WRITER of the nfqws strategy (symlink+restart) with a canary + rollback-to-last-good and KB feedback; the zapret executor yields strategy-switching to it. DEFAULT OFF. Requires -zapret-compose; ignored under -dry-run (stays propose-only).")
+		engineHealth       = flag.Bool("engine-health", false, "engine watchdog (LOT-33): when the WAN is up but a data-plane engine is WEDGED (sing-box can't route / nfqws not desyncing), restart it. Self-heals the cold-boot race (engines up before WAN) regardless of boot order. DEFAULT OFF.")
+		engineHealthInt    = flag.Duration("engine-health-interval", time.Minute, "engine-health watchdog check period")
+		engineHealthCan    = flag.String("engine-health-nfqws-canary", "", "a DPI'd URL probed via -probe-proxy to verify nfqws is desyncing (empty = nfqws check off; sing-box check is always on with -engine-health). e.g. https://discord.com/api/v9/gateway")
+		pathHealth         = flag.Bool("path-health", false, "escalation-v2 DETECT (LOT-33-design E-1, PROPOSE-ONLY): fan-out probe of EVERY chain step out-of-band (box-direct for zapret/direct, clash NodeDelay for vpn/emergency) and LOG the best working tier vs current position. Changes nothing. DEFAULT OFF.")
+		pathHealthInt      = flag.Duration("path-health-interval", time.Minute, "path-health detect period (escalation-v2 E-1)")
+		pathHealthURL      = flag.String("path-health-test-url", "http://www.gstatic.com/generate_204", "generic connectivity URL for the vpn-tier NodeDelay probe of non-HTTP (tcp/stun) services")
+		captureLearn       = flag.Bool("capture-learn", false, "TM-5 PROPOSE-ONLY: learn NAT-sensitive flows (game/voice UDP) from clash connections and reconcile the capture nft table (Lotsman-owned tproxy) with bypass `return` rules for them. Logs what it would change; does NOT apply (no -capture-arm yet). DEFAULT OFF.")
+		captureRuleset     = flag.String("capture-ruleset-file", "/etc/nftables.d/10-lotsman-capture.nft", "path the capture reconciler writes the generated nft table to (only when armed)")
+		captureArm         = flag.Bool("capture-arm", false, "ARM the capture reconciler (TM-2c): it becomes the single writer of the tproxy nft table — validate (nft -c) → backup → atomic add+delete+recreate (nft -f) → rollback on failure. Requires -capture-learn; DEFAULT OFF (propose-only).")
+		pathHealthAct      = flag.Bool("path-health-act", false, "escalation-v2 ACT (E-2): let Brain escalate straight to the best WORKING tier from the path-health detector (skip known-down rungs) instead of one rung at a time. Requires -path-health. DEFAULT OFF.")
+		smart              = flag.Bool("smart", true, "enable the intelligence layer (policy/correlate/damper/adaptive/anomaly) in escalation decisions")
+		checkInterval      = flag.Duration("check-interval", 0, "run background maintenance (Flowseal update, subscription refresh) every interval (0 = disabled)")
+		observeInterval    = flag.Duration("observe-interval", 30*time.Second, "run the passive-observation eye (observe/detect/propose, PROPOSE-ONLY) every interval, independent of -check-interval (0 = disabled)")
+		remediateArm       = flag.Bool("remediate", false, "ARM the self-heal remediation ladder (LOT-18b): the observe loop AUTO-APPLIES remediations to the live sing-box config with canary+auto-rollback. DEFAULT OFF = propose-only. Requires -reconcile + -singbox-config; refuses to arm otherwise. -dry-run still gates whether reconcile actually writes.")
+		remediateHot       = flag.Bool("remediate-hot-reload", false, "LOT-34: apply reject-QUIC/ip-fallback by rewriting sing-box LOCAL rule_set toggle files (hot-reloaded, NO restart) instead of rebuilding+restarting sing-box (which drops ALL connections). Requires -remediate + -reconcile. The reconciler emits permanent rules matching the toggle rule_sets for tunnel-intended services. DEFAULT OFF.")
+		incidentLog        = flag.String("incident-log", "", "append armed-remediation lifecycle events (detected/applied/resolved/rolled-back/escalated) as JSONL to this path (empty = disabled)")
+		flowsealBase       = flag.String("flowseal-base", "/opt", "parent dir for Flowseal bundles (holds flowseal-current symlink)")
+		flowsealCanaryQNum = flag.Int("flowseal-canary-qnum", 299, "NFQUEUE the bundle canary binds; must be one no nft rule diverts to, so the canary sees no traffic")
+		flowsealUpdate     = flag.Bool("flowseal-update", true, "auto-install new Flowseal releases. This has no off switch before now, and an unvalidated bundle swap has stopped the desync engine three times; set false to pin the bundle and update it by hand.")
+		reconcileSB        = flag.Bool("reconcile", false, "daemon owns the sing-box config: regenerate from config+subs and apply on structural change (needs -singbox-config + a config with subscriptions; -dry-run gates whether it actually applies)")
+		singboxConfig      = flag.String("singbox-config", "", "path to the sing-box config the daemon reconciles/owns")
+		singboxBin         = flag.String("singbox-bin", "sing-box", "sing-box binary used for `check`")
+		singboxRestart     = flag.String("singbox-restart", "/etc/init.d/sing-box restart", "command to restart sing-box (space-separated)")
+		reconcileBackup    = flag.String("reconcile-backup-dir", "", "dir for pre-apply sing-box config backups (empty = no backup)")
+		reconcileBase      = flag.String("reconcile-baseline-file", "", "persist the reconcile anti-churn node-count baseline to this JSON file so the degraded-fetch guard survives restart (empty = in-memory only)")
+		rulesetsUpdate     = flag.Bool("rulesets-update", false, "Track A autoupdate: fetch the rule-set release, shrink-guard, swap changed .srs, trigger reconcile")
+		rulesetsRepo       = flag.String("rulesets-repo", "runetfreedom/russia-v2ray-rules-dat", "GitHub repo whose release ships sing-box.zip (.srs bundle)")
+		rulesetsPin        = flag.String("rulesets-pin", "", "pin a release tag (empty = track latest)")
+		rulesetsBump       = flag.Bool("rulesets-autobump", true, "evaluate latest even when pinned; move the pin only if it validates")
+		rulesetsRatio      = flag.Float64("rulesets-min-ratio", 0.7, "shrink guard: reject a tag dropping below this fraction of its last good count (0 = off)")
+		rulesetsDir        = flag.String("rulesets-dir", "/etc/sing-box", "rule-set root holding rule-set-{geosite,geoip}/*.srs")
 	)
 	flag.Parse()
 
@@ -503,7 +505,21 @@ func main() {
 	if *checkInterval > 0 {
 		pr := periodic.New(log)
 		if *flowsealUpdate {
-			upd := flowseal.NewUpdater(subscription.NewHTTPFetcher(), flowseal.NewFileInstaller(*flowsealBase))
+			inst := flowseal.NewFileInstaller(*flowsealBase)
+			// Before a bundle becomes the one in service, run the strategy we
+			// actually run against it — on a queue nothing diverts to, so the
+			// canary handles no traffic and only proves the engine accepts the
+			// new files. That is the failure that has taken the desync rung down
+			// three times, and it is invisible afterwards because nft's
+			// `flags bypass` keeps traffic flowing undesynced.
+			link := filepath.Join(*flowsealBase, "flowseal-current")
+			current, _ := filepath.EvalSymlinks(link)
+			canary := &flowseal.EngineCanary{
+				Script: *zapretActive, CurrentDir: current, LinkPath: link,
+				QNum: *flowsealCanaryQNum, Run: engineStarts, Log: log,
+			}
+			inst.Verify = canary.Verify
+			upd := flowseal.NewUpdater(subscription.NewHTTPFetcher(), inst)
 			pr.Add(periodic.Task{Name: "flowseal-update", Interval: *checkInterval, Fn: func(c context.Context) error {
 				out, err := upd.CheckAndUpdate(c)
 				if err == nil {
@@ -1416,4 +1432,31 @@ func demoTimeline(_ string, position int, elapsed time.Duration) (bool, int) {
 	default:
 		return position != 1, rtt
 	}
+}
+
+// engineStarts launches the desync engine and reports whether it was still alive
+// a moment later. nfqws validates its inputs AFTER startup — it re-reads its
+// hostlists once it has dropped privileges and exits if it cannot — so "the
+// process spawned" proves nothing and only survival does. On failure it returns
+// the engine's OWN output, because an exit status says nothing while nfqws says
+// exactly which file it could not read.
+func engineStarts(ctx context.Context, prog string, argv []string) error {
+	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, prog, argv...)
+	var said strings.Builder
+	cmd.Stdout, cmd.Stderr = &said, &said
+	if err := cmd.Start(); err != nil {
+		return fmt.Errorf("%s: %w", prog, err)
+	}
+	done := make(chan error, 1)
+	go func() { done <- cmd.Wait() }()
+	select {
+	case err := <-done:
+		return fmt.Errorf("engine exited immediately (%v): %s", err, strings.TrimSpace(said.String()))
+	case <-time.After(600 * time.Millisecond):
+	}
+	_ = cmd.Process.Kill()
+	<-done
+	return nil
 }
