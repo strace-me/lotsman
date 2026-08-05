@@ -7,6 +7,9 @@ NanoPi R5S) — и для десктопа: тот же control-plane работ
 или direct — когда что-то перестаёт работать. Роутер чинит себя сам, без ручных
 `blockcheck` и правок конфига.
 
+> **Working on this repo?** Read [`docs/START-HERE.md`](docs/START-HERE.md) first —
+> what the project is, where it stands, and the principles it derived the hard way.
+
 Сделан под российский интернет после 2024: цензор (ТСПУ) всё чаще **троттлит по IP
 назначения** (молча морозит зарубежные потоки после ~16 КБ), а не рвёт по SNI — а это
 режим, который одним DPI-десинком не лечится. Lotsman ловит такую заморозку из живой

@@ -87,6 +87,19 @@ loss silent.
 - **`test/live/run.sh`** runs the guarantees on the box itself. Its first run
   found four ways the harness lied and zero defects in the code.
 
+### Found immediately after deploying, not yet fixed
+
+- **The EMERGENCY rung is unreachable.** Four services have two-step chains ending
+  in EMERGENCY and there is no executor for that class; `social` escalated into it
+  and got `no executor for class`. `emergency_pool` is empty besides. Being
+  removed from the config rather than implemented — there is no always-working
+  exit to put behind it.
+- **CI fails on every push** with a 0s run and no jobs: a workflow-file problem
+  rather than a test failure.
+- **Rule-sets are still updated by the old cron**, which has no shrink guard, no
+  validation and no rollback — the three absences that caused the flowseal
+  outage. `pkg/rulesets` has all three and is simply not armed.
+
 ### Known limits
 
 The generator's 48 candidates are simpler than the recipes that actually work
