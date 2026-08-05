@@ -9,6 +9,7 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"time"
 )
 
 func testEngine(t *testing.T) *Engine {
@@ -130,6 +131,10 @@ func engineFor(t *testing.T) *Engine {
 	t.Helper()
 	e := &Engine{bin: fakeEngine(t), log: slog.New(slog.NewTextHandler(io.Discard, nil))}
 	e.inst.QNum = 200
+	// Long enough that a refusing process is certainly observed: at the
+	// production window this test races the fork on a loaded machine and reads a
+	// refusal as a success — which is the exact defect it exists to catch.
+	e.settle = 3 * time.Second
 	t.Cleanup(func() { e.mu.Lock(); e.stopProcessLocked(); e.mu.Unlock() })
 	return e
 }

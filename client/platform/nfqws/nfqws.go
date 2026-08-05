@@ -44,6 +44,19 @@ type Engine struct {
 	lastArgs []string
 	armed    bool   // nft table installed
 	crashLog string // file that unexpected exits are appended to; "" = log only
+	// settle is how long the engine must survive to count as started. nfqws
+	// validates its inputs AFTER dropping privileges, so this window is the
+	// measurement, not a courtesy — too short and a refusal is read as a success.
+	settle time.Duration
+}
+
+// SetSettle overrides how long a launch waits before calling the engine alive.
+// Exposed for tests, which otherwise race the default window on a loaded machine
+// and report a refusing engine as started.
+func (e *Engine) SetSettle(d time.Duration) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	e.settle = d
 }
 
 // New returns an Engine for one nfqws instance. bin "" resolves nfqws on PATH.
@@ -101,6 +114,13 @@ func (e *Engine) Apply(ctx context.Context, args []string) (restarted bool, err 
 	return true, nil
 }
 
+func (e *Engine) settleFor() time.Duration {
+	if e.settle > 0 {
+		return e.settle
+	}
+	return 400 * time.Millisecond
+}
+
 // launchLocked starts nfqws on args and reports whether it was still alive a
 // moment later. It records e.cmd/e.lastArgs only on success, so a failed attempt
 // leaves the engine's recorded identity matching whatever is actually running —
@@ -137,7 +157,7 @@ func (e *Engine) launchLocked(args []string) error {
 	select {
 	case err := <-done:
 		return fmt.Errorf("nfqws: engine exited immediately (%v): %s", err, said.String())
-	case <-time.After(400 * time.Millisecond):
+	case <-time.After(e.settleFor()):
 	}
 
 	e.cmd = cmd
