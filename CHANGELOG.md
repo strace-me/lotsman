@@ -1,11 +1,105 @@
 # Changelog
 
-All notable changes to Lotsman. Format loosely follows [Keep a Changelog]; dates are
-the branch's working dates, not tagged releases (nothing is tagged/released yet).
+All notable changes to Lotsman. Format loosely follows [Keep a Changelog]. Releases
+are tagged from v6.13 on; everything before that was a build-time string, so the
+older sections carry working dates rather than release dates.
 
-## [Unreleased] — branch `prerelease-fixes`
+## [v7.0] — 2026-08-05
 
-The desktop-client track and pre-release engine hardening. 128 commits ahead of `main`.
+**The box can find its own strategies.** v6 could only use recipes somebody else
+wrote; v7 searches for them, proves them against live DPI, and keeps what holds.
+
+Deployed to the R5S the same day, replacing v6.12 (which had been running since
+19 June). Backups of v6.12 live on the router, the ThinkPad and the Mac.
+
+### The tuner arm, wired end to end
+
+- **`zapret.Sandbox`** measures a candidate strategy on its own NFQUEUE while the
+  household keeps running on the incumbent. Isolation is a firewall mark: the
+  sandbox table queues only marked egress to the candidate engine, and the
+  production table (`GenerateNft`) now emits `meta mark 0x4554 return` ahead of
+  its queue rules so a marked probe is desynced exactly once. Both tables sit on
+  the same hook and both run — without that skip rule the probe would be desynced
+  twice and describe neither strategy.
+- **`desynctune.TwoPhase`** prescreens cheaply over every candidate and spends
+  volume only on the survivors. One pass cannot do both jobs: loss alone crowns a
+  recipe that connects and then crawls, throughput on all of them is tens of
+  minutes of uplink. Trials are strictly serial — a correctness requirement, since
+  parallel handshakes to one SNI provoke the freeze being measured.
+- **`desynctune.Gate`** admits one pass at a time (the sandbox is a singleton),
+  with a per-service cooldown and global spacing, stamped on release regardless of
+  outcome — a search that keeps failing is the worst case to hurry.
+- **`pkg/prospect`** accumulates what this box proved for itself. A win is a LEAD;
+  only a second win in a separate pass promotes it into the composer's pool, and
+  repeated losses drop it out. Leads are re-tested before anything new is
+  searched, because a discovery pass generates candidates fresh and a lead nobody
+  offers again never earns its second win.
+- The search **seeds from what has held** rather than a cold grid, and a
+  **correlated collapse** of proven strategies — gated on the link being otherwise
+  healthy — is read as the DPI having moved, which invalidates stale negative
+  evidence. The gate is the whole safety: a dead uplink fails everything at once
+  too, and a detector that could not tell them apart would erase months of
+  evidence during a five-minute outage.
+- Orphans are reclaimed at startup from the kernel's NFQUEUE table, since an
+  unclean stop leaves both a table and an engine, and procd restarts this daemon.
+
+### The bundle updater, which had stopped the engine for a month
+
+The R5S ran without `nfqws` for a month. The cause was not Flowseal: our own
+auto-updater had no flag, armed whenever `-check-interval` was positive, and
+repointed the bundle symlink with no validation. A bundle carries the release's
+artifact AND our state — the `-user` exclude lists nobody ships but the strategy
+script requires — so a stateless extract dropped them and `flags bypass` made the
+loss silent.
+
+- State is carried forward into the new bundle; a canary runs the production argv
+  against the candidate on a spare queue and keeps the working release in service
+  if it fails; `-flowseal-update` can pin the bundle.
+- **`pkg/strategyimport`** reads third-party bundles instead of transcribing them
+  by hand, so an update ADDS recipes rather than only risking the engine. One
+  normalizer over `.bat`, shell and markdown, since winws and nfqws share the flag
+  family. IDs derive from the normalized arguments so the KB keeps its history. On
+  the router: 67 curated + 79 read = 120 in the pool.
+
+### Everything else measured rather than assumed
+
+- A strategy the engine refuses **rolls back** instead of leaving it dead — on the
+  router verified against the live queue, on the client by keeping the previous
+  argv across the attempt.
+- The canary judges on **throughput**, not reachability: a path that connects and
+  then stalls is TSPU's signature failure, and the KB was being taught to prefer
+  frozen paths.
+- **Node ranking measures what a node carries.** A node under the volume freeze
+  answers a delay test in 40ms and carries nothing, so an RTT-only ranking crowned
+  the deadest exit in the pool.
+- Burst probes never run while a live UDP session is on the link, decided by
+  sampling the connection table twice and comparing rates — the first version
+  asked only whether a UDP flow existed, which an NTP exchange satisfies, and
+  would have deferred forever.
+- **Rule-set updates roll back by snapshot**, spanning the swap AND the reconcile
+  that validates it — the piece `docs/AUTOUPDATE.md` specified in June and the code
+  never had.
+- `nfqws`'s last words are recorded when it dies on its own, instead of a bare
+  exit status.
+- **One version, one build, every target** (`pkg/version`, `scripts/build.sh`).
+  There were no tags before this, and `cmd/lotsmand` held a `version = "dev"` that
+  nothing set.
+- **`test/live/run.sh`** runs the guarantees on the box itself. Its first run
+  found four ways the harness lied and zero defects in the code.
+
+### Known limits
+
+The generator's 48 candidates are simpler than the recipes that actually work
+here — the first live pass returned a truthful "no recipe beats baseline" against
+a blocked service. Seeding the search from the 120-recipe catalog rather than
+eight hand-written seeds is the next piece. The busy check is evaluated at the
+start of a pass, not during it. And the desktop client's suspend/resume has still
+never been tested.
+
+## v7.0 in detail — branch `prerelease-fixes`
+
+The full record behind the summary above: the desktop-client track and the
+pre-release engine hardening that preceded it. 137 commits ahead of `main`.
 Everything below is validated live — on a NixOS ThinkPad (sing-box 1.13.14) for the client
 work, on the R5S for the router work — unless noted. See `docs/DESIGN-client-ui.md` and
 `docs/DESIGN-dns-and-tun.md` for design + handoff.
