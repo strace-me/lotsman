@@ -41,7 +41,7 @@ the component split is mechanical (event contracts already separate them).
 - `pkg/reconcile` — daemon OWNS the sing-box routing config: compute desired (singbox.Generate) vs live, on real diff `sing-box check` + swap + backup/rollback. Owns structure, not steering. Dry-run by default. [Reconciler, Reconcile]
 
 ### Data plane
-- `pkg/dataplane` — Clash-API client (selector flip, pool reachability, /delay, /connections); ss tcp_info parsing. [ClashClient, SetSelector, Connection]
+- `pkg/dataplane` — Clash-API client (selector flip, pool reachability, /delay, /connections); ss tcp_info parsing. `BurstClient` gives pkg/burstprobe the probes' own network path; `RealtimeActive` reports a live UDP session so a burst probe never competes with a game. [ClashClient, SetSelector, Connection, BurstClient, RealtimeActive]
 - `pkg/executor` — adapt a strategy class to a concrete action; one StrategyExecutor per class, idempotent Enable. [StrategyExecutor, ScriptSwitcher (symlink+restart, backs nfqws & byedpi), SelectorSetter]
 - `pkg/applier` — converge production toward Brain's desired state; maps (class,strategy)→executor, runs idempotently, reports ActualState back (closes reconcile loop). Owns no policy. [Applier]
 - `pkg/capture` — TM-2: own the tproxy nft table (`table ip singbox`); byte-identical GenerateNft + reconcile vs `nft list table`. [Model, DefaultModel, GenerateNft, Runner]
@@ -70,7 +70,7 @@ the component split is mechanical (event contracts already separate them).
 - `pkg/scoring` — kb.Stats → single comparable number, weighted per category (latency alone misleads). ⛔ **NOT USED BY ANYTHING.** Superseded: `pkg/kb` already ranks strategies by outcome history, which is what this was for.
 - `pkg/affinity` — `Spread` is LIVE: deterministic per-client node spreading (LOT-23), called by `singbox.Generate`. The sticky-store half (`Store`/`Resolve` with TTL) is DEFERRED. [Spread (live), Store/Resolve (deferred)]
 - `pkg/ttl` — estimate hops-to-DPI for accurate fake-packet TTL (--dpi-desync-ttl); traceroute parser fallback, math pure. ⛔ **NOT USED BY ANYTHING.** No consumer computes a desync TTL from it; recipes carry `--dpi-desync-ttl` as a literal.
-- `pkg/noderank` — pick the best concrete VPN node FOR A SERVICE and pin its selector; narrows by exit country BEFORE probing (never pins a blocked service to a RU exit). [noderank.New]
+- `pkg/noderank` — pick the best concrete VPN node FOR A SERVICE and pin its selector; narrows by exit country BEFORE probing (never pins a blocked service to a RU exit). Optional `Goodput` hook ranks by THROUGHPUT, not just latency — a node under the TSPU volume freeze answers in 40ms and carries nothing, so RTT alone crowns the deadest exit. [noderank.New]
 - `pkg/selector` — choose which strategy to try next: prefer the class addressing the detected block type (tspu) + best learned score (KB). ⛔ **NOT USED BY ANYTHING.** Superseded by brain+kb, which make this choice live. [Candidate]
 - `pkg/tuner` — decision core of the "auto" knob mode: A/B OFF vs ON → keep ON only if it measurably helps (significance margin + hysteresis); pure. ⛔ **NOT USED BY ANYTHING.** Its A/B is what `pkg/tester` does, and tester is the one the v7 arm calls.
 

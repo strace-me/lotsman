@@ -121,6 +121,14 @@ func (c *Core) goodputOK(ctx context.Context, svc registry.Service) bool {
 	if target == "" || !strings.HasPrefix(target, "http") {
 		return true // nothing to pull volume from; the shallow verdict stands
 	}
+	// Not while someone is playing. A burst probe pulls real bytes down the very
+	// uplink it is measuring, so running it mid-session both spoils the session
+	// and mismeasures the path. Skipping costs one uncredited recipe; not
+	// skipping costs the household's game.
+	if dataplane.RealtimeActive(ctx, c.clash) {
+		c.log.Info("canary: live UDP session, not pulling volume", "service", svc.Name)
+		return true
+	}
 	q := burstprobe.Probe(ctx, dataplane.BurstClient(c.opts.ProbeProxy, 15*time.Second),
 		[]string{target}, c.opts.CanaryGoodputBytes, 1)
 	if q.Samples == 0 {

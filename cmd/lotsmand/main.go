@@ -40,6 +40,7 @@ import (
 	"github.com/strace-me/lotsman/pkg/audit"
 	"github.com/strace-me/lotsman/pkg/balancer"
 	"github.com/strace-me/lotsman/pkg/brain"
+	"github.com/strace-me/lotsman/pkg/burstprobe"
 	"github.com/strace-me/lotsman/pkg/bypasslearn"
 	"github.com/strace-me/lotsman/pkg/capture"
 	"github.com/strace-me/lotsman/pkg/config"
@@ -128,6 +129,8 @@ func main() {
 		remediateHot       = flag.Bool("remediate-hot-reload", false, "LOT-34: apply reject-QUIC/ip-fallback by rewriting sing-box LOCAL rule_set toggle files (hot-reloaded, NO restart) instead of rebuilding+restarting sing-box (which drops ALL connections). Requires -remediate + -reconcile. The reconciler emits permanent rules matching the toggle rule_sets for tunnel-intended services. DEFAULT OFF.")
 		incidentLog        = flag.String("incident-log", "", "append armed-remediation lifecycle events (detected/applied/resolved/rolled-back/escalated) as JSONL to this path (empty = disabled)")
 		flowsealBase       = flag.String("flowseal-base", "/opt", "parent dir for Flowseal bundles (holds flowseal-current symlink)")
+		nodeGoodputKBps    = flag.Float64("node-goodput", 1, "measure node THROUGHPUT while ranking, not just latency (a frozen node answers fast and carries nothing). 0 disables; probes are skipped whenever a live UDP session is on the link.")
+		nodeGoodputURL     = flag.String("node-goodput-url", "http://www.gstatic.com/generate_204", "URL the throughput measurement pulls from")
 		flowsealCanaryQNum = flag.Int("flowseal-canary-qnum", 299, "NFQUEUE the bundle canary binds; must be one no nft rule diverts to, so the canary sees no traffic")
 		flowsealUpdate     = flag.Bool("flowseal-update", true, "auto-install new Flowseal releases. This has no off switch before now, and an unvalidated bundle swap has stopped the desync engine three times; set false to pin the bundle and update it by hand.")
 		reconcileSB        = flag.Bool("reconcile", false, "daemon owns the sing-box config: regenerate from config+subs and apply on structural change (needs -singbox-config + a config with subscriptions; -dry-run gates whether it actually applies)")
@@ -257,6 +260,30 @@ func main() {
 	var bestNode func(string) string
 	if *nodeRank && conf != nil {
 		ranker = noderank.New(clash, 3, *dryRun, log)
+		// Rank nodes by what they CARRY, not only how fast they answer. A node
+		// under TSPU's volume freeze replies to a delay test in 40ms and then
+		// stops after a few tens of kilobytes, so a latency-only ranking crowns
+		// the deadest exit in the pool. This is the measurement that tells them
+		// apart — and it is the honest, in-scope half of the exit-IP question:
+		// we do not classify addresses, we measure nodes.
+		if *nodeGoodputKBps > 0 {
+			ranker.Goodput = func(ctx context.Context, node string) (float64, bool) {
+				// Never mid-session. The probe pulls real bytes down the uplink
+				// it is measuring, so running it while someone is playing both
+				// spoils the game and mismeasures the path.
+				if dataplane.RealtimeActive(ctx, clash) {
+					return 0, false
+				}
+				q := burstprobe.Probe(ctx, dataplane.BurstClient(*probeProxy, 15*time.Second),
+					[]string{*nodeGoodputURL}, 64<<10, 1)
+				if q.Samples == 0 {
+					return 0, false // measurement did not happen; no verdict
+				}
+				return q.GoodputKBps, true
+			}
+			log.Info("node ranking measures throughput, not just latency",
+				"min_kbps_note", "advisory only", "url", *nodeGoodputURL)
+		}
 		bestNode = ranker.Best
 	}
 
