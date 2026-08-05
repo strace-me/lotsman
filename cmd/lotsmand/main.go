@@ -47,6 +47,7 @@ import (
 	"github.com/strace-me/lotsman/pkg/correlate"
 	"github.com/strace-me/lotsman/pkg/damper"
 	"github.com/strace-me/lotsman/pkg/dataplane"
+	"github.com/strace-me/lotsman/pkg/desynctune"
 	"github.com/strace-me/lotsman/pkg/enginehealth"
 	"github.com/strace-me/lotsman/pkg/events"
 	"github.com/strace-me/lotsman/pkg/executor"
@@ -62,6 +63,7 @@ import (
 	"github.com/strace-me/lotsman/pkg/pathhealth"
 	"github.com/strace-me/lotsman/pkg/periodic"
 	"github.com/strace-me/lotsman/pkg/probing"
+	"github.com/strace-me/lotsman/pkg/prospect"
 	"github.com/strace-me/lotsman/pkg/reconcile"
 	"github.com/strace-me/lotsman/pkg/registry"
 	"github.com/strace-me/lotsman/pkg/remctl"
@@ -76,6 +78,7 @@ import (
 	"github.com/strace-me/lotsman/pkg/tspu"
 	"github.com/strace-me/lotsman/pkg/version"
 	"github.com/strace-me/lotsman/pkg/vpnbalance"
+	"github.com/strace-me/lotsman/pkg/zapret"
 	"github.com/strace-me/lotsman/pkg/zapretgen"
 	"github.com/strace-me/lotsman/pkg/zaptune"
 )
@@ -129,6 +132,13 @@ func main() {
 		remediateHot       = flag.Bool("remediate-hot-reload", false, "LOT-34: apply reject-QUIC/ip-fallback by rewriting sing-box LOCAL rule_set toggle files (hot-reloaded, NO restart) instead of rebuilding+restarting sing-box (which drops ALL connections). Requires -remediate + -reconcile. The reconciler emits permanent rules matching the toggle rule_sets for tunnel-intended services. DEFAULT OFF.")
 		incidentLog        = flag.String("incident-log", "", "append armed-remediation lifecycle events (detected/applied/resolved/rolled-back/escalated) as JSONL to this path (empty = disabled)")
 		flowsealBase       = flag.String("flowseal-base", "/opt", "parent dir for Flowseal bundles (holds flowseal-current symlink)")
+		desyncProspect     = flag.Bool("desync-prospect", false, "PROSPECT in the background: search for desync strategies this box can prove for itself, in a sandbox no real traffic reaches. Off by default — it runs a second engine.")
+		prospectFile       = flag.String("prospect-file", "", "where self-proven strategies accumulate (empty = in-memory, lost on restart, which defeats the point)")
+		prospectWAN        = flag.String("prospect-wan", "eth0", "WAN interface the sandbox table matches on")
+		prospectNfqws      = flag.String("prospect-nfqws", "nfqws", "engine binary the sandbox launches")
+		prospectFiles      = flag.String("prospect-files", "", "payload dir the sandbox engine runs in, so bare .bin filenames resolve")
+		prospectQNum       = flag.Int("prospect-qnum", 201, "NFQUEUE the sandbox engine binds; must differ from the production queue")
+		prospectInterval   = flag.Duration("prospect-interval", 30*time.Minute, "how often a prospecting pass is CONSIDERED; the gate and the idle check decide whether one actually runs")
 		nodeGoodputKBps    = flag.Float64("node-goodput", 1, "measure node THROUGHPUT while ranking, not just latency (a frozen node answers fast and carries nothing). 0 disables; probes are skipped whenever a live UDP session is on the link.")
 		nodeGoodputURL     = flag.String("node-goodput-url", "http://www.gstatic.com/generate_204", "URL the throughput measurement pulls from")
 		flowsealCanaryQNum = flag.Int("flowseal-canary-qnum", 299, "NFQUEUE the bundle canary binds; must be one no nft rule diverts to, so the canary sees no traffic")
@@ -536,6 +546,16 @@ func main() {
 	}
 	// Set by the composer once it exists; called again whenever a new bundle lands.
 	var refreshRecipePool func()
+	// Strategies this box proved for itself. Confirmed ones join the pool above.
+	var prospectStoreRef *prospect.Store
+	if *desyncProspect {
+		st, err := prospectStore(*prospectFile, log)
+		if err != nil {
+			log.Error("prospect: refusing to start", "err", err)
+			os.Exit(1)
+		}
+		prospectStoreRef = st
+	}
 
 	// Background maintenance loop (Flowseal update, subscription refresh).
 	runners := []func(context.Context){br.Run, ap.Run, eng.Run}
@@ -636,6 +656,29 @@ func main() {
 			pr.Add(periodic.Task{Name: "singbox-reconcile", Interval: *checkInterval, RunAtStart: true, Fn: reconcileMaintenance(rc)})
 			log.Info("sing-box config reconcile enabled", "path", *singboxConfig, "dry_run", *dryRun)
 		}
+		// The prospector needs the composer's pool refresher, so it is started
+		// after it — a finding is only useful once it can reach the pool.
+		if *desyncProspect && prospectStoreRef != nil && conf != nil && len(conf.Zapret) > 0 {
+			inst := conf.Zapret[0]
+			pp := &prospector{
+				reg: reg, brain: br, clash: clash, store: prospectStoreRef,
+				gate: &desynctune.Gate{},
+				sandbox: &zapret.Sandbox{
+					Opts: zapret.IsolateOptions{
+						Table: "inet lotsman_tune", WAN: *prospectWAN, QNum: *prospectQNum,
+						TCP: inst.Capture.TCP, UDP: inst.Capture.UDP,
+						Bytes: inst.Connbytes, Prio: -200,
+					},
+					Bin: *prospectNfqws, Dir: *prospectFiles, Run: executor.ExecRunner{},
+					Launch: zapret.ExecLauncher(0), ProdQNum: inst.QNum, Log: log,
+				},
+				probeVia: *probeProxy, log: log,
+			}
+			pr.Add(periodic.Task{Name: "desync-prospect", Interval: *prospectInterval, Fn: pp.run})
+			log.Info("desync prospecting enabled", "sandbox_qnum", *prospectQNum,
+				"production_qnum", inst.QNum, "interval", prospectInterval.String())
+		}
+
 		if *zapretCompose && conf != nil {
 			// Per-rule nfqws composer (LOT-10b), PROPOSE-ONLY: logs what it would
 			// switch nfqws to, never touches the live strategy (the executor still
@@ -662,9 +705,18 @@ func main() {
 			refreshRecipePool = func() {
 				extra := bundleRecipes()
 				merged := strategyimport.Merge(recipePool, extra)
+				// Our own findings go LAST so a bundle's version of the same
+				// argv keeps its curated id and the KB keeps its history.
+				var mine int
+				if prospectStoreRef != nil {
+					own := prospectStoreRef.Recipes()
+					mine = len(own)
+					merged = strategyimport.Merge(merged, own)
+				}
 				zr.SetRecipes(merged)
-				log.Info("recipe pool refreshed from the Flowseal bundle",
-					"curated", len(recipePool), "bundle_read", len(extra), "added", len(merged)-len(recipePool))
+				log.Info("recipe pool refreshed",
+					"curated", len(recipePool), "bundle_read", len(extra),
+					"self_proven", mine, "total", len(merged))
 			}
 			refreshRecipePool()
 			// TM-1b coherence resolver: rule_set(.srs) -> plaintext domains, so a
