@@ -137,3 +137,41 @@ func TestCloseStopsTheEngineEvenWhenTheTableWillNotDelete(t *testing.T) {
 		t.Errorf("err = %v, want the leftover named", err)
 	}
 }
+
+// The baseline arm applies no desync at all, and tester.Resolve runs it FIRST.
+// Rejecting it as an empty strategy killed the first live search on its first
+// step — the sandbox refused the one state every measurement is compared against.
+func TestBaselineIsNoEngineNotAnError(t *testing.T) {
+	r := &recRunner{}
+	launched := 0
+	s := sandboxFor(t, r, func(context.Context, string, string, []string) (func(), error) {
+		launched++
+		return func() {}, nil
+	})
+	ctx := context.Background()
+
+	if err := s.Apply(ctx, nil); err != nil {
+		t.Fatalf("the baseline was rejected: %v", err)
+	}
+	if launched != 0 {
+		t.Error("an engine was started for the no-desync baseline")
+	}
+	// The table must still be up: the probe is isolated by its MARK, and with no
+	// engine on the queue `flags bypass` passes marked packets through untouched.
+	if !strings.Contains(r.joined(), "nft -f") {
+		t.Errorf("the baseline did not install the sandbox table: %s", r.joined())
+	}
+
+	// And a candidate after a baseline still starts.
+	if err := s.Apply(ctx, []string{"--dpi-desync=fake"}); err != nil {
+		t.Fatal(err)
+	}
+	if launched != 1 {
+		t.Errorf("candidate launches = %d, want 1", launched)
+	}
+	// Back to baseline must stop it again, or the next measurement runs through
+	// the previous candidate and describes it instead.
+	if err := s.Apply(ctx, nil); err != nil {
+		t.Fatal(err)
+	}
+}
