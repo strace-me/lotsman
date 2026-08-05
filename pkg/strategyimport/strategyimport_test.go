@@ -2,6 +2,7 @@ package strategyimport
 
 import (
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -303,6 +304,28 @@ func TestImportDirReproducesTheHandCuratedCatalog(t *testing.T) {
 	}
 	if shared == 0 {
 		t.Error("no recipe was recognised in both scripts; dedup across sources is not working")
+	}
+}
+
+// Callers hold the stable symlink, not the versioned directory it points at.
+// WalkDir does not follow one and reports no error for it, so this failed as an
+// empty bundle rather than as a fault — it read 0 recipes on the router while
+// reading 79 from the same files locally.
+func TestImportDirFollowsTheStableSymlink(t *testing.T) {
+	link := filepath.Join(t.TempDir(), "bundle-current")
+	abs, err := filepath.Abs("testdata")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(abs, link); err != nil {
+		t.Fatal(err)
+	}
+	res, err := ImportDir(link)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(res.Recipes) == 0 {
+		t.Fatal("reading through the symlink found nothing")
 	}
 }
 
