@@ -4,6 +4,9 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"os"
+	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -12,6 +15,7 @@ import (
 	"github.com/strace-me/lotsman/pkg/dataplane"
 	"github.com/strace-me/lotsman/pkg/desyncgen"
 	"github.com/strace-me/lotsman/pkg/desynctune"
+	"github.com/strace-me/lotsman/pkg/executor"
 	"github.com/strace-me/lotsman/pkg/prospect"
 	"github.com/strace-me/lotsman/pkg/quality"
 	"github.com/strace-me/lotsman/pkg/registry"
@@ -266,4 +270,47 @@ func prospectStore(path string, log *slog.Logger) (*prospect.Store, error) {
 	log.Info("prospecting for self-proven strategies", "store", path,
 		"confirmed", len(s.Recipes()), "pending", s.Pending())
 	return s, nil
+}
+
+// reclaimSandbox removes what a previous run left behind.
+//
+// A pass tears its sandbox down on the way out, but only when it gets to run its
+// defers: a SIGKILL, an OOM or a power cut leaves both the table and a candidate
+// engine holding the queue. Observed exactly that today. In production procd
+// restarts this daemon, so without a reclaim the orphans accumulate — one stray
+// engine per unclean stop, each holding a queue and reading a strategy nobody
+// chose. Same reasoning as the client's pid-file reclaim: own what you left.
+//
+// The table's absence is not an error; nothing to clean is the normal case.
+func reclaimSandbox(ctx context.Context, table string, qnum int, log *slog.Logger) {
+	if pid := queueHolder(qnum); pid > 0 {
+		if p, err := os.FindProcess(pid); err == nil && p.Kill() == nil {
+			log.Warn("prospect: killed a sandbox engine left by a previous run", "pid", pid, "qnum", qnum)
+		}
+	}
+	if err := (executor.ExecRunner{}).Run(ctx, "nft", "delete", "table", table); err == nil {
+		log.Warn("prospect: removed a sandbox table left by a previous run", "table", table)
+	}
+}
+
+// queueHolder returns the pid bound to an NFQUEUE, or 0. The kernel's table is
+// the only honest answer here: nfqws rewrites its process title, so matching on
+// the command line misses it.
+func queueHolder(qnum int) int {
+	body, err := os.ReadFile("/proc/net/netfilter/nfnetlink_queue")
+	if err != nil {
+		return 0
+	}
+	for _, line := range strings.Split(string(body), "\n") {
+		f := strings.Fields(line)
+		if len(f) < 2 {
+			continue
+		}
+		if q, err := strconv.Atoi(f[0]); err == nil && q == qnum {
+			if pid, err := strconv.Atoi(f[1]); err == nil {
+				return pid
+			}
+		}
+	}
+	return 0
 }

@@ -685,6 +685,9 @@ func main() {
 				probeVia: *probeProxy, healthURL: "http://www.gstatic.com/generate_204",
 				collapseWindow: 24 * time.Hour, collapseMin: 3, log: log,
 			}
+			// Before the first pass, take back anything an unclean stop left holding
+			// the sandbox queue — procd restarts this daemon, so orphans would pile up.
+			reclaimSandbox(context.Background(), "inet lotsman_tune", *prospectQNum, log)
 			pr.Add(periodic.Task{Name: "desync-prospect", Interval: *prospectInterval, Fn: pp.run})
 			log.Info("desync prospecting enabled", "sandbox_qnum", *prospectQNum,
 				"production_qnum", inst.QNum, "interval", prospectInterval.String())
