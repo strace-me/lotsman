@@ -672,7 +672,8 @@ func main() {
 					Bin: *prospectNfqws, Dir: *prospectFiles, Run: executor.ExecRunner{},
 					Launch: zapret.ExecLauncher(0), ProdQNum: inst.QNum, Log: log,
 				},
-				probeVia: *probeProxy, log: log,
+				probeVia: *probeProxy, healthURL: "http://www.gstatic.com/generate_204",
+				collapseWindow: 24 * time.Hour, collapseMin: 3, log: log,
 			}
 			pr.Add(periodic.Task{Name: "desync-prospect", Interval: *prospectInterval, Fn: pp.run})
 			log.Info("desync prospecting enabled", "sandbox_qnum", *prospectQNum,
