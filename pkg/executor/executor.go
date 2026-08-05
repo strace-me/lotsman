@@ -7,6 +7,7 @@ package executor
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 	"sync"
 
@@ -52,9 +53,22 @@ type ScriptSwitcher struct {
 	route       SelectorSetter // non-nil => also point the service selector at "direct"
 	external    bool           // true => strategy owned externally (zapretgen reconciler); Enable does routing only
 
+	// alive reports whether the engine is actually running after a switch. Without
+	// it a switch is fire-and-forget: the symlink moves, the init script returns 0
+	// whether or not the engine survived, and `current` records a strategy nobody
+	// confirmed. That is how a bad strategy becomes a dead engine plus a watchdog
+	// restarting it forever. nil = unverified (the old behaviour).
+	alive func(context.Context) bool
+
 	mu      sync.Mutex
 	current string // currently active strategy id (idempotency)
+	lkg     string // last strategy id the engine was OBSERVED alive on
 }
+
+// VerifyWith supplies the liveness check a switch is confirmed against, turning
+// a failed switch into a rollback to the last strategy the engine was seen
+// running rather than into an outage.
+func (s *ScriptSwitcher) VerifyWith(alive func(context.Context) bool) { s.alive = alive }
 
 // RouteToDirect makes the switcher also point a service's per-service selector at
 // "direct" on Enable, so the service's traffic flows out direct -> nfqws (where
@@ -124,16 +138,42 @@ func (s *ScriptSwitcher) Enable(ctx context.Context, service, strategyID string)
 		return nil
 	}
 
-	if err := s.run.Run(ctx, "ln", "-sfn", script, s.activeLink); err != nil {
+	if err := s.switchTo(ctx, script); err != nil {
 		return err
 	}
-	if err := s.run.Run(ctx, s.initService, "restart"); err != nil {
-		return err
+	if s.alive != nil && !s.alive(ctx) {
+		// The engine did not come up on the new strategy. Put back the last one it
+		// was seen alive on: an unapplied strategy costs one rung, a dead engine
+		// costs the whole desync layer — silently, because nft's `flags bypass`
+		// keeps traffic flowing undesynced.
+		if s.lkg == "" {
+			s.current = ""
+			return fmt.Errorf("executor: %s did not start on %q and there is no known-good strategy to fall back to", s.class, strategyID)
+		}
+		back := s.scriptDir + "/" + s.lkg + ".sh"
+		if err := s.switchTo(ctx, back); err != nil {
+			s.current = ""
+			return fmt.Errorf("executor: %s did not start on %q and the rollback to %q also failed: %w", s.class, strategyID, s.lkg, err)
+		}
+		s.current = s.lkg
+		s.log.Warn("bypass strategy rejected, rolled back",
+			"engine", s.class, "service", service, "refused", strategyID, "kept", s.lkg)
+		return fmt.Errorf("executor: %s did not start on %q; kept %q", s.class, strategyID, s.lkg)
 	}
 	s.log.Info("switched bypass strategy",
 		"engine", s.class, "service", service, "strategy", strategyID, "from", s.current)
 	s.current = strategyID
+	if s.alive != nil {
+		s.lkg = strategyID // only ever set from an OBSERVED alive engine
+	}
 	return nil
+}
+
+func (s *ScriptSwitcher) switchTo(ctx context.Context, script string) error {
+	if err := s.run.Run(ctx, "ln", "-sfn", script, s.activeLink); err != nil {
+		return err
+	}
+	return s.run.Run(ctx, s.initService, "restart")
 }
 
 // VPN routes a service through a VPN pool by pointing the service's sing-box

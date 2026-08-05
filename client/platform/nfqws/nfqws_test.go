@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -110,5 +111,58 @@ func TestParseDefaultRouteIface(t *testing.T) {
 				t.Errorf("ParseDefaultRouteIface() = %q, want %q", got, tc.want)
 			}
 		})
+	}
+}
+
+// fakeEngine writes a stand-in for nfqws: it refuses when its arguments carry
+// REFUSE, and otherwise lives long enough to look healthy.
+func fakeEngine(t *testing.T) string {
+	t.Helper()
+	p := filepath.Join(t.TempDir(), "fake-engine.sh")
+	body := "#!/bin/sh\ncase \"$*\" in *REFUSE*) echo 'could not read tls_clienthello_x.bin' >&2; exit 1;; esac\nsleep 5\n"
+	if err := os.WriteFile(p, []byte(body), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	return p
+}
+
+func engineFor(t *testing.T) *Engine {
+	t.Helper()
+	e := &Engine{bin: fakeEngine(t), log: slog.New(slog.NewTextHandler(io.Discard, nil))}
+	e.inst.QNum = 200
+	t.Cleanup(func() { e.mu.Lock(); e.stopProcessLocked(); e.mu.Unlock() })
+	return e
+}
+
+// The load-bearing property behind rollback: a launch that failed must leave the
+// recorded identity alone. If a failed attempt overwrote lastArgs, the rollback
+// would faithfully restore the strategy that had just been rejected.
+func TestFailedLaunchDoesNotClaimTheEngine(t *testing.T) {
+	e := engineFor(t)
+	e.mu.Lock()
+	defer e.mu.Unlock()
+
+	if err := e.launchLocked([]string{"--dpi-desync=fake", "--good"}); err != nil {
+		t.Fatalf("healthy engine reported as failed: %v", err)
+	}
+	if e.cmd == nil || len(e.lastArgs) != 2 {
+		t.Fatalf("a successful launch did not record itself: cmd=%v args=%v", e.cmd != nil, e.lastArgs)
+	}
+	good := slices.Clone(e.lastArgs)
+	live := e.cmd
+
+	err := e.launchLocked([]string{"--dpi-desync=REFUSE"})
+	if err == nil {
+		t.Fatal("an engine that exits immediately was reported as started")
+	}
+	// The engine's own words, not just an exit status.
+	if !strings.Contains(err.Error(), "tls_clienthello_x.bin") {
+		t.Errorf("the failure dropped the engine's explanation: %v", err)
+	}
+	if !slices.Equal(e.lastArgs, good) {
+		t.Errorf("a failed launch overwrote the recorded strategy: %v, want %v", e.lastArgs, good)
+	}
+	if e.cmd != live {
+		t.Error("a failed launch replaced the recorded process handle")
 	}
 }

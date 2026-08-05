@@ -3,6 +3,7 @@ package executor
 import (
 	"context"
 	"encoding/json"
+	"io"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
@@ -271,4 +272,97 @@ func eq(a, b []string) bool {
 		}
 	}
 	return true
+}
+
+// recordRunner remembers every command, so a test can see which script the
+// symlink ended up pointing at.
+type recordRunner struct{ cmds [][]string }
+
+func (r *recordRunner) Run(_ context.Context, name string, args ...string) error {
+	r.cmds = append(r.cmds, append([]string{name}, args...))
+	return nil
+}
+
+func (r *recordRunner) lastLink() string {
+	for i := len(r.cmds) - 1; i >= 0; i-- {
+		if r.cmds[i][0] == "ln" {
+			return r.cmds[i][2] // ln -sfn <script> <link>: the script is arg 2
+		}
+	}
+	return ""
+}
+
+func (r *recordRunner) linkedScripts() []string {
+	var out []string
+	for _, c := range r.cmds {
+		if c[0] == "ln" {
+			out = append(out, c[2])
+		}
+	}
+	return out
+}
+
+func switcherFor(t *testing.T, alive func(context.Context) bool) (*ScriptSwitcher, *recordRunner) {
+	t.Helper()
+	r := &recordRunner{}
+	s := NewZapret(r, "/opt/z", "/opt/z/active.sh", "/etc/init.d/nfqws", false,
+		slog.New(slog.NewTextHandler(io.Discard, nil)))
+	s.VerifyWith(alive)
+	return s, r
+}
+
+// A strategy the engine will not run must cost one rung, not the whole desync
+// layer. nft's `flags bypass` means a dead engine is invisible — traffic keeps
+// flowing, undesynced — so the switch has to be confirmed, not assumed.
+func TestFailedSwitchRollsBackToTheLastLiveStrategy(t *testing.T) {
+	engineStarts := true
+	s, r := switcherFor(t, func(context.Context) bool { return engineStarts })
+
+	if err := s.Enable(context.Background(), "youtube", "alt12"); err != nil {
+		t.Fatalf("healthy switch failed: %v", err)
+	}
+	engineStarts = false
+	err := s.Enable(context.Background(), "youtube", "alt99")
+
+	if err == nil {
+		t.Fatal("a switch the engine did not survive was reported as success")
+	}
+	if !strings.Contains(err.Error(), "kept \"alt12\"") {
+		t.Errorf("the error does not say what is still in service: %v", err)
+	}
+	if got := r.lastLink(); got != "/opt/z/alt12.sh" {
+		t.Errorf("active link left at %q, want the last strategy the engine ran", got)
+	}
+	// And the switcher must not believe it is on the strategy it rejected, or the
+	// next Enable would treat alt99 as already active and skip the switch.
+	if err := s.Enable(context.Background(), "youtube", "alt99"); err == nil {
+		t.Error("the rejected strategy was recorded as current; a retry became a no-op")
+	}
+}
+
+// With nothing known-good behind it there is nothing to keep, and the switcher
+// must say that rather than silently pretend the strategy took.
+func TestFailedFirstSwitchHasNothingToKeep(t *testing.T) {
+	s, r := switcherFor(t, func(context.Context) bool { return false })
+	err := s.Enable(context.Background(), "youtube", "alt12")
+	if err == nil || !strings.Contains(err.Error(), "no known-good strategy") {
+		t.Fatalf("err = %v, want a refusal naming the absent fallback", err)
+	}
+	if n := len(r.linkedScripts()); n != 1 {
+		t.Errorf("attempted %d symlink changes, want 1 (no rollback target existed)", n)
+	}
+}
+
+// Without a liveness check the switcher must behave exactly as it did before:
+// this runs on a router where the check may not be wired.
+func TestUnverifiedSwitchKeepsTheOldBehaviour(t *testing.T) {
+	r := &recordRunner{}
+	s := NewZapret(r, "/opt/z", "/opt/z/active.sh", "/etc/init.d/nfqws", false,
+		slog.New(slog.NewTextHandler(io.Discard, nil)))
+	if err := s.Enable(context.Background(), "youtube", "alt12"); err != nil {
+		t.Fatalf("unverified switch should succeed: %v", err)
+	}
+	if got := r.lastLink(); got != "/opt/z/alt12.sh" {
+		t.Errorf("active link = %q", got)
+	}
 }

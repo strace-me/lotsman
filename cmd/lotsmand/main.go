@@ -261,6 +261,16 @@ func main() {
 	}
 
 	zapretEx := executor.NewZapret(executor.ExecRunner{}, *zapretDir, *zapretActive, *zapretInit, *dryRun, log)
+	// Confirm a strategy switch instead of assuming it. The init script returns 0
+	// whether or not the engine survived, so without this a strategy the engine
+	// refuses leaves it dead — invisibly, since nft's `flags bypass` keeps traffic
+	// flowing undesynced — and the switcher records it as current anyway. With it,
+	// a refused strategy rolls back to the last one the engine was seen running.
+	if !*dryRun && conf != nil && len(conf.Zapret) > 0 {
+		qnum := conf.Zapret[0].QNum
+		zapretEx.VerifyWith(func(context.Context) bool { return nfqueueBound(qnum) })
+		log.Info("zapret switches are verified against the engine", "qnum", qnum)
+	}
 	byedpiEx := executor.NewByeDPI(executor.ExecRunner{}, *byedpiDir, *byedpiActive, *byedpiInit, *dryRun, log)
 	// When the daemon owns a per-service config (reconcile), a zapret/byedpi step
 	// must also route the service direct -> nfqws via its sel-<service> selector.
@@ -1459,4 +1469,25 @@ func engineStarts(ctx context.Context, prog string, argv []string) error {
 	_ = cmd.Process.Kill()
 	<-done
 	return nil
+}
+
+// nfqueueBound reports whether anything holds the given NFQUEUE, which is the
+// one liveness signal for nfqws that does not lie on this box: `pgrep -x` misses
+// it because nfqws rewrites its process title, and the init script's exit code
+// says only that procd was asked, not that the engine survived being asked.
+// Retried briefly because procd's restart is asynchronous.
+func nfqueueBound(qnum int) bool {
+	prefix := fmt.Sprintf("%d ", qnum)
+	for i := 0; i < 10; i++ {
+		body, err := os.ReadFile("/proc/net/netfilter/nfnetlink_queue")
+		if err == nil {
+			for _, line := range strings.Split(string(body), "\n") {
+				if strings.HasPrefix(strings.TrimSpace(line), prefix) {
+					return true
+				}
+			}
+		}
+		time.Sleep(300 * time.Millisecond)
+	}
+	return false
 }
