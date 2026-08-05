@@ -161,6 +161,14 @@ NFT
   else
     bad "sandbox table rejected: $(head -1 /tmp/lt-nft.err)"
   fi
+  # The other half: without a skip rule in the LIVE table the probe is desynced
+  # twice and measures neither strategy. This is the check that says whether the
+  # box is ready for a tuner at all.
+  if $SSH 'nft list ruleset 2>/dev/null | grep -q "meta mark 0x4554 return"' </dev/null; then
+    ok "the live table lets the sandbox mark through"
+  else
+    meh "the live table has no sandbox skip rule yet — regenerate /etc/init.d/nfqws before arming a tuner"
+  fi
 fi
 
 CASE=08; if wanted "$@"; then

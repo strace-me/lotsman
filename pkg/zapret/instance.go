@@ -88,6 +88,13 @@ func GenerateNft(instances []Instance, opts NftOptions) string {
 	fmt.Fprintf(&b, "table %s {\n", opts.Table)
 	b.WriteString("    chain post {\n")
 	b.WriteString("        type filter hook postrouting priority mangle; policy accept;\n")
+	// The tuner's sandbox needs its probe to reach ITS engine and no other. Both
+	// tables sit on the same hook and both run, so without this the probe would be
+	// desynced twice — by the candidate and then by the incumbent — and would
+	// describe neither. The rule is inert until something actually sets the mark,
+	// which only the tuner does, so it costs one comparison and buys the only way
+	// to measure a candidate strategy without imposing it on the household.
+	fmt.Fprintf(&b, "        meta mark 0x%x return\n", TuneMark)
 	if len(opts.VPNServers) > 0 {
 		fmt.Fprintf(&b, "        ip daddr { %s } return\n", strings.Join(opts.VPNServers, ", "))
 	}
