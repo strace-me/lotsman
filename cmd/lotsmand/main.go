@@ -24,6 +24,7 @@ import (
 	"os"
 	"os/exec"
 	"os/signal"
+	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
@@ -68,6 +69,7 @@ import (
 	"github.com/strace-me/lotsman/pkg/state"
 	"github.com/strace-me/lotsman/pkg/strategy"
 	"github.com/strace-me/lotsman/pkg/strategycat"
+	"github.com/strace-me/lotsman/pkg/strategyimport"
 	"github.com/strace-me/lotsman/pkg/subscription"
 	"github.com/strace-me/lotsman/pkg/tspu"
 	"github.com/strace-me/lotsman/pkg/vpnbalance"
@@ -470,6 +472,32 @@ func main() {
 		log.Info("LOT-34 hot-reload remediation scaffold enabled", "services", remServices, "dir", *rulesetsDir)
 	}
 
+	// A Flowseal bundle carries strategies as well as lists, and until now an
+	// update could only ever COST us: it could stop the engine by dropping our
+	// state, and it could not add a single recipe, because nothing read what it
+	// brought. Reading is additive by construction — the curated catalog is the
+	// base and stays whole — so a bundle we cannot parse leaves the composer
+	// exactly as it was.
+	bundleRecipes := func() []strategycat.Recipe {
+		dir := filepath.Join(*flowsealBase, "flowseal-current")
+		res, err := strategyimport.ImportDir(dir)
+		if err != nil {
+			log.Warn("flowseal: could not read strategies from the bundle; composing from the curated catalog alone",
+				"dir", dir, "err", err)
+			return nil
+		}
+		if len(res.Skipped) > 0 {
+			// Named, not counted: a skipped recipe is either a shape we chose not
+			// to model or an upstream flag we have not met, and only the reason
+			// tells them apart.
+			log.Info("flowseal: strategies skipped while reading the bundle",
+				"count", len(res.Skipped), "first_reason", res.Skipped[0].Reason)
+		}
+		return res.Recipes
+	}
+	// Set by the composer once it exists; called again whenever a new bundle lands.
+	var refreshRecipePool func()
+
 	// Background maintenance loop (Flowseal update, subscription refresh).
 	runners := []func(context.Context){br.Run, ap.Run, eng.Run}
 	if *checkInterval > 0 {
@@ -486,6 +514,9 @@ func main() {
 					if out.Updated {
 						log.Warn("flowseal bundle REPLACED — the desync engine now runs a new release",
 							"from", out.Current, "to", out.Latest)
+						if refreshRecipePool != nil {
+							refreshRecipePool() // the new release's strategies become candidates now, not after a restart
+						}
 					} else {
 						log.Info("flowseal check", "current", out.Current, "latest", out.Latest, "updated", false)
 					}
@@ -571,6 +602,18 @@ func main() {
 			// strategies compete in composition alongside the curated ones.
 			recipePool := append(strategycat.Load(), zaptune.RecipesFromDefinitions(discoveredDefs)...)
 			zr := zapretgen.New(zsvcs, br.Position, recipePool, kbPick, "", log)
+			// Fold in whatever the installed Flowseal bundle offers, now and after
+			// every update. Merge is base-preferring: a recipe present in both keeps
+			// the CURATED id, because the KB keys outcomes on the id and a second id
+			// for the same argv would split one strategy's history in two.
+			refreshRecipePool = func() {
+				extra := bundleRecipes()
+				merged := strategyimport.Merge(recipePool, extra)
+				zr.SetRecipes(merged)
+				log.Info("recipe pool refreshed from the Flowseal bundle",
+					"curated", len(recipePool), "bundle_read", len(extra), "added", len(merged)-len(recipePool))
+			}
+			refreshRecipePool()
 			// TM-1b coherence resolver: rule_set(.srs) -> plaintext domains, so a
 			// service's FULL domain set (inline + rule_set-derived) feeds the nfqws
 			// hostlist. Without it the gate keeps rule_set services uncomposed

@@ -135,6 +135,14 @@ func Import(sources []Source) Result {
 // cost us (a lost file stops the engine) and never pay (new strategies go
 // unnoticed). Files whose extension is not recognised are ignored.
 func ImportDir(root string) (Result, error) {
+	// The deployed layout points a stable symlink at the versioned bundle, and
+	// that symlink is what callers have. WalkDir does not follow one: it lstats
+	// the root, sees a non-directory, hands it to the callback once and finishes
+	// — no error, no files, just an empty result that looks like a bundle with no
+	// strategies in it. Resolve first.
+	if resolved, err := filepath.EvalSymlinks(root); err == nil {
+		root = resolved
+	}
 	var srcs []Source
 	err := filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
 		if err != nil || d.IsDir() {
@@ -170,6 +178,33 @@ func ImportDir(root string) (Result, error) {
 	// attributions for no reason.
 	sort.Slice(srcs, func(i, j int) bool { return srcs[i].Name < srcs[j].Name })
 	return Import(srcs), nil
+}
+
+// Merge returns base followed by the entries of extra that base does not already
+// contain, comparing by normalized arguments rather than by ID.
+//
+// It is deliberately additive and base-preferring. Additive, so a bundle we
+// cannot read costs nothing: the curated catalog is still there in full, and the
+// engine keeps composing exactly what it composed before. Base-preferring,
+// because a recipe present in both must keep the CURATED id — the knowledge base
+// keys outcomes on the id, and admitting a second id for the same argv would
+// split one strategy's learned history in two and make both halves look colder
+// than the truth.
+func Merge(base, extra []strategycat.Recipe) []strategycat.Recipe {
+	known := make(map[string]bool, len(base))
+	for _, r := range base {
+		known[strings.Join(r.NfqwsArgs, " ")] = true
+	}
+	out := append([]strategycat.Recipe(nil), base...)
+	for _, r := range extra {
+		key := strings.Join(r.NfqwsArgs, " ")
+		if known[key] {
+			continue
+		}
+		known[key] = true
+		out = append(out, r)
+	}
+	return out
 }
 
 // Blocks extracts each "--new" block from one source as its own argument list.

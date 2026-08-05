@@ -25,6 +25,7 @@ import (
 	"fmt"
 	"log/slog"
 	"sort"
+	"sync"
 	"time"
 
 	"github.com/strace-me/lotsman/pkg/registry"
@@ -64,7 +65,6 @@ type ArmConfig struct {
 type Reconciler struct {
 	services  []registry.Service
 	position  func(service string) int // brain.Position: a service's current chain index
-	recipes   []strategycat.Recipe
 	pick      zaptune.Picker
 	nfqwsPath string
 	log       *slog.Logger
@@ -76,6 +76,9 @@ type Reconciler struct {
 	resolve zaptune.Resolver // rule_set -> domains, for coherent nfqws hostlists (TM-1); nil = none
 
 	last string // last composed launcher text (semantic-diff: act only on change)
+
+	mu      sync.Mutex // guards recipes, which a bundle update replaces mid-run
+	recipes []strategycat.Recipe
 }
 
 // SetResolver wires the rule_set -> plaintext-domains resolver (TM-1) so the
@@ -83,6 +86,18 @@ type Reconciler struct {
 // gateway in geosite-discord). Without it, a service that routes rule_sets is not
 // coherently composable and is left on the existing config (no silent regression).
 func (r *Reconciler) SetResolver(resolve zaptune.Resolver) { r.resolve = resolve }
+
+// SetRecipes replaces the candidate pool. A Flowseal bundle update brings new
+// strategies mid-run, and without this they would wait for a restart to be
+// considered. Callers must pass the WHOLE pool (curated catalog included), not
+// just the additions: this replaces rather than appends, so a caller that
+// forgets would silently shrink the composer's choices to whatever the last
+// bundle happened to contain.
+func (r *Reconciler) SetRecipes(recipes []strategycat.Recipe) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.recipes = recipes
+}
 
 // Arm makes the reconciler the single writer of the nfqws strategy: a covered,
 // changed composition is written, symlinked active, and the engine restarted,
@@ -108,7 +123,10 @@ func New(services []registry.Service, position func(string) int, recipes []strat
 // data plane in this slice.
 func (r *Reconciler) Reconcile(ctx context.Context) error {
 	active := r.zapretActive()
-	plan := zaptune.Compose(active, r.recipes, r.pick, r.resolve, "")
+	r.mu.Lock()
+	recipes := r.recipes
+	r.mu.Unlock()
+	plan := zaptune.Compose(active, recipes, r.pick, r.resolve, "")
 
 	if !plan.Covered {
 		// Nothing to compose, or recipes don't cover every active service -> keep the
