@@ -1,7 +1,9 @@
 # Code map
 
 Dense per-package index of the Lotsman repo. Read this to rehydrate the whole
-architecture without grepping source. For prose, see
+architecture without grepping source. **New session: read
+[START-HERE.md](START-HERE.md) first** — what the project is, where it stands, and
+the principles it derived. For prose, see
 [ARCHITECTURE.md](ARCHITECTURE.md); for direction, see [ROADMAP.md](ROADMAP.md)
 and the GitHub issue tracker.
 
