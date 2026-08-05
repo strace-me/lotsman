@@ -305,8 +305,19 @@ func KBPicker(score func(service, recipeID string) float64) Picker {
 		}
 		best, bestRate := 0, score(svc.Name, candidates[0].ID)
 		for i := 1; i < len(candidates); i++ {
-			if r := score(svc.Name, candidates[i].ID); r > bestRate {
+			r := score(svc.Name, candidates[i].ID)
+			switch {
+			case r > bestRate:
 				best, bestRate = i, r
+			case r == bestRate && candidates[i].Consensus > candidates[best].Consensus:
+				// Ties are the COLD case, not a rare one: an untouched KB scores
+				// every candidate at the same prior, so without a tiebreak the
+				// pick is catalog order and the engine restarts its way down a
+				// list of 120. Consensus — how many independent bundles ship this
+				// exact recipe — is the only prior available without measuring
+				// anything, and it costs nothing to consult. It never outranks a
+				// real outcome, because a differing score decides first.
+				best = i
 			}
 		}
 		return candidates[best], true

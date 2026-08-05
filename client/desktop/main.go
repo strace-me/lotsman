@@ -105,6 +105,7 @@ func main() {
 		recommended   = flag.Bool("recommended", false, "with -init: write the curated recommended config (services + rules, no creds); -sub optional")
 		printConfig   = flag.Bool("print-config", false, "generate the sing-box config from -config, print it, and exit (no sing-box needed)")
 	)
+	canaryGoodput := flag.Float64("canary-goodput-kbps", 64, "a zapret recipe must sustain at least this KiB/s to be credited; reachability alone scores a frozen path as a win. 0 disables the check.")
 	flag.Parse()
 
 	log := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelInfo}))
@@ -171,27 +172,28 @@ func main() {
 
 	box := externalbox.New(*singboxBin, *singboxCfg, log)
 	c := core.New(conf, box, core.Options{
-		ClashListen:   *clashListen,
-		Interval:      *interval,
-		KBFile:        *kbFile,
-		KBDir:         *kbDir,
-		StateFile:     *stateFile,
-		ProbeProxy:    *probeProxy,
-		RuleSetDir:    *ruleSetDir,
-		NfqwsBin:      *nfqwsBin,
-		ZapretFiles:   *zapretFiles,
-		HostlistDir:   *hostlistDir,
-		SingboxBin:    *singboxBin,
-		SingboxConfig: *singboxCfg,
-		RefreshEvery:  *refreshEvery,
-		RoamInterval:  *roamInterval,
-		QNum:          *qnum,
-		WAN:           *wan,
-		ProxyListen:   *proxyListen,
-		MetricsAddr:   *metricsAddr,
-		BaselineFile:  *baselineFile,
-		DesyncForce:   *desyncForce,
-		HostDNS:       *hostDNS,
+		ClashListen:       *clashListen,
+		Interval:          *interval,
+		KBFile:            *kbFile,
+		KBDir:             *kbDir,
+		StateFile:         *stateFile,
+		CanaryGoodputKBps: *canaryGoodput,
+		ProbeProxy:        *probeProxy,
+		RuleSetDir:        *ruleSetDir,
+		NfqwsBin:          *nfqwsBin,
+		ZapretFiles:       *zapretFiles,
+		HostlistDir:       *hostlistDir,
+		SingboxBin:        *singboxBin,
+		SingboxConfig:     *singboxCfg,
+		RefreshEvery:      *refreshEvery,
+		RoamInterval:      *roamInterval,
+		QNum:              *qnum,
+		WAN:               *wan,
+		ProxyListen:       *proxyListen,
+		MetricsAddr:       *metricsAddr,
+		BaselineFile:      *baselineFile,
+		DesyncForce:       *desyncForce,
+		HostDNS:           *hostDNS,
 		DesyncExclude: func() []string {
 			if *desyncExclude == "" {
 				return nil
