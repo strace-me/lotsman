@@ -11,7 +11,7 @@ func TestNextFailoverProviderWraps(t *testing.T) {
 	cases := []struct{ cur, want string }{
 		{"cloudflare", "quad9"},
 		{"quad9", "google"},
-		{"google", "cloudflare"}, // wrap
+		{"google", "cloudflare"},  // wrap
 		{"mullvad", "cloudflare"}, // not in list => start at front
 		{"", "cloudflare"},        // unset => start at front
 	}

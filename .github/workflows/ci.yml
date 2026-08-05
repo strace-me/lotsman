@@ -23,8 +23,12 @@ jobs:
         with:
           go-version-file: go.mod
           cache: true
+      # `.` walks .claude/worktrees too — agent scratch copies that are not ours
+      # to format and would fail this step forever for reasons nobody can act on.
       - name: gofmt
-        run: test -z "$(gofmt -l .)" || { gofmt -l .; echo "run gofmt -w ."; exit 1; }
+        run: |
+          bad=$(gofmt -l cmd pkg client)
+          test -z "$bad" || { echo "$bad"; echo "run: gofmt -w cmd pkg client"; exit 1; }
       - name: build
         run: go build ./...
       - name: vet

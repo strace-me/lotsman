@@ -36,10 +36,10 @@ func TestBuildDNSExpandsProvidersAndValidates(t *testing.T) {
 
 func TestBuildDNSRejectsBadConfigs(t *testing.T) {
 	cases := map[string]*dnsYAML{
-		"unknown provider": {Servers: []dnsServerYAML{{Name: "x", Provider: "nope"}}, Final: "x"},
-		"final not declared": {Servers: []dnsServerYAML{{Name: "a", Type: "local"}}, Final: "b"},
-		"bad strategy":       {Servers: []dnsServerYAML{{Name: "a", Type: "local"}}, Final: "a", Strategy: "fastest"},
-		"duplicate name":     {Servers: []dnsServerYAML{{Name: "a", Type: "local"}, {Name: "a", Type: "local"}}, Final: "a"},
+		"unknown provider":    {Servers: []dnsServerYAML{{Name: "x", Provider: "nope"}}, Final: "x"},
+		"final not declared":  {Servers: []dnsServerYAML{{Name: "a", Type: "local"}}, Final: "b"},
+		"bad strategy":        {Servers: []dnsServerYAML{{Name: "a", Type: "local"}}, Final: "a", Strategy: "fastest"},
+		"duplicate name":      {Servers: []dnsServerYAML{{Name: "a", Type: "local"}, {Name: "a", Type: "local"}}, Final: "a"},
 		"no type no provider": {Servers: []dnsServerYAML{{Name: "a"}}, Final: "a"},
 		"direct not declared": {Servers: []dnsServerYAML{{Name: "a", Type: "local"}}, Final: "a", Direct: "z"},
 	}
