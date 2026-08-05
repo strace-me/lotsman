@@ -1139,11 +1139,17 @@ func newRulesetsUpdater(reg *registry.Registry, rc *reconcile.Reconciler, repo, 
 	return &rulesets.Updater{
 		Repo: repo, Required: required, LiveDir: dir, Pin: pin, AutoBump: autobump,
 		MinRatio: minRatio, PerTag: true, DryRun: dryRun,
-		Counter:   rulesets.SingboxCounter{Bin: sbBin},
-		Releaser:  rulesets.GitHubReleaser{},
-		PathFor:   singbox.RuleSetRelPath,
-		OnApplied: onApplied,
-		Log:       log,
+		// Rollback point spanning the swap AND the reconcile that validates it:
+		// a release whose rule-sets make `sing-box check` fail is undone rather
+		// than left in service. Lives beside the rule-sets so a rollback needs
+		// nothing but the box itself.
+		SnapshotDir:   filepath.Join(dir, "snapshots"),
+		KeepSnapshots: 3,
+		Counter:       rulesets.SingboxCounter{Bin: sbBin},
+		Releaser:      rulesets.GitHubReleaser{},
+		PathFor:       singbox.RuleSetRelPath,
+		OnApplied:     onApplied,
+		Log:           log,
 	}
 }
 

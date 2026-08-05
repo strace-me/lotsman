@@ -40,7 +40,14 @@ type Updater struct {
 	Releaser  Releaser
 	PathFor   PathFor
 	OnApplied func(ctx context.Context) error // e.g. trigger reconcile (re-validate + apply)
-	Log       *slog.Logger
+	// SnapshotDir enables rollback: the live .srs about to change are copied here
+	// first, and put back if either the swap or the post-apply reconcile fails.
+	// Empty disables it, which is the old behaviour — a half-applied release, or
+	// one whose rule-sets make `sing-box check` fail, staying in service.
+	SnapshotDir   string
+	KeepSnapshots int // retained snapshots (eMMC hygiene); <1 means 3
+	Now           func() time.Time
+	Log           *slog.Logger
 
 	pin string // in-memory current pin (seeded from Pin)
 }
@@ -86,9 +93,32 @@ func (u *Updater) Update(ctx context.Context) error {
 		return nil
 	}
 
+	// Snapshot BEFORE the swap and keep it until the post-apply reconcile has
+	// accepted the result. The reconcile is where a bad rule-set actually shows
+	// up (`sing-box check` rejects the generated config), and it runs after the
+	// files have already moved — so the rollback point has to span both steps,
+	// not just the copy.
+	var snap string
+	if u.SnapshotDir != "" && len(plan.Swap) > 0 {
+		snap, err = Snapshot(u.LiveDir, plan.Swap, u.SnapshotDir, u.PathFor, u.now())
+		if err != nil {
+			return fmt.Errorf("rulesets: snapshot before apply: %w", err)
+		}
+	}
+	rollback := func(reason string, cause error) error {
+		if snap == "" {
+			return fmt.Errorf("rulesets: %s: %w (no snapshot — the live set is left as it is)", reason, cause)
+		}
+		if rbErr := Restore(snap, u.LiveDir, u.PathFor); rbErr != nil {
+			return fmt.Errorf("rulesets: %s: %w; ROLLBACK ALSO FAILED: %v", reason, cause, rbErr)
+		}
+		u.Log.Warn("rulesets: rolled back to the previous rule-sets", "reason", reason, "err", cause, "snapshot", snap)
+		return fmt.Errorf("rulesets: %s, rolled back: %w", reason, cause)
+	}
+
 	changed, err := Apply(plan, dir, u.LiveDir, u.PathFor)
 	if err != nil {
-		return fmt.Errorf("rulesets: apply: %w", err)
+		return rollback("apply failed", err)
 	}
 	if newPin, bumped := NextPin(u.pin, latest, !plan.Unusable); bumped {
 		u.Log.Info("rulesets: pin bumped", "from", u.pin, "to", newPin)
@@ -101,7 +131,16 @@ func (u *Updater) Update(ctx context.Context) error {
 	u.Log.Info("rulesets: updated tags", "tag", candidate, "changed", changed)
 	if u.OnApplied != nil {
 		if err := u.OnApplied(ctx); err != nil {
-			return fmt.Errorf("rulesets: post-apply reconcile: %w", err)
+			return rollback("post-apply reconcile rejected the new rule-sets", err)
+		}
+	}
+	if snap != "" {
+		keep := u.KeepSnapshots
+		if keep < 1 {
+			keep = 3
+		}
+		if err := PruneSnapshots(u.SnapshotDir, keep); err != nil {
+			u.Log.Warn("rulesets: could not prune old snapshots", "dir", u.SnapshotDir, "err", err)
 		}
 	}
 	return nil
@@ -109,6 +148,13 @@ func (u *Updater) Update(ctx context.Context) error {
 
 // countDir counts the required tags' .srs in dir (missing => absent from the map,
 // which PlanSwap reads as not-present).
+func (u *Updater) now() time.Time {
+	if u.Now != nil {
+		return u.Now()
+	}
+	return time.Now()
+}
+
 func (u *Updater) countDir(dir string) map[string]int {
 	out := make(map[string]int, len(u.Required))
 	for _, tag := range u.Required {
