@@ -77,6 +77,11 @@ func (s *Sandbox) Apply(ctx context.Context, args []string) error {
 		return fmt.Errorf("zapret: sandbox: candidate did not start: %w", err)
 	}
 	s.stop = stop
+	// What the candidate actually is, without the payload paths that make the line
+	// unreadable. A pass that measures the wrong thing is diagnosed from here:
+	// without it the log shows a verdict and no way to tell which strategy earned
+	// it.
+	s.log().Info("desync sandbox: candidate applied", "qnum", s.Opts.QNum, "strategy", s.Describe(args))
 	return nil
 }
 
@@ -95,6 +100,7 @@ func (s *Sandbox) Close(ctx context.Context) error {
 	if err := s.Run.Run(ctx, "nft", "delete", "table", s.Opts.Table); err != nil {
 		return fmt.Errorf("zapret: sandbox: leftover table %q: %w", s.Opts.Table, err)
 	}
+	s.log().Info("desync sandbox down", "table", s.Opts.Table)
 	return nil
 }
 

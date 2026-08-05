@@ -22,7 +22,10 @@ func fakeBin(t *testing.T) string {
 // An engine that dies on its inputs must not be reported as started: the tuner
 // would then measure through nothing and score every candidate identically.
 func TestLauncherWaitsForTheEngineToSurvive(t *testing.T) {
-	l := ExecLauncher(300 * time.Millisecond)
+	// Long enough that a refusing process is certainly observed. At a short window
+	// this races the fork on a loaded machine and reads a refusal as a success —
+	// the exact defect the test exists to catch.
+	l := ExecLauncher(3 * time.Second)
 	bin := fakeBin(t)
 
 	_, err := l(context.Background(), bin, "", []string{"--qnum=201", "--REFUSE"})
