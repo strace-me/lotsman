@@ -51,9 +51,6 @@ type Sandbox struct {
 // no-op: the tuner would otherwise measure the PREVIOUS candidate and credit
 // this one.
 func (s *Sandbox) Apply(ctx context.Context, args []string) error {
-	if len(args) == 0 {
-		return fmt.Errorf("zapret: sandbox: empty candidate strategy")
-	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -70,6 +67,19 @@ func (s *Sandbox) Apply(ctx context.Context, args []string) error {
 		s.installed = true
 	}
 	s.stopEngineLocked()
+
+	// No args is the BASELINE, not a mistake: every A/B starts by measuring the
+	// path with no desync at all, and without it there is nothing to compare a
+	// candidate against. The table stays up so the probe is still isolated by its
+	// mark; with no engine on the queue, `flags bypass` lets the marked packets
+	// through untouched — which is exactly what "no desync" means here.
+	//
+	// Rejecting this cost the first live pass: tester.Resolve applies the baseline
+	// arm before anything else, so the search died on its first step.
+	if len(args) == 0 {
+		s.log().Info("desync sandbox: baseline (no engine on the queue)", "qnum", s.Opts.QNum)
+		return nil
+	}
 
 	argv := append([]string{fmt.Sprintf("--qnum=%d", s.Opts.QNum)}, args...)
 	stop, err := s.Launch(ctx, s.Bin, s.Dir, argv)
