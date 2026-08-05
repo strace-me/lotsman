@@ -67,13 +67,19 @@ const (
 
 // Options configures a client Core.
 type Options struct {
-	ClashListen string              // loopback Clash-API host:port (default 127.0.0.1:9090)
-	Interval    time.Duration       // probe + reassert interval (default 10s)
-	KBFile      string              // KB persistence path ("" = in-memory)
-	KBDir       string              // per-network KB dir: the store becomes <dir>/<network-id>.json, keeping each network's learning separate (overrides KBFile when set)
-	ProbeProxy  string              // socks addr to probe through the tunnel ("" = probe direct)
-	RuleSetDir  string              // dir holding rule-set-{geosite,geoip}/*.srs ("" = generator default, i.e. the router's /etc/sing-box)
-	Tun         *singbox.TunOptions // client ingress (nil = a sensible default tun)
+	ClashListen string        // loopback Clash-API host:port (default 127.0.0.1:9090)
+	Interval    time.Duration // probe + reassert interval (default 10s)
+	KBFile      string        // KB persistence path ("" = in-memory)
+	KBDir       string        // per-network KB dir: the store becomes <dir>/<network-id>.json, keeping each network's learning separate (overrides KBFile when set)
+	ProbeProxy  string        // socks addr to probe through the tunnel ("" = probe direct)
+	// CanaryGoodputKBps is the floor a recipe must sustain to count as working.
+	// Reachability alone scores a frozen path as a win — TSPU's signature failure
+	// completes the handshake and then stalls — so the canary pulls real volume
+	// before crediting a recipe. 0 disables the stage.
+	CanaryGoodputKBps  float64
+	CanaryGoodputBytes int64               // bytes to pull per measurement; 0 = 64KiB
+	RuleSetDir         string              // dir holding rule-set-{geosite,geoip}/*.srs ("" = generator default, i.e. the router's /etc/sing-box)
+	Tun                *singbox.TunOptions // client ingress (nil = a sensible default tun)
 
 	// ProxyListen switches the client to PROXY MODE: sing-box listens on this
 	// socks address instead of capturing the system with a tun. Nothing is
@@ -203,8 +209,8 @@ type Core struct {
 	// itself. Started once in Start, stopped in Stop; survives the Reloads it triggers.
 	failoverCancel context.CancelFunc
 	failoverWg     sync.WaitGroup
-	tunnelIPs      []string      // proxy server IPs the desync must never touch
-	lastNodes      int           // nodes the last generate loaded; zero with subscriptions declared means no tunnel
+	tunnelIPs      []string // proxy server IPs the desync must never touch
+	lastNodes      int      // nodes the last generate loaded; zero with subscriptions declared means no tunnel
 
 	mu         sync.Mutex
 	stateMu    sync.Mutex      // serialises reads of the swappable loop state (brain/reg/eng/zap/prober) against Reload
@@ -229,6 +235,12 @@ func New(conf *config.Config, box ProxyCore, opts Options, log *slog.Logger) *Co
 	// tested by hand and silently fails to load once installed, taking the desync
 	// with it and saying nothing.
 	opts.HostlistDir = absDir(opts.HostlistDir)
+	// A floor low enough that a healthy path always clears it, and a pull big
+	// enough to cross the ~16KB volume cliff TSPU freezes at — measuring less
+	// than that would report every frozen path as healthy.
+	if opts.CanaryGoodputBytes == 0 {
+		opts.CanaryGoodputBytes = 64 << 10
+	}
 	opts.ZapretFiles = absDir(opts.ZapretFiles)
 	opts.SingboxConfig = absDir(opts.SingboxConfig)
 	return &Core{

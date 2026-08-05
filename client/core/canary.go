@@ -2,8 +2,12 @@ package core
 
 import (
 	"context"
+	"strings"
 	"time"
 
+	"github.com/strace-me/lotsman/pkg/burstprobe"
+	"github.com/strace-me/lotsman/pkg/dataplane"
+	"github.com/strace-me/lotsman/pkg/registry"
 	"github.com/strace-me/lotsman/pkg/strategy"
 )
 
@@ -89,5 +93,43 @@ func (c *Core) canaryProbe(ctx context.Context, service string) bool {
 			break
 		}
 	}
-	return c.prober.Probe(ctx, service, pos).OK
+	if !c.prober.Probe(ctx, service, pos).OK {
+		return false
+	}
+	return c.goodputOK(ctx, svc)
+}
+
+// goodputOK is the canary's second stage: does the recipe let real VOLUME
+// through, not merely a status line?
+//
+// Reachability alone cannot tell a working desync from one that connects and
+// then crawls, and TSPU's characteristic failure is exactly that — the handshake
+// completes and the flow freezes a few tens of kilobytes in. A canary that only
+// asks "did it connect" therefore scores a frozen path as a win and teaches the
+// KB to prefer it. The shallow probe still runs first because it is cheap: on a
+// cold KB the recipe changes roughly every ten seconds, and pulling volume for
+// every candidate that cannot even connect would be waste.
+//
+// Disabled (CanaryGoodputKBps <= 0) it is a no-op and the canary means exactly
+// what it meant before.
+func (c *Core) goodputOK(ctx context.Context, svc registry.Service) bool {
+	min := c.opts.CanaryGoodputKBps
+	if min <= 0 {
+		return true
+	}
+	target := svc.ProbeTarget
+	if target == "" || !strings.HasPrefix(target, "http") {
+		return true // nothing to pull volume from; the shallow verdict stands
+	}
+	q := burstprobe.Probe(ctx, dataplane.BurstClient(c.opts.ProbeProxy, 15*time.Second),
+		[]string{target}, c.opts.CanaryGoodputBytes, 1)
+	if q.Samples == 0 {
+		return true // the measurement did not happen; do not invent a verdict
+	}
+	ok := q.GoodputKBps >= min
+	if !ok {
+		c.log.Info("canary: recipe connects but does not carry volume",
+			"service", svc.Name, "goodput_kbps", q.GoodputKBps, "min_kbps", min)
+	}
+	return ok
 }

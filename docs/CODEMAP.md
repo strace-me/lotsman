@@ -67,12 +67,12 @@ the component split is mechanical (event contracts already separate them).
 - `pkg/quality` — connection-quality metrics (p50/p95/p99 tail, jitter, loss) from RTT samples or passive tcp_info; one vocabulary for both. [Quality, FromRTTs]
 - `pkg/balancer` — rank VPN nodes/pools by quality with per-category weights (voice=jitter/loss, gaming=tail, streaming=bw). [Weights, ProfileFor, Candidate]
 - `pkg/vpnbalance` — actively health-check concrete nodes behind a selector (Clash /delay), rank via balancer, repoint to best live node (fixes url-test sticking to a dead pick). [Rebalance]
-- `pkg/scoring` — kb.Stats → single comparable number, weighted per category (latency alone misleads). **DEFERRED: build-ahead, not wired.**
+- `pkg/scoring` — kb.Stats → single comparable number, weighted per category (latency alone misleads). ⛔ **NOT USED BY ANYTHING.** Superseded: `pkg/kb` already ranks strategies by outcome history, which is what this was for.
 - `pkg/affinity` — `Spread` is LIVE: deterministic per-client node spreading (LOT-23), called by `singbox.Generate`. The sticky-store half (`Store`/`Resolve` with TTL) is DEFERRED. [Spread (live), Store/Resolve (deferred)]
-- `pkg/ttl` — estimate hops-to-DPI for accurate fake-packet TTL (--dpi-desync-ttl); traceroute parser fallback, math pure. **DEFERRED: build-ahead, not wired.**
+- `pkg/ttl` — estimate hops-to-DPI for accurate fake-packet TTL (--dpi-desync-ttl); traceroute parser fallback, math pure. ⛔ **NOT USED BY ANYTHING.** No consumer computes a desync TTL from it; recipes carry `--dpi-desync-ttl` as a literal.
 - `pkg/noderank` — pick the best concrete VPN node FOR A SERVICE and pin its selector; narrows by exit country BEFORE probing (never pins a blocked service to a RU exit). [noderank.New]
-- `pkg/selector` — choose which strategy to try next: prefer the class addressing the detected block type (tspu) + best learned score (KB). **DEFERRED: superseded in practice by brain+kb; build-ahead reference.** [Candidate]
-- `pkg/tuner` — decision core of the "auto" knob mode: A/B OFF vs ON → keep ON only if it measurably helps (significance margin + hysteresis); pure. **DEFERRED: build-ahead, not wired.**
+- `pkg/selector` — choose which strategy to try next: prefer the class addressing the detected block type (tspu) + best learned score (KB). ⛔ **NOT USED BY ANYTHING.** Superseded by brain+kb, which make this choice live. [Candidate]
+- `pkg/tuner` — decision core of the "auto" knob mode: A/B OFF vs ON → keep ON only if it measurably helps (significance margin + hysteresis); pure. ⛔ **NOT USED BY ANYTHING.** Its A/B is what `pkg/tester` does, and tester is the one the v7 arm calls.
 
 ### Self-heal (LOT-15..34 epic)
 - `pkg/observe` — passive "eye" (LOT-15): read sing-box /connections, compute per-service real-traffic metrics in Go; OBSERVE only (surfaces misrouting: flow that should ride sel-<svc> but went direct). [observe.New]
@@ -93,7 +93,7 @@ the component split is mechanical (event contracts already separate them).
 - `pkg/strategyimport` — read third-party strategy bundles (Flowseal `.bat`, shell, fenced markdown) into catalog recipes: one normalizer over all containers since winws and nfqws share the flag family; deployment detail dropped, payload paths to basenames, host selectors to `{{DOMAINS}}`, `--ipset` refused whole rather than stripped. IDs derive from the normalized args so the KB keeps its learning across bundle updates. **Not yet wired to `pkg/flowseal`** — an update still does not re-read what it brought. [Import, ImportDir, Normalize, Techniques]
 - `pkg/stunprobe` — measure a UDP "voice" path via STUN Binding Requests (voice is raw UDP you can't curl; STUN is what nfqws `--filter-l7=stun` mangles).
 - `pkg/tester` — decision core of the zapret strategy tester; an ADVISOR to the zapret rung (Brain owns the ladder, applier owns the data plane). **BUILD-AHEAD: not wired yet (v7 tuner epic).** [Probe]
-- `pkg/burstprobe` — sustained-read (throughput) probe feeding tester's throughput fitness: pulls real content past the ~16KB TSPU freeze cliff and reports worst-case goodput across endpoints. READ-only; http.Client injected. **BUILD-AHEAD: not wired yet (v7 tuner epic).** [Probe]
+- `pkg/burstprobe` — sustained-read (throughput) probe; **LIVE on the desktop client** as the canary's second stage (a recipe must carry volume, not merely connect) and feeding tester's throughput fitness: pulls real content past the ~16KB TSPU freeze cliff and reports worst-case goodput across endpoints. READ-only; http.Client injected. **BUILD-AHEAD: not wired yet (v7 tuner epic).** [Probe]
 
 ### Ops / persistence / maintenance
 - `pkg/metrics` — Prometheus text exposition on /metrics (NetData-scrapeable): Brain positions, KB EWMA, observed probe-outcome counts; no external lib. [metrics.New]
