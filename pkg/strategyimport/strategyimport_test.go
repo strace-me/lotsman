@@ -98,22 +98,49 @@ func TestHostlistDomainsBecomeAPlaceholder(t *testing.T) {
 	}
 }
 
-// Refusing whole is the point: a recipe stripped of its ipset selects different
-// traffic than the one its author wrote, and the canary would then score a
-// strategy that was never run.
-func TestUnexpressibleRecipesAreRefusedNotRepaired(t *testing.T) {
-	_, err := Normalize([]string{"--ipset=/opt/lists/ipset-all.txt", "--dpi-desync=fake"})
-	if err == nil {
-		t.Fatal("an --ipset recipe was accepted; it must be refused")
+// An ipset recipe keeps its shape as a placeholder rather than being dropped or
+// stripped. Stripping would change what it selects; dropping would lose it. The
+// placeholder preserves it and lets zaptune.recipeRenderable — which already
+// refuses any recipe carrying a placeholder it cannot fill — make the call.
+func TestIpsetBecomesAPlaceholderRatherThanBeingStripped(t *testing.T) {
+	args, err := Normalize([]string{"--filter-udp=443", "--ipset=/opt/lists/ipset-all.txt", "--dpi-desync=fake"})
+	if err != nil {
+		t.Fatalf("an ipset recipe should survive as a placeholder: %v", err)
 	}
-	if !strings.Contains(err.Error(), "--ipset") {
-		t.Errorf("the refusal does not name the flag: %v", err)
+	got := strings.Join(args, " ")
+	if !strings.Contains(got, "--ipset={{IPSET}}") {
+		t.Errorf("ipset not templated: %s", got)
+	}
+	if strings.Contains(got, "/opt/") {
+		t.Errorf("the deployment's own path survived: %s", got)
+	}
+	// And it must NOT look renderable: no {{DOMAINS}}, so nothing will run it.
+	if strings.Contains(got, "{{DOMAINS}}") {
+		t.Errorf("an ipset-scoped block gained a domain scope it never had: %s", got)
+	}
+}
+
+// A flag outside the vocabulary we model means a bundle doing something new.
+// Letting it through is the bad outcome: if nfqws rejects it the engine dies at
+// startup and takes every other service's block with it, and if nfqws accepts it
+// we are scoring a strategy we cannot describe.
+func TestUnknownFlagRefusesTheRecipeAndNamesIt(t *testing.T) {
+	_, err := Normalize([]string{"--filter-tcp=443", "--dpi-desync=fake", "--dpi-desync-quantum-entangle=7"})
+	if err == nil {
+		t.Fatal("a recipe with an unmodelled flag was accepted")
+	}
+	if !strings.Contains(err.Error(), "--dpi-desync-quantum-entangle") {
+		t.Errorf("the refusal does not name the flag, so nobody can act on it: %v", err)
+	}
+	// A member of a known family is still understood, even if never seen before.
+	if _, err := Normalize([]string{"--dpi-desync=fake", "--dpi-desync-fake-newproto=x.bin"}); err != nil {
+		t.Errorf("a new payload flag in a known family was refused: %v", err)
 	}
 }
 
 func TestSkippedBlocksAreReportedNotSwallowed(t *testing.T) {
 	src := Source{Name: "b", Kind: KindShell, Body: []byte(
-		"nfqws --filter-tcp=443 --ipset=/opt/x.txt --dpi-desync=fake\n")}
+		"nfqws --filter-tcp=443 --dpi-desync=fake --brand-new-upstream-flag=1\n")}
 	res := Import([]Source{src})
 	if len(res.Recipes) != 0 {
 		t.Errorf("got %d recipes, want 0", len(res.Recipes))
@@ -242,17 +269,29 @@ func TestImportDirReproducesTheHandCuratedCatalog(t *testing.T) {
 	if len(res.Recipes) == 0 {
 		t.Fatal("no recipes read from testdata")
 	}
+	var recovered int
 	for _, r := range res.Recipes {
-		if _, ok := catalog[strings.Join(r.NfqwsArgs, " ")]; !ok {
-			t.Errorf("imported a recipe the catalog does not have:\n  %s", strings.Join(r.NfqwsArgs, " "))
+		args := strings.Join(r.NfqwsArgs, " ")
+		if _, ok := catalog[args]; ok {
+			continue
 		}
+		// The ipset-scoped blocks are the exception, and an interesting one: the
+		// person transcribing these scripts left them out, so automating the read
+		// recovers two recipes the catalog never had. They are unrenderable
+		// (no {{DOMAINS}}) so nothing will run them — they are simply no longer
+		// lost.
+		if strings.Contains(args, "{{IPSET}}") {
+			recovered++
+			continue
+		}
+		t.Errorf("imported a recipe the catalog does not have:\n  %s", args)
 	}
-	// Every skip must be an --ipset block: those are the only two in these
-	// scripts that select by IP set, and nothing else may be quietly dropped.
+	if recovered == 0 {
+		t.Error("the ipset blocks vanished; they should survive as placeholders")
+	}
+	// Nothing else may be quietly dropped.
 	for _, s := range res.Skipped {
-		if !strings.Contains(s.Reason, "--ipset") {
-			t.Errorf("unexpected skip (%s): %s\n  %s", s.Source, s.Reason, s.Args)
-		}
+		t.Errorf("unexpected skip (%s): %s\n  %s", s.Source, s.Reason, s.Args)
 	}
 	// alt11 and alt12 are two editions of one bundle, so the recipes they share
 	// must be recognised as shared rather than duplicated.

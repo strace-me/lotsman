@@ -31,7 +31,8 @@ var dropPrefix = []string{
 	// host set becomes {{DOMAINS}}, which Lotsman fills with ONE service's
 	// domains. A block that keeps a global scope keeps its own excludes, since
 	// it has no host selector to be narrowed by.
-	"--hostlist-exclude=", "--ipset-exclude=", "--hostlist-auto=", "--hostlist-auto-fail-threshold=",
+	"--hostlist-exclude=", "--hostlist-exclude-domains=", "--ipset-exclude=",
+	"--hostlist-auto=", "--hostlist-auto-fail-threshold=",
 }
 
 // Flags that answer "which hosts is this pointed at". Bundles express it either
@@ -44,11 +45,47 @@ var hostSelectors = []string{"--hostlist=", "--hostlist-domains="}
 const domainsPlaceholder = "--hostlist-domains={{DOMAINS}}"
 
 // Arguments selecting traffic by IP set. Unlike an exclusion these are the
-// block's POSITIVE target, and we have no way to express one: a block whose
-// ipset is dropped no longer selects what its author wrote. The recipe is
-// refused whole rather than repaired, because scoring a silently-altered recipe
-// would put a verdict in the knowledge base about a strategy that never ran.
-var unsupported = []string{"--ipset=", "--ipset-auto="}
+// block's POSITIVE target, and Lotsman has no IP set to point them at. They
+// become a placeholder rather than being dropped or refused: the curated catalog
+// spells them the same way, and `zaptune.recipeRenderable` already refuses to
+// render any recipe carrying a placeholder it cannot fill. One policy, in the
+// place that already had it, instead of a second one here.
+var ipsetSelectors = []string{"--ipset=", "--ipset-auto="}
+
+const ipsetPlaceholder = "--ipset={{IPSET}}"
+
+// The desync vocabulary we actually model, gathered from the 67 curated recipes
+// and a real Flowseal 1.10.0 bundle — 30 distinct flags between them. An
+// argument outside this set means a bundle doing something we have never seen,
+// and the recipe is skipped with the offending flag named.
+//
+// The alternative, letting an unknown flag through, is worse than it looks. If
+// nfqws rejects it the engine dies at startup and takes the whole composed
+// config with it — every OTHER service's block in the same process. If nfqws
+// ACCEPTS it, we are running a strategy whose behaviour we cannot describe and
+// whose outcome the KB will record as if we could.
+//
+// Keeping this list current is a one-line edit prompted by a skip reason, which
+// is the point: a new upstream flag should surface as a question, not as an
+// engine that will not start.
+var knownFlags = map[string]bool{
+	"--dpi-desync": true, "--dpi-desync-any-protocol": true, "--dpi-desync-autottl": true,
+	"--dpi-desync-badseq-increment": true, "--dpi-desync-cutoff": true,
+	"--dpi-desync-fakedsplit-pattern": true, "--dpi-desync-fooling": true,
+	"--dpi-desync-hostfakesplit-midhost": true, "--dpi-desync-hostfakesplit-mod": true,
+	"--dpi-desync-repeats": true, "--dpi-desync-split-pos": true,
+	"--dpi-desync-split-seqovl": true, "--dpi-desync-split-seqovl-pattern": true,
+	"--dpi-desync-ttl": true, "--dpi-desync-start": true,
+	"--dup": true, "--dup-cutoff": true, "--dup-fooling": true,
+	"--filter-l3": true, "--filter-l7": true, "--filter-tcp": true, "--filter-udp": true,
+	"--hostlist-domains": true, "--ipset": true, "--ip-id": true, "--mss": true,
+}
+
+// Families whose members share one meaning, so a member we have not met is still
+// one we understand. `--dpi-desync-fake-<proto>=<file>.bin` names a payload for a
+// protocol; the protocol list grows with every nfqws release and the semantics do
+// not. `--orig-*` likewise adjusts the original packet.
+var knownFlagPrefixes = []string{"--dpi-desync-fake-", "--orig-"}
 
 // A reference the extractor could not resolve — shell $NAME or batch %NAME%.
 // %~dp0 is not one of these: it means "the directory holding me", which the
@@ -72,8 +109,11 @@ func Normalize(raw []string) ([]string, error) {
 		if a == "" || dropExact[a] {
 			continue
 		}
-		if hasAnyPrefix(a, unsupported) {
-			return nil, fmt.Errorf("%s is not expressible", flagName(a))
+		if hasAnyPrefix(a, ipsetSelectors) {
+			if len(out) == 0 || out[len(out)-1] != ipsetPlaceholder {
+				out = append(out, ipsetPlaceholder)
+			}
+			continue
 		}
 		if hasAnyPrefix(a, dropPrefix) {
 			continue
@@ -99,6 +139,9 @@ func Normalize(raw []string) ([]string, error) {
 		}
 		if !strings.HasPrefix(a, "-") {
 			return nil, fmt.Errorf("stray token %q (not a flag)", a)
+		}
+		if name := flagName(a); !knownFlags[name] && !hasAnyPrefix(name, knownFlagPrefixes) {
+			return nil, fmt.Errorf("unknown flag %s — this bundle does something we do not model", name)
 		}
 		out = append(out, a)
 	}
