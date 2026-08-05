@@ -143,6 +143,27 @@ say "$CASE  a strategy the engine refuses rolls back"
 fi
 
 CASE=07; if wanted "$@"; then
+say "$CASE  the tuner sandbox is valid nft on THIS kernel"
+  # Rendering it is a unit test; whether this kernel accepts it is not, and a
+  # sandbox that will not load is the difference between measuring a candidate
+  # strategy and not having a tuner at all.
+  $SSH "cat > /tmp/lt-tune.nft" </dev/null <<'NFT'
+table inet lotsman_tune {
+    chain post {
+        type filter hook postrouting priority -200; policy accept;
+        meta mark != 0x4554 return
+        oifname "eth0" meta l4proto tcp tcp dport { 80, 443 } ct original packets 1-12 queue num 201 bypass
+    }
+}
+NFT
+  if $SSH 'nft -c -f /tmp/lt-tune.nft' </dev/null 2>/tmp/lt-nft.err; then
+    ok "the sandbox table passes nft -c"
+  else
+    bad "sandbox table rejected: $(head -1 /tmp/lt-nft.err)"
+  fi
+fi
+
+CASE=08; if wanted "$@"; then
 say "$CASE  production is exactly as we found it"
   $SSH 'ps w | grep -E "lotsmand|sing-box run|nfqws" | grep -v grep | grep -v lotsman-live' </dev/null \
     | awk '{printf "   %s %s\n", $1, $5}'
