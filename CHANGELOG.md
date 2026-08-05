@@ -5,11 +5,80 @@ the branch's working dates, not tagged releases (nothing is tagged/released yet)
 
 ## [Unreleased] — branch `prerelease-fixes`
 
-The desktop-client track and pre-release engine hardening. 81 commits ahead of `main`.
-Everything below is validated live on a NixOS ThinkPad (sing-box 1.13.14) unless noted;
-the daily-driver obvyazka below (group socket + host-DNS) is built + unit-tested but its
-live root test is still pending. See `docs/DESIGN-client-ui.md` and
+The desktop-client track and pre-release engine hardening. 128 commits ahead of `main`.
+Everything below is validated live — on a NixOS ThinkPad (sing-box 1.13.14) for the client
+work, on the R5S for the router work — unless noted. See `docs/DESIGN-client-ui.md` and
 `docs/DESIGN-dns-and-tun.md` for design + handoff.
+
+### The bundle updater, and the month the router had no desync engine
+
+The R5S was found running without `nfqws` for a month. The cause was not Flowseal: it was
+our own auto-updater, which had no flag, armed itself whenever `-check-interval` was
+positive, and repointed `flowseal-current` at a freshly unzipped release with no validation
+of any kind. A bundle carries the release's artifact **and our state** — the `-user` exclude
+lists nobody ships but the strategy script requires — so a stateless extract dropped them,
+`active.sh` refused to start, and nft's `flags bypass` made the loss silent: traffic kept
+flowing, undesynced. The same shape hit on 19 June and 4 July. Every time it was us.
+
+- **State is carried forward.** `Install` copies into the new bundle any file the release
+  does not ship in a preserved subdirectory (`lists/` by default), never overwriting one it
+  does. The `-user` files were still present in `flowseal-1.9.9a`/`1.9.9b` and absent from
+  `1.9.9c` on, so the loss is dated to that update — and this alone would have prevented it.
+- **A canary decides whether a bundle becomes the one in service.** It lifts the argv out of
+  the strategy script production actually runs, repoints every bundle path at the candidate,
+  moves the engine onto a queue no nft rule diverts to, and launches it; nfqws validates its
+  inputs *after* startup, so survival is the signal and a failure carries the engine's own
+  words. It is an A/B — the same argv runs against the current bundle first, because a
+  single shot cannot tell "this bundle is broken" from "the engine cannot start here at
+  all", and a canary that confused those would freeze updates forever. No baseline, no
+  verdict.
+- **`-flowseal-update`** (default true, today's behaviour) so the bundle can be pinned, and
+  an actual swap now logs at WARN.
+- Found by running the canary on the box: production reaches the engine through a shell,
+  which removes the quoting, while we exec directly — so quotes travelled into argv and
+  every path was wrong, failing the baseline too. It would have stood aside every time.
+
+### Reading other people's strategies (`pkg/strategyimport`)
+
+The catalog was already generated — by `gen.py`, whose strategies a person transcribed by
+hand, so it froze at Flowseal 1.9.9a while the box moved to 1.10.0. An update could only
+ever cost us and never pay, because nothing read what it brought.
+
+- One normalizer over three containers (Flowseal `.bat` with caret continuations, shell with
+  variables, fenced markdown), since winws and nfqws share the flag family — which also makes
+  the `.bat` reader most of what a Windows engine will need. Deployment detail dropped,
+  payload paths reduced to the basename nfqws resolves against its working dir, host
+  selectors collapsed to `{{DOMAINS}}`, `--ipset` templated as the curated catalog already
+  spells it. Nothing is ever executed.
+- **IDs derive from the normalized arguments alone**, never the source or its order, because
+  the KB keys outcomes on the id — one that moved on a bundle update would silently discard
+  everything learned about that strategy.
+- **A whitelist, not a blacklist**: an unmodelled flag skips the recipe naming the flag. The
+  alternative is worse both ways — nfqws rejecting it kills the engine and every other
+  service's block with it, and nfqws accepting it means scoring a strategy we cannot
+  describe.
+- **Wired to the updater**: the daemon reads the installed bundle at startup and after every
+  update, folding it into the composer's pool via `zapretgen.SetRecipes`. Additive (the
+  curated catalog stays whole, so an unreadable bundle costs nothing) and base-preferring (a
+  recipe in both keeps the curated id). Live on the box: 67 curated + 79 read = 53 added.
+- Validated against ground truth, not itself: importing the router's own scripts reproduces
+  all seven of the recipes a person derived from them **byte for byte**, including the one
+  that beat live TSPU. Running it on the router also found that `ImportDir` returned nothing
+  there while reading 79 locally — callers hold the stable *symlink*, and `WalkDir` does not
+  follow one, reporting no error and no files.
+
+### Smaller, same theme
+
+- **nfqws's last words are no longer thrown away.** `Apply` already teed its output into a
+  4KiB tail buffer, but only read it on the immediate-exit path; an engine that died later —
+  the case that happens in the field — was reported as a bare exit status. The reaper now
+  carries the tail and the argv that provoked it, appends a timestamped record to
+  `nfqws-crash.log`, and distinguishes an exit we asked for from one the engine chose.
+- **Documentation audit**: 114 agents over every doc, each finding independently refuted
+  before being applied. Claims of *absence* rot fastest — "not built yet", "unexercised",
+  "no tray yet". `RELEASE-CHECKLIST.draft.md` took 14 corrections, the most of any file and
+  the one that defines what "done" means; `SOURCES.md` still called the project MIT-intended
+  after the GPLv3 relicense.
 
 ### Desktop client (GUI + tray + control plane)
 
