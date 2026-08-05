@@ -67,8 +67,10 @@ jobs:
       - name: vet
         if: matrix.goos != 'android'
         run: go vet ./...
-      - name: gui and tray build
+      # Tray only. The GUI embeds frontend/dist, which is a build artefact and is
+      # not in git, so a fresh checkout cannot compile it without node and a vite
+      # build — and its Go half is a thin pass-through anyway. The tray is the one
+      # with real platform code, and it is what this job is for.
+      - name: tray build
         if: matrix.goos == 'windows'
-        run: |
-          cd client/gui && go build ./...
-          cd ../tray && go build ./...
+        run: cd client/tray && go build ./...
