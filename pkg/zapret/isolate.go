@@ -26,19 +26,18 @@ type IsolateOptions struct {
 // GenerateIsolateNft renders the sandbox table: probe-marked egress goes to the
 // candidate's queue, everything else is untouched.
 //
-// ⚠️ This table is only half of an isolated apply, and the other half is the
-// reason the tuner has never been wired. Two tables on the same hook BOTH run:
-// once the candidate engine accepts a packet from its queue, traversal continues
-// into the production table, which queues it again — so the probe would be
-// desynced twice, by two different strategies, and whatever it measured would
-// describe neither. Isolation therefore requires a matching SKIP rule inside the
-// PRODUCTION table (`meta mark <mark> return`, ahead of its queue rules), and
-// that table belongs to whoever owns the data plane.
+// The other half lives in the production table, and it is already there: both
+// tables sit on the same hook and both run, so once the candidate engine accepts
+// a packet, traversal would continue into the production table and queue it
+// again — the probe desynced twice, by two different strategies, describing
+// neither. GenerateNft therefore emits `meta mark <TuneMark> return` ahead of its
+// queue rules.
 //
-// On the desktop client Lotsman owns it (client/platform/nfqws installs it from
-// GenerateNft) and the skip rule is ours to add. On the router it belongs to
-// Flowseal's active.sh, which is precisely the ownership this project decided to
-// take back and has not yet taken. So: renderer now, armed tuner after that.
+// That table is Lotsman's on BOTH platforms, which took a wrong turn to
+// establish: the client installs it from GenerateNft, and on the router
+// GenerateInit writes the init script that installs it from the same renderer.
+// Flowseal supplies lists and payloads; active.sh only launches nfqws with argv.
+// There was never an ownership to take back.
 func GenerateIsolateNft(o IsolateOptions) string {
 	if o.Mark == 0 {
 		o.Mark = TuneMark
