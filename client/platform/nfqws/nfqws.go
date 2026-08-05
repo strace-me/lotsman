@@ -80,8 +80,32 @@ func (e *Engine) Apply(ctx context.Context, args []string) (restarted bool, err 
 	if err := e.installNftLocked(ctx); err != nil {
 		return false, err
 	}
+	// Remember what was working before letting go of it. nfqws binds one NFQUEUE,
+	// so the replacement cannot be proven alongside the incumbent — the old
+	// process has to die first, and that is exactly why the previous argv must
+	// survive the attempt.
+	previous := slices.Clone(e.lastArgs)
 	e.stopProcessLocked()
 
+	if err := e.launchLocked(args); err != nil {
+		if len(previous) == 0 {
+			return false, err // nothing was running; there is nothing to keep
+		}
+		if rbErr := e.launchLocked(previous); rbErr != nil {
+			// Both are down. Say so with both engines' own words rather than
+			// leaving the operator to infer it from a silent absence of desync.
+			return false, fmt.Errorf("nfqws: the new strategy failed AND the previous one no longer starts: %w (rollback: %v)", err, rbErr)
+		}
+		return false, fmt.Errorf("nfqws: kept the previous strategy, the new one would not start: %w", err)
+	}
+	return true, nil
+}
+
+// launchLocked starts nfqws on args and reports whether it was still alive a
+// moment later. It records e.cmd/e.lastArgs only on success, so a failed attempt
+// leaves the engine's recorded identity matching whatever is actually running —
+// this project's recurring defect is a field asserting a state nobody observed.
+func (e *Engine) launchLocked(args []string) error {
 	full := append([]string{fmt.Sprintf("--qnum=%d", e.inst.QNum)}, args...)
 	cmd := exec.Command(e.bin, full...)
 	// nfqws resolves fake-payload files (--dpi-desync-fake-tls=tls_clienthello_*.bin)
@@ -97,7 +121,7 @@ func (e *Engine) Apply(ctx context.Context, args []string) (restarted bool, err 
 	cmd.Stdout = io.MultiWriter(os.Stdout, &said)
 	cmd.Stderr = io.MultiWriter(os.Stderr, &said)
 	if err := cmd.Start(); err != nil {
-		return false, fmt.Errorf("nfqws: start %s: %w", e.bin, err)
+		return fmt.Errorf("nfqws: start %s: %w", e.bin, err)
 	}
 	// One Wait, shared: the liveness check and the reaper both read this channel.
 	// Calling cmd.Wait twice is a race, and nil-ing cmd.Process would break Kill.
@@ -112,7 +136,7 @@ func (e *Engine) Apply(ctx context.Context, args []string) (restarted bool, err 
 	// catalog on the strength of an engine that is not running.
 	select {
 	case err := <-done:
-		return false, fmt.Errorf("nfqws: engine exited immediately (%v): %s", err, said.String())
+		return fmt.Errorf("nfqws: engine exited immediately (%v): %s", err, said.String())
 	case <-time.After(400 * time.Millisecond):
 	}
 
@@ -138,7 +162,7 @@ func (e *Engine) Apply(ctx context.Context, args []string) (restarted bool, err 
 		e.recordCrash(full, err, said.String())
 	}()
 	e.log.Info("nfqws applied", "qnum", e.inst.QNum, "blocks", strings.Count(strings.Join(args, " "), "--new")+1)
-	return true, nil
+	return nil
 }
 
 // Stop kills nfqws and removes the nft table, leaving the host as it was found.
