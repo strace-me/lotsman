@@ -58,7 +58,32 @@ $SSH "mkdir -p $REMOTE" </dev/null
 for f in dist/lotsmand dist/*.test; do
   $SSH "cat > $REMOTE/$(basename "$f") && chmod +x $REMOTE/$(basename "$f")" < "$f"
 done
-echo "   staged $(ls dist/*.test | wc -l | tr -d ' ') test binaries + lotsmand"
+# Test binaries carry no fixtures: `go test -c` bundles code, not testdata. A
+# package whose tests read testdata/ fails on the box for a reason that looks
+# like a real defect, which is exactly how a harness loses its credibility.
+for d in pkg/strategyimport/testdata; do
+  [ -d "$d" ] || continue
+  $SSH "mkdir -p $REMOTE/$(basename $(dirname $d))/testdata" </dev/null
+  tar cf - -C "$(dirname $d)" testdata | $SSH "tar xf - -C $REMOTE/$(basename $(dirname $d))"
+done
+echo "   staged $(ls dist/*.test | wc -l | tr -d ' ') test binaries + lotsmand + fixtures"
+
+# busybox has no pkill, and a canary left holding a queue is a real leak on the
+# operator's router — so the cleanup has to work with what the box actually has.
+$SSH "cat > $REMOTE/killq" </dev/null <<'KILLQ'
+#!/bin/sh
+# kill whatever holds NFQUEUE $1, without matching this script's own cmdline
+me=$$
+for p in $(ls /proc | grep '^[0-9]*$'); do
+  [ "$p" = "$me" ] && continue
+  # The redirect can fail after the process exits, and that error comes from
+  # the SHELL, not tr — so the whole group needs the suppression.
+  c=$( { tr '\0' ' ' < /proc/$p/cmdline; } 2>/dev/null )
+  [ -n "$c" ] || continue   # the process exited while we were reading /proc
+  case "$c" in /*nfqws*--qnum=$1*) kill -9 "$p" 2>/dev/null;; esac
+done
+KILLQ
+$SSH "chmod +x $REMOTE/killq" </dev/null
 
 # ------------------------------------------------------------------ cases ----
 CASE=01; if wanted "$@"; then
@@ -74,7 +99,8 @@ fi
 CASE=02; if wanted "$@"; then
 say "$CASE  pure guarantees, on the box's own filesystem"
   for t in rulesets flowseal strategyimport executor; do
-    if $SSH "cd $REMOTE && ./$t.test -test.count=1 >/tmp/$t.out 2>&1" </dev/null; then
+    d=$REMOTE; [ "$t" = strategyimport ] && d=$REMOTE/strategyimport
+    if $SSH "cd $d && $REMOTE/$t.test -test.count=1 >/tmp/$t.out 2>&1" </dev/null; then
       ok "$t"
     else
       bad "$t — $($SSH "grep -m2 -E '^\s+--- FAIL|FAIL' /tmp/$t.out" </dev/null | tr '\n' ' ')"
@@ -87,10 +113,10 @@ say "$CASE  the daemon starts on the LIVE config and changes nothing"
   log=$REMOTE/dryrun.log
   $SSH "cd /tmp && ($REMOTE/lotsmand -config /etc/lotsman/r5s.yaml \
         -clash-base http://127.0.0.1:9090 -probe-proxy 127.0.0.1:7891 \
-        -interval 30s -check-interval 15m -flowseal-update=false \
+        -interval 30s -check-interval 15m -flowseal-update=false -zapret-compose \
         -kb-file /tmp/lt-h/kb.json -state-file /tmp/lt-h/state.json \
         > $log 2>&1 & echo \$! > /tmp/lt-h.pid); sleep 25; kill -9 \$(cat /tmp/lt-h.pid) 2>/dev/null" </dev/null
-  errs=$($SSH "grep -c 'level=ERROR' $log" </dev/null || echo 0)
+  errs=$($SSH "grep -c 'level=ERROR' $log || true" </dev/null | head -1)
   [ "$errs" = 0 ] && ok "no errors" || bad "$errs error lines — see $log"
   $SSH "grep -q 'recipe pool refreshed' $log" </dev/null \
     && ok "read the installed bundle: $($SSH "grep -o 'bundle_read=[0-9]* added=[0-9]*' $log | head -1" </dev/null)" \
@@ -117,7 +143,7 @@ say "$CASE  the engine still starts on the strategy in service"
   script=$($SSH 'readlink -f /opt/zapret-lotsman/active.sh' </dev/null)
   if [ -z "$script" ]; then meh "no active strategy script"; else
     if $SSH "sh $script $SPARE_QNUM >/tmp/lt-canary.log 2>&1 & P=\$!; sleep 3; \
-             if kill -0 \$P 2>/dev/null; then pkill -f 'qnum=$SPARE_QNUM'; kill \$P 2>/dev/null; exit 0; \
+             if kill -0 \$P 2>/dev/null; then $REMOTE/killq $SPARE_QNUM; kill \$P 2>/dev/null; exit 0; \
              else exit 1; fi" </dev/null; then
       ok "$(basename "$script") starts (queue $SPARE_QNUM, no traffic diverted)"
     else
@@ -132,7 +158,7 @@ say "$CASE  a strategy the engine refuses rolls back"
   if $SSH "test -f /opt/zapret-lotsman/alt12.sh" </dev/null; then
     $SSH "sed 's#\\\$B/#/nonexistent-payload-dir/#g' /opt/zapret-lotsman/alt12.sh > /tmp/lt-bad.sh; chmod +x /tmp/lt-bad.sh" </dev/null
     if $SSH "sh /tmp/lt-bad.sh $SPARE_QNUM >/tmp/lt-bad.log 2>&1 & P=\$!; sleep 3; \
-             if kill -0 \$P 2>/dev/null; then pkill -f 'qnum=$SPARE_QNUM'; kill \$P 2>/dev/null; exit 0; else exit 1; fi" </dev/null; then
+             if kill -0 \$P 2>/dev/null; then $REMOTE/killq $SPARE_QNUM; kill \$P 2>/dev/null; exit 0; else exit 1; fi" </dev/null; then
       bad "the deliberately broken strategy STARTED — the fixture is wrong, not the code"
     else
       ok "a broken strategy is detectable by liveness: $($SSH 'tail -1 /tmp/lt-bad.log' </dev/null | cut -c1-60)"
@@ -164,7 +190,9 @@ NFT
   # The other half: without a skip rule in the LIVE table the probe is desynced
   # twice and measures neither strategy. This is the check that says whether the
   # box is ready for a tuner at all.
-  if $SSH 'nft list ruleset 2>/dev/null | grep -q "meta mark 0x4554 return"' </dev/null; then
+  # nft reads a mark back zero-padded (0x00004554), so comparing our rendered
+  # form to its output is a mismatch that looks like a missing rule.
+  if $SSH 'nft list ruleset 2>/dev/null | tr -d " " | grep -qi "metamark0x0*4554return"' </dev/null; then
     ok "the live table lets the sandbox mark through"
   else
     meh "the live table has no sandbox skip rule yet — regenerate /etc/init.d/nfqws before arming a tuner"
@@ -179,7 +207,7 @@ say "$CASE  production is exactly as we found it"
     $SSH "ps w | grep -v grep | grep -v lotsman-live | grep -q '$p'" </dev/null \
       && ok "$p alive" || bad "$p NOT running"
   done
-  left=$($SSH "pgrep -f 'qnum=$SPARE_QNUM' | wc -l" </dev/null)
+  left=$($SSH "cat /proc/net/netfilter/nfnetlink_queue 2>/dev/null | grep -c '^ *$SPARE_QNUM ' || true" </dev/null | head -1)
   [ "$left" = 0 ] && ok "no canary left behind on queue $SPARE_QNUM" || bad "$left stray canary process(es)"
 fi
 
