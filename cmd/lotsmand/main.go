@@ -73,6 +73,7 @@ import (
 	"github.com/strace-me/lotsman/pkg/strategyimport"
 	"github.com/strace-me/lotsman/pkg/subscription"
 	"github.com/strace-me/lotsman/pkg/tspu"
+	"github.com/strace-me/lotsman/pkg/version"
 	"github.com/strace-me/lotsman/pkg/vpnbalance"
 	"github.com/strace-me/lotsman/pkg/zapretgen"
 	"github.com/strace-me/lotsman/pkg/zaptune"
@@ -81,7 +82,6 @@ import (
 // version is the build/deploy label, stamped at build time via
 // -ldflags "-X main.version=v6.9-<git-short>". "dev" for a plain `go build`.
 // Logged at startup so the running daemon self-reports what's deployed.
-var version = "dev"
 
 func main() {
 	var (
@@ -146,7 +146,7 @@ func main() {
 	flag.Parse()
 
 	log := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelInfo}))
-	log.Info("lotsmand starting", "version", version, "dry_run", *dryRun, "simulate", *simulate, "interval", interval.String())
+	log.Info("lotsmand starting", "version", version.String(), "dry_run", *dryRun, "simulate", *simulate, "interval", interval.String())
 
 	bus := events.NewBus()
 	knowledge := kb.New()

@@ -33,3 +33,4 @@ cover.out
 # installed third-party agent skills (reproducible via npx, must not ship to public)
 .claude/skills/
 .agents/
+/dist/

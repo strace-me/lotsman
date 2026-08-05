@@ -8,6 +8,7 @@ import (
 	"context"
 	"flag"
 	"fmt"
+	"github.com/strace-me/lotsman/pkg/version"
 	"log/slog"
 	"os"
 	"os/signal"
@@ -107,6 +108,7 @@ func main() {
 	flag.Parse()
 
 	log := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelInfo}))
+	log.Info("lotsman-client starting", "version", version.String())
 
 	if *initConfig {
 		if err := writeStarter(*configPath, *subURLs, *recommended); err != nil {
