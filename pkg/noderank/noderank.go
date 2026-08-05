@@ -49,12 +49,18 @@ type Candidate struct {
 // Service is one ranking job: which selector to pin, what URL to probe through,
 // how to weigh the result, and the country policy for eligible exits.
 type Service struct {
-	Name      string           // for logs
-	Selector  string           // sel-<svc>, the selector to pin
-	ProbeURL  string           // service-aware probe target (http(s) URL)
-	Weights   balancer.Weights // category profile (balancer.ProfileFor)
-	ExcludeCC []string         // exit countries to never pin (e.g. ["ru"]); unknown country is never excluded
-	IncludeCC []string         // if non-empty, ONLY pin these (e.g. ["us"] for Netflix); unknown country fails this filter
+	Name     string           // for logs
+	Selector string           // sel-<svc>, the selector to pin
+	ProbeURL string           // service-aware probe target (http(s) URL)
+	Weights  balancer.Weights // category profile (balancer.ProfileFor)
+	// Goodput measures a node's sustained throughput, in KiB/s. Optional: nil
+	// keeps the latency-only ranking, which cannot distinguish a fast node from
+	// a frozen one. The implementation is expected to refuse — ok=false — while
+	// the link is carrying a live session, since pulling volume competes with
+	// the very traffic it would disturb.
+	Goodput   func(ctx context.Context, node string) (kbps float64, ok bool)
+	ExcludeCC []string // exit countries to never pin (e.g. ["ru"]); unknown country is never excluded
+	IncludeCC []string // if non-empty, ONLY pin these (e.g. ["us"] for Netflix); unknown country fails this filter
 	// Sticky pins the service to its currently-advised node as long as that node
 	// stays healthy and a selector member — never flipping by latency/score, only
 	// failing over on real failure (the node leaving the pool). For multi-connection
@@ -101,6 +107,16 @@ type Ranker struct {
 	timeout time.Duration
 	dryRun  bool
 	log     *slog.Logger
+
+	// Goodput measures a node's sustained throughput in KiB/s. Optional: nil
+	// keeps the latency-only ranking, which cannot distinguish a fast node from a
+	// frozen one — under TSPU's volume freeze a node answers a delay test in 40ms
+	// and then carries nothing, so RTT alone crowns the deadest exit in the pool.
+	//
+	// The implementation is expected to refuse (ok=false) while the link carries
+	// a live session: pulling volume competes with the traffic it would disturb,
+	// and a stale ranking for one interval is cheaper than a spoiled game.
+	Goodput func(ctx context.Context, node string) (kbps float64, ok bool)
 
 	// SwitchMargin is the minimum score advantage (in [0,1]) a new top node
 	// must have over the currently-advised node before advice flips. While the
@@ -361,6 +377,12 @@ func (r *Ranker) screen(ctx context.Context, node string) bool {
 }
 
 // probe runs samples delay tests through the service URL; failures count as loss.
+//
+// Latency alone cannot see the failure that matters most here. A node under
+// TSPU's volume freeze answers a delay test in 40ms and then carries nothing
+// past the first few tens of kilobytes, so a ranking built on RTT crowns the
+// deadest exit in the pool. Goodput, when the caller supplies a way to measure
+// it, is what tells those apart.
 func (r *Ranker) probe(ctx context.Context, node, testURL string) quality.Quality {
 	rtts := make([]float64, 0, r.samples)
 	for i := 0; i < r.samples; i++ {
@@ -368,7 +390,15 @@ func (r *Ranker) probe(ctx context.Context, node, testURL string) quality.Qualit
 			rtts = append(rtts, float64(d))
 		}
 	}
-	return quality.FromRTTs(rtts, r.samples)
+	q := quality.FromRTTs(rtts, r.samples)
+	// Only for a node that answers at all: measuring volume through one that
+	// cannot connect buys nothing and costs bytes.
+	if r.Goodput != nil && q.Samples > 0 && q.Loss < 1 {
+		if kbps, ok := r.Goodput(ctx, node); ok {
+			q.GoodputKBps = kbps
+		}
+	}
+	return q
 }
 
 // countryOK applies the exit-country policy. Exclude wins over everything (but a
