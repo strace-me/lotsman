@@ -1,9 +1,18 @@
 name: CI
+
+# Runs on the working branch too, not just main: every push here failed for weeks
+# with a 0-second run and no jobs, which sent an email each time and told nobody
+# anything. Whatever GitHub disliked, it refused to say through the API — so this
+# file is deliberately written in the plainest form available: block mappings
+# only, no inline flow maps, no trailing comments on keys, no expression in a
+# place that needs quoting.
 on:
   push:
-    branches: [main]
+    branches:
+      - main
+      - prerelease-fixes
   pull_request:
-  workflow_dispatch:   # also runnable manually: gh workflow run ci.yml
+  workflow_dispatch:
 
 jobs:
   test:
@@ -15,18 +24,18 @@ jobs:
           go-version-file: go.mod
           cache: true
       - name: gofmt
-        run: test -z "$(gofmt -l .)" || { gofmt -l .; echo "run: gofmt -w ."; exit 1; }
+        run: test -z "$(gofmt -l .)" || { gofmt -l .; echo "run gofmt -w ."; exit 1; }
       - name: build
         run: go build ./...
       - name: vet
         run: go vet ./...
-      - name: test (race)
+      - name: test
         run: go test -race ./...
 
-  # The client ships for Windows and Android too, and both have already had silent
-  # breakage: a test file that failed to COMPILE on Windows made the whole client/core
-  # package untestable there, and Go's "linux" build tag quietly matches android. Cross
-  # building + vetting is cheap and catches exactly that class.
+  # The client ships for Windows and Android too, and both have had silent
+  # breakage: a test file that failed to COMPILE on Windows made the whole
+  # client/core package untestable there, and Go's "linux" build tag quietly
+  # matches android. Cross building is cheap and catches exactly that class.
   cross:
     runs-on: ubuntu-latest
     strategy:
@@ -39,6 +48,10 @@ jobs:
             goarch: arm64
           - goos: android
             goarch: arm64
+    env:
+      GOOS: ${{ matrix.goos }}
+      GOARCH: ${{ matrix.goarch }}
+      CGO_ENABLED: "0"
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
@@ -46,17 +59,12 @@ jobs:
           go-version-file: go.mod
           cache: true
       - name: build
-        env: { GOOS: "${{ matrix.goos }}", GOARCH: "${{ matrix.goarch }}", CGO_ENABLED: "0" }
         run: go build ./...
-      - name: vet (includes tests)
-        # android has no test toolchain worth vetting here; the other two must stay clean.
+      - name: vet
         if: matrix.goos != 'android'
-        env: { GOOS: "${{ matrix.goos }}", GOARCH: "${{ matrix.goarch }}", CGO_ENABLED: "0" }
         run: go vet ./...
-      - name: gui + tray build
+      - name: gui and tray build
         if: matrix.goos == 'windows'
-        env: { GOOS: "${{ matrix.goos }}", GOARCH: "${{ matrix.goarch }}", CGO_ENABLED: "0" }
         run: |
-          (cd client/gui && go build ./...)
-          (cd client/tray && go build ./...)
-
+          cd client/gui && go build ./...
+          cd ../tray && go build ./...
