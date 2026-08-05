@@ -2,6 +2,7 @@ package core
 
 import (
 	"context"
+	"github.com/strace-me/lotsman/pkg/version"
 	"sort"
 	"time"
 
@@ -14,6 +15,9 @@ import (
 // paths, and every richer section is additive, so a tray decoding only the old
 // Status struct is unaffected.
 type Report struct {
+	// Version identifies the build answering. A status with no build identity is
+	// unanswerable in a bug report and useless in a rollback.
+	Version       string         `json:"version"`
 	Running       bool           `json:"running"`
 	Verdict       Verdict        `json:"verdict"`
 	Network       NetworkInfo    `json:"network"`
@@ -87,6 +91,7 @@ func (c *Core) Report(ctx context.Context) Report {
 	services := c.statusLocked(ctx)
 	running := c.Healthy(ctx)
 	return Report{
+		Version:       version.String(),
 		Running:       running,
 		Verdict:       verdict(running, services),
 		Network:       c.networkInfo(),
