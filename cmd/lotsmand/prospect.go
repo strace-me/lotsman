@@ -9,6 +9,7 @@ import (
 	"github.com/strace-me/lotsman/pkg/brain"
 	"github.com/strace-me/lotsman/pkg/burstprobe"
 	"github.com/strace-me/lotsman/pkg/dataplane"
+	"github.com/strace-me/lotsman/pkg/desyncgen"
 	"github.com/strace-me/lotsman/pkg/desynctune"
 	"github.com/strace-me/lotsman/pkg/prospect"
 	"github.com/strace-me/lotsman/pkg/quality"
@@ -39,7 +40,12 @@ type prospector struct {
 	gate     *desynctune.Gate
 	sandbox  *zapret.Sandbox
 	probeVia string // socks addr the measurements dial through
-	log      *slog.Logger
+	// healthURL is the baseline every strategy is measured against: can this box
+	// reach the internet with no desync at all. It gates the collapse detector.
+	healthURL      string
+	collapseWindow time.Duration
+	collapseMin    int
+	log            *slog.Logger
 }
 
 // run performs at most one pass. It is a periodic.Task body: refusing is the
@@ -49,6 +55,7 @@ func (p *prospector) run(ctx context.Context) error {
 	if dataplane.RealtimeActive(ctx, p.clash) {
 		return nil // somebody is playing; the search can wait hours
 	}
+	p.checkCollapse(ctx)
 	svc, ok := p.pick()
 	if !ok {
 		return nil
@@ -79,7 +86,16 @@ func (p *prospector) run(ctx context.Context) error {
 	cheap := p.probe(svc, 8<<10)
 	burst := p.probe(svc, 64<<10)
 
-	res, err := desynctune.TwoPhase(ctx, engine, desynctune.Candidates(engine, nil, 48),
+	// Start next to something that has held, not at index 0. The neighbourhood of
+	// a strategy proven over weeks is where the next working one most likely
+	// lives, and consulting the record costs no probes at all. Cold grid only
+	// when there is nothing proven yet.
+	var seed desyncgen.Strategy
+	if m, ok := p.store.StableSeed(); ok {
+		seed = m
+		p.log.Info("prospect: searching around a proven strategy", "service", svc.Name)
+	}
+	res, err := desynctune.TwoPhase(ctx, engine, desynctune.Candidates(engine, seed, 48),
 		p.sandbox.Apply, cheap, burst, 2*time.Second, 6, tester.ThroughputConfig())
 	if err != nil {
 		p.log.Warn("prospect: pass failed", "service", svc.Name, "err", err)
@@ -91,7 +107,7 @@ func (p *prospector) run(ctx context.Context) error {
 	}
 
 	id := desynctune.StrategyID(res.Args)
-	p.store.Won(id, res.Args, svc.Name)
+	p.store.Won(id, res.Args, svc.Name, res.Winner)
 	if err := p.store.Save(); err != nil {
 		p.log.Warn("prospect: could not persist the finding", "err", err)
 	}
@@ -101,6 +117,41 @@ func (p *prospector) run(ctx context.Context) error {
 	p.log.Info("prospect: strategy won a pass", "service", svc.Name, "id", id,
 		"confirmed", len(p.store.Recipes()), "pending", p.store.Pending())
 	return nil
+}
+
+// checkCollapse notices when several proven strategies stopped working at once.
+//
+// Independent strategies do not die together by chance, so the correlation is
+// the signal: something upstream changed and every recorded failure now describes
+// a network that no longer exists. Forgetting those failures is worth more than
+// any calendar threshold.
+//
+// Gated on the link being otherwise healthy, and that gate is the whole safety of
+// it. A dead uplink or a changed exit fails everything at once too, and a
+// detector that cannot tell the difference would erase months of evidence during
+// a five-minute ISP outage — silently, while reporting success.
+func (p *prospector) checkCollapse(ctx context.Context) {
+	if !p.store.Collapsed(time.Now(), p.collapseWindow, p.collapseMin) {
+		return
+	}
+	if !p.linkHealthy(ctx) {
+		p.log.Info("prospect: several strategies fell out together, but the link itself is unwell — not treating it as a DPI change")
+		return
+	}
+	n := p.store.Rearm()
+	if err := p.store.Save(); err != nil {
+		p.log.Warn("prospect: could not persist the rearm", "err", err)
+	}
+	p.log.Warn("prospect: proven strategies collapsed together while the link is healthy — the DPI moved; forgetting stale failures and searching again",
+		"rearmed", n, "window", p.collapseWindow.String())
+}
+
+// linkHealthy asks whether the box can reach the internet at all without any
+// desync, which is the baseline every strategy is measured against.
+func (p *prospector) linkHealthy(ctx context.Context) bool {
+	q := burstprobe.Probe(ctx, dataplane.BurstClient(p.probeVia, 10*time.Second),
+		[]string{p.healthURL}, 8<<10, 1)
+	return q.Samples > 0 && q.Loss < 1
 }
 
 // verify re-measures leads against the no-desync baseline. A lead that wins here
@@ -128,7 +179,7 @@ func (p *prospector) verify(ctx context.Context, svc registry.Service, leads []p
 		// would confirm strategies on the strength of a link that was working
 		// anyway, which is the whole failure the second pass exists to prevent.
 		if t.RecipeID == v.RecipeID && v.Outcome == tester.OutcomeRecipe {
-			p.store.Won(t.RecipeID, byID[t.RecipeID], svc.Name)
+			p.store.Won(t.RecipeID, byID[t.RecipeID], svc.Name, nil)
 			continue
 		}
 		p.store.Lost(t.RecipeID)

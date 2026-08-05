@@ -12,8 +12,8 @@ func TestLeadsAreOfferedOldestFirst(t *testing.T) {
 	now := time.Unix(0, 0)
 	s, _ := Open("", func() time.Time { now = now.Add(time.Hour); return now })
 
-	s.Won("old", []string{"--a"}, "youtube")
-	s.Won("new", []string{"--b"}, "youtube")
+	s.Won("old", []string{"--a"}, "youtube", nil)
+	s.Won("new", []string{"--b"}, "youtube", nil)
 
 	leads := s.Leads()
 	if len(leads) != 2 {
@@ -25,7 +25,7 @@ func TestLeadsAreOfferedOldestFirst(t *testing.T) {
 
 	// A confirmed finding is no longer a lead — re-testing it would spend the
 	// window on something already decided.
-	s.Won("old", []string{"--a"}, "discord")
+	s.Won("old", []string{"--a"}, "discord", nil)
 	for _, l := range s.Leads() {
 		if l.ID == "old" {
 			t.Error("a confirmed finding is still offered for verification")

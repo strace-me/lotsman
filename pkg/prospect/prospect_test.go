@@ -25,7 +25,7 @@ func TestOneWinIsALeadAndTwoIsARecipe(t *testing.T) {
 	s := storeAt(t, "")
 	args := []string{"--dpi-desync=fake,multisplit"}
 
-	s.Won("abc", args, "youtube")
+	s.Won("abc", args, "youtube", map[string]string{"method": "fake"})
 	if got := s.Recipes(); len(got) != 0 {
 		t.Errorf("a single win produced %d recipes; it must produce none", len(got))
 	}
@@ -33,7 +33,7 @@ func TestOneWinIsALeadAndTwoIsARecipe(t *testing.T) {
 		t.Errorf("pending = %d, want the lead counted", s.Pending())
 	}
 
-	s.Won("abc", args, "discord")
+	s.Won("abc", args, "discord", nil)
 	got := s.Recipes()
 	if len(got) != 1 {
 		t.Fatalf("two wins produced %d recipes, want 1", len(got))
@@ -50,8 +50,8 @@ func TestOneWinIsALeadAndTwoIsARecipe(t *testing.T) {
 // starts losing must leave the pool again.
 func TestConfirmedStrategyIsDemotedWhenItStopsWorking(t *testing.T) {
 	s := storeAt(t, "")
-	s.Won("abc", []string{"--dpi-desync=fake"}, "youtube")
-	s.Won("abc", []string{"--dpi-desync=fake"}, "youtube")
+	s.Won("abc", []string{"--dpi-desync=fake"}, "youtube", nil)
+	s.Won("abc", []string{"--dpi-desync=fake"}, "youtube", nil)
 	if len(s.Recipes()) != 1 {
 		t.Fatal("setup: not confirmed")
 	}
@@ -67,8 +67,8 @@ func TestConfirmedStrategyIsDemotedWhenItStopsWorking(t *testing.T) {
 func TestFindingsSurviveARestart(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "prospect.json")
 	s := storeAt(t, path)
-	s.Won("abc", []string{"--dpi-desync=fake"}, "youtube")
-	s.Won("abc", []string{"--dpi-desync=fake"}, "youtube")
+	s.Won("abc", []string{"--dpi-desync=fake"}, "youtube", nil)
+	s.Won("abc", []string{"--dpi-desync=fake"}, "youtube", nil)
 	if err := s.Save(); err != nil {
 		t.Fatal(err)
 	}
@@ -96,8 +96,8 @@ func TestCorruptStoreRefusesRatherThanResetting(t *testing.T) {
 func TestRecipeOrderIsStable(t *testing.T) {
 	s := storeAt(t, "")
 	for _, id := range []string{"zzz", "aaa", "mmm"} {
-		s.Won(id, []string{"--dpi-desync=fake"}, "svc")
-		s.Won(id, []string{"--dpi-desync=fake"}, "svc")
+		s.Won(id, []string{"--dpi-desync=fake"}, "svc", nil)
+		s.Won(id, []string{"--dpi-desync=fake"}, "svc", nil)
 	}
 	first := s.Recipes()
 	for i := 0; i < 5; i++ {
