@@ -109,6 +109,7 @@ func (s *ControlServer) Serve(path string) error {
 	mux.HandleFunc("GET /status", s.handleStatus)
 	mux.HandleFunc("POST /stop", s.handleStop)
 	mux.HandleFunc("POST /service/{name}/recheck", s.handleRecheck)
+	mux.HandleFunc("POST /service/{name}/enabled", s.handleSetEnabled)
 	mux.HandleFunc("GET /events", s.handleEvents)
 	mux.HandleFunc("GET /config", s.handleGetConfig)
 	mux.HandleFunc("POST /config", s.handleSetConfig)
@@ -207,6 +208,76 @@ func (s *ControlServer) handleRecheck(w http.ResponseWriter, r *http.Request) {
 	}
 	w.WriteHeader(http.StatusAccepted)
 	w.Write([]byte(`{"rechecking":true}`))
+}
+
+// handleSetEnabled switches one service on or off — the tile toggle. It is a
+// CONFIG edit, not a runtime override, on purpose: the desired state is re-asserted
+// every few seconds from the config-built registry, so anything held only in memory
+// is undone within a tick. Writing the bit to the file and reloading makes the
+// switch mean the same thing to every consumer, survive a restart, and read the
+// same way on the router.
+//
+// The body is {"enabled":true|false}; a missing field is rejected rather than
+// guessed, because guessing here would silently switch a service the wrong way.
+func (s *ControlServer) handleSetEnabled(w http.ResponseWriter, r *http.Request) {
+	if s.configPath == "" || s.restart == nil {
+		http.Error(w, "in-app config editing is not enabled on this instance", http.StatusNotImplemented)
+		return
+	}
+	var in struct {
+		Enabled *bool `json:"enabled"`
+	}
+	if err := json.NewDecoder(io.LimitReader(r.Body, 1<<16)).Decode(&in); err != nil {
+		http.Error(w, "bad request: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+	if in.Enabled == nil {
+		http.Error(w, `body must set "enabled" to true or false`, http.StatusBadRequest)
+		return
+	}
+	name := r.PathValue("name")
+	data, err := os.ReadFile(s.configPath)
+	if err != nil {
+		http.Error(w, "read config: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+	y, found, err := config.SetServiceEnabledYAML(data, name, *in.Enabled)
+	if err != nil {
+		http.Error(w, "the config file does not parse — repair it in the YAML editor first: "+err.Error(), http.StatusConflict)
+		return
+	}
+	if !found {
+		http.Error(w, "no service named "+name+" is declared in the config", http.StatusBadRequest)
+		return
+	}
+	// Validate the WHOLE config, not just the edit: switching the last service off
+	// leaves nothing to steer, and that must fail before the file is touched.
+	cfg, err := config.Parse(y)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	if err := writeFileAtomic(s.configPath, y, 0o600); err != nil {
+		http.Error(w, "write config: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+	s.log.Info("service switched", "service", name, "enabled", *in.Enabled)
+	w.WriteHeader(http.StatusAccepted)
+	json.NewEncoder(w).Encode(map[string]any{"service": name, "enabled": *in.Enabled})
+	s.applyAfterAck(cfg)
+}
+
+// applyAfterAck applies a written config once the caller has its answer. An
+// in-place reload restarts sing-box only when its generated config actually
+// changed, so an edit that does not touch routing keeps every live connection;
+// a reload that cannot apply falls back to re-exec.
+func (s *ControlServer) applyAfterAck(cfg *config.Config) {
+	go func() {
+		if err := s.core.Reload(cfg); err != nil {
+			s.log.Warn("in-place config reload failed — falling back to re-exec", "err", err)
+			s.restart()
+		}
+	}()
 }
 
 // handleEvents returns recent brain rung-transitions newest-first (the "история
@@ -313,15 +384,7 @@ func (s *ControlServer) handleSetConfig(w http.ResponseWriter, r *http.Request) 
 	w.WriteHeader(http.StatusAccepted)
 	w.Write([]byte(`{"applied":true}`))
 	// Apply AFTER the ack, so the caller sees success before the data plane blips.
-	// Prefer an in-place reload — it restarts sing-box only when its config actually
-	// changed, so a non-routing edit keeps every live connection; fall back to a full
-	// re-exec if the reload cannot apply in place.
-	go func() {
-		if err := s.core.Reload(cfg); err != nil {
-			s.log.Warn("in-place config reload failed — falling back to re-exec", "err", err)
-			s.restart()
-		}
-	}()
+	s.applyAfterAck(cfg)
 }
 
 func readConfigDoc(r *http.Request) (configDoc, error) {

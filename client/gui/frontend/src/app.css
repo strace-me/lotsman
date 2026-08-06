@@ -342,6 +342,21 @@ h2 {
 .row .ghost {
   margin-left: auto;
 }
+/* Only the first action takes the auto margin; without this a second button gets
+   its own and the pair splits across the row instead of sitting together. */
+.row .ghost ~ .ghost {
+  margin-left: 10px;
+}
+.row.off .name,
+.row.off .where {
+  color: var(--ink-faint);
+}
+
+.tile-actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
 
 .two-col {
   display: grid;

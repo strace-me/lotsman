@@ -32,7 +32,7 @@ the component split is mechanical (event contracts already separate them).
 - `pkg/events` — cross-component message contract + in-proc bus. [ProductionVerdict, DesiredStateChanged, ActualStateObserved, Bus] [the network-split seam]
 - `pkg/registry` — services, categories, denormalized strategy chain (STATE_CHAINS). [Service, Device, State, Position]
 - `pkg/strategy` — strategy classes + cold-start seed order; leaf, no lotsman imports. [ClassZapret, ClassByeDPI, ClassVPN, ...]
-- `pkg/config` — declarative YAML → registry + subscriptions + pools; composition root, assigns chain positions, validates. [Config, Parse]
+- `pkg/config` — declarative YAML → registry + subscriptions + pools; composition root, assigns chain positions, validates. A service with `disabled: true` is validated like any other and then dropped, so no consumer needs a guard. `toggle.go` flips that bit by editing the YAML node, preserving comments and layout — the dashboard switch must not reformat a hand-kept file. [Config, Parse, SetServiceEnabledYAML]
 
 ### Data model / generation
 - `pkg/subscription` — parse VPN subscriptions (several formats) into Nodes. [Node, Parse]

@@ -565,3 +565,258 @@ func TestParseRejectsUnknownKeys(t *testing.T) {
 		t.Errorf("an empty config should fail validation, not decoding; got %v", err)
 	}
 }
+
+// A switched-off service must leave the registry entirely, because every consumer
+// — prober, brain, route generator, desync composer — reads the registry. Leaving
+// it in with a flag would mean one forgotten guard is a service that is "off" but
+// still probed and still routed.
+func TestParseDropsDisabledServiceFromTheRegistry(t *testing.T) {
+	in := `
+services:
+  - { name: youtube, category: streaming, probe_target: https://x }
+  - { name: discord, category: messaging, probe_target: https://y, disabled: true }
+`
+	cfg, err := Parse([]byte(in))
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	if _, ok := cfg.Registry.Services["discord"]; ok {
+		t.Error("a disabled service must not be in the registry — every consumer reads it")
+	}
+	if _, ok := cfg.Registry.Services["youtube"]; !ok {
+		t.Error("the enabled service went missing")
+	}
+	if len(cfg.DisabledServices) != 1 || cfg.DisabledServices[0] != "discord" {
+		t.Errorf("DisabledServices = %v, want [discord] so a UI can offer to switch it back on", cfg.DisabledServices)
+	}
+}
+
+// Being switched off is not a licence to be malformed: the typo should surface now,
+// not at the moment someone switches the service back on and the whole config stops
+// loading.
+func TestParseStillValidatesADisabledService(t *testing.T) {
+	in := `
+services:
+  - { name: youtube, category: streaming, probe_target: https://x }
+  - { name: discord, category: messaging, probe_target: https://y, disabled: true, profile: nonsense }
+`
+	if _, err := Parse([]byte(in)); err == nil {
+		t.Fatal("expected the bad profile on a disabled service to be rejected")
+	}
+}
+
+func TestParseRejectsEveryServiceDisabled(t *testing.T) {
+	in := `
+services:
+  - { name: youtube, category: streaming, probe_target: https://x, disabled: true }
+`
+	_, err := Parse([]byte(in))
+	if err == nil {
+		t.Fatal("expected an error: with every service off there is nothing to steer")
+	}
+	if !strings.Contains(err.Error(), "disabled") {
+		t.Errorf("error should name the cause, got %q", err)
+	}
+}
+
+// The duplicate check must span disabled entries too, or a second declaration of a
+// name lies dormant until someone switches it on.
+func TestParseRejectsDuplicateWhenOneIsDisabled(t *testing.T) {
+	in := `
+services:
+  - { name: youtube, category: streaming, probe_target: https://x }
+  - { name: youtube, category: streaming, probe_target: https://z, disabled: true }
+`
+	if _, err := Parse([]byte(in)); err == nil {
+		t.Fatal("expected duplicate service to be rejected even when the second is disabled")
+	}
+}
+
+// richSample exercises most sections at once, so the toggle test below is a real
+// check that the write-back preserves a config rather than a config with one key.
+const richSample = `
+utls_fingerprint: chrome
+singbox_version: "1.13.14"
+subscription_via_pool: vpn_url_test
+
+subscriptions:
+  - { name: vpn-b, url: "https://example/sub", format: auto, tags: [normal], enabled: true }
+  - { name: vpn-e, url: "https://example/wl", format: clash, tags: [emergency, slow], enabled: true }
+
+categories:
+  custom:
+    required_caps: [tcp]
+    profile: streaming
+    sticky: true
+    default_chain:
+      - { state: PREFERRED, class: zapret }
+      - { state: VPN, class: vpn, strategy_id: vpn_url_test }
+
+pools:
+  vpn_url_test:
+    type: url_test
+    filter: { caps: [tcp], tags_exclude: [emergency] }
+    warmup: true
+    interval: 1m
+    idle_timeout: 30m
+
+strategies:
+  - id: my_recipe
+    class: zapret
+    nfqws_args: ["--dpi-desync=fake", "--dpi-desync-ttl=4"]
+    block_types: [tcp_reset]
+    notes: hand-tuned
+
+hostlists:
+  - name: pack
+    out: /tmp/lotsman-test-pack.txt
+    sources: ["https://example/list.txt"]
+    exclude: ["https://example/allow.txt"]
+    min_keep_ratio: 0.5
+
+devices:
+  - { name: tv, sources: ["192.168.1.50"], policy: strict }
+
+zapret:
+  instances:
+    - name: main
+      qnum: 200
+      connbytes: 6
+      capture: { tcp: [80, 443], udp: [443] }
+
+dns:
+  servers:
+    - { name: remote, provider: cloudflare, method: https, detour: vpn }
+    - { name: lan, type: local }
+  direct: lan
+  final: remote
+  strategy: prefer_ipv4
+  failover: [cloudflare, quad9]
+
+multiplex:
+  enabled: true
+  protocol: smux
+  max_connections: 4
+  padding: true
+
+services:
+  - name: youtube
+    category: streaming
+    probe_target: https://www.youtube.com/generate_204
+    domains: [youtube.com, googlevideo.com]
+    exclude_domains: [redirector.googlevideo.com]
+    ips: ["1.2.3.0/24"]
+    priority: -10
+    tls_fragment: true
+    sticky: false
+    escalate_after: 4
+    recover_after: 7
+    chain:
+      - { state: PREFERRED, class: zapret, strategy_id: simple_fake_alt2 }
+      - { state: ALT_ZAPRET, class: zapret }
+      - { state: VPN, class: vpn, strategy_id: vpn_url_test }
+  - name: discord
+    category: custom
+    probe_type: tcp
+    probe_target: discord.com:443
+    domains: [discord.com]
+    domain_lists: [pack]
+    spread_clients: ["192.168.1.0/24"]
+    static: true
+    profile: voice
+`
+
+// Switching a service off and back on must leave the configuration exactly as it
+// was — not merely equivalent, but the same bytes. A tile toggle that quietly
+// reformats the operator's file, expanding zero values they never wrote, is a
+// worse bug than the feature is a feature.
+func TestServiceToggleIsLosslessOverARichConfig(t *testing.T) {
+	before, err := Parse([]byte(richSample))
+	if err != nil {
+		t.Fatalf("parse rich sample: %v", err)
+	}
+	off, found, err := SetServiceEnabledYAML([]byte(richSample), "discord", false)
+	if err != nil || !found {
+		t.Fatalf("switch off: found=%v err=%v", found, err)
+	}
+	offCfg, err := Parse(off)
+	if err != nil {
+		t.Fatalf("re-parse with discord off: %v\n%s", err, off)
+	}
+	if _, ok := offCfg.Registry.Services["discord"]; ok {
+		t.Error("discord survived being switched off")
+	}
+	if len(offCfg.Registry.Services) != 1 {
+		t.Errorf("registry has %d services with discord off, want 1", len(offCfg.Registry.Services))
+	}
+
+	on, found, err := SetServiceEnabledYAML(off, "discord", true)
+	if err != nil || !found {
+		t.Fatalf("switch on: found=%v err=%v", found, err)
+	}
+	after, err := Parse(on)
+	if err != nil {
+		t.Fatalf("re-parse after switching back on: %v\n%s", err, on)
+	}
+	if !reflect.DeepEqual(before, after) {
+		t.Error("off→on changed the parsed configuration")
+	}
+	// The whole point of editing the node instead of the document: switching on
+	// removes the key, so the text returns to what it was.
+	if string(on) != string(mustReindent(t, richSample)) {
+		t.Errorf("off→on did not restore the file text.\n--- got ---\n%s\n--- want ---\n%s", on, mustReindent(t, richSample))
+	}
+}
+
+// mustReindent runs the sample through the same encoder without changing anything,
+// which is the fair comparison: the encoder normalises indentation and drops the
+// leading blank line, and that normalisation is not what this test is about.
+func mustReindent(t *testing.T, in string) []byte {
+	t.Helper()
+	out, found, err := SetServiceEnabledYAML([]byte(in), "youtube", true) // already on = no-op edit
+	if err != nil || !found {
+		t.Fatalf("reindent: found=%v err=%v", found, err)
+	}
+	return out
+}
+
+// Comments are the reason this edit is surgical. A hand-maintained config must
+// come back with its notes intact.
+func TestServiceToggleKeepsComments(t *testing.T) {
+	in := `# top of file — why this config exists
+services:
+  # youtube is the canary: if it breaks, everything has
+  - name: youtube
+    category: streaming
+    probe_target: https://x   # generate_204
+  - name: discord
+    category: messaging
+    probe_target: https://y
+`
+	off, found, err := SetServiceEnabledYAML([]byte(in), "discord", false)
+	if err != nil || !found {
+		t.Fatalf("switch off: found=%v err=%v", found, err)
+	}
+	for _, want := range []string{
+		"# top of file — why this config exists",
+		"# youtube is the canary",
+		"# generate_204",
+	} {
+		if !strings.Contains(string(off), want) {
+			t.Errorf("comment %q was lost:\n%s", want, off)
+		}
+	}
+	if !strings.Contains(string(off), "disabled: true") {
+		t.Errorf("the switch did not land:\n%s", off)
+	}
+}
+
+func TestServiceToggleReportsAnUndeclaredService(t *testing.T) {
+	_, found, err := SetServiceEnabledYAML([]byte(richSample), "nosuch", false)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if found {
+		t.Error("SetServiceEnabledYAML claimed to have switched a service that is not declared")
+	}
+}

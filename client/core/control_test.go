@@ -12,8 +12,10 @@ import (
 	"os/user"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/strace-me/lotsman/pkg/audit"
+	"github.com/strace-me/lotsman/pkg/config"
 )
 
 // shortTempDir keeps the socket path under the sockaddr_un limit: the default
@@ -271,5 +273,134 @@ func TestControlConfigGetReturnsTheFile(t *testing.T) {
 	}
 	if got.Path != cfg || got.YAML != validStarterConfig {
 		t.Errorf("config mismatch: path=%q yaml-len=%d", got.Path, len(got.YAML))
+	}
+}
+
+// twoServiceConfig has a spare service, so switching one off still leaves something
+// to steer — the all-off case is exercised separately.
+const twoServiceConfig = `services:
+  - name: youtube
+    category: streaming
+    probe_target: https://www.youtube.com/generate_204
+    domains: [youtube.com]
+  - name: discord
+    category: messaging
+    probe_target: https://discord.com/api/v9/gateway
+    domains: [discord.com]
+`
+
+// seedConfig writes a config file and attaches it to a control server, returning
+// the socket path, the file path and a channel that fires when the service applies.
+func seedConfig(t *testing.T, yaml string) (string, string, chan struct{}) {
+	t.Helper()
+	cfg := filepath.Join(shortTempDir(t), "config.yaml")
+	if err := os.WriteFile(cfg, []byte(yaml), 0o600); err != nil {
+		t.Fatalf("seed config: %v", err)
+	}
+	applied := make(chan struct{}, 4)
+	path, s := startControl(t, func() {})
+	// A zero Core cannot reload in place, so the apply path lands on restart — which
+	// is exactly the signal we want: the edit reached the apply step.
+	s.WithConfig(cfg, func() {
+		select {
+		case applied <- struct{}{}:
+		default:
+		}
+	})
+	return path, cfg, applied
+}
+
+func postEnabled(t *testing.T, sock, service string, body any) int {
+	t.Helper()
+	b, _ := json.Marshal(body)
+	resp, err := unixClient(sock).Post("http://unix/service/"+service+"/enabled", "application/json", bytes.NewReader(b))
+	if err != nil {
+		t.Fatalf("post enabled: %v", err)
+	}
+	defer resp.Body.Close()
+	io.Copy(io.Discard, resp.Body)
+	return resp.StatusCode
+}
+
+func TestControlSwitchingAServiceOffWritesItToTheConfig(t *testing.T) {
+	sock, cfgPath, applied := seedConfig(t, twoServiceConfig)
+
+	if code := postEnabled(t, sock, "discord", map[string]bool{"enabled": false}); code != http.StatusAccepted {
+		t.Fatalf("POST enabled=false = %d, want 202", code)
+	}
+	// The bit must be in the FILE, not merely in memory: the desired state is
+	// re-asserted from the config-built registry every few seconds, so a runtime-only
+	// override would be undone within a tick and would not survive a restart.
+	data, err := os.ReadFile(cfgPath)
+	if err != nil {
+		t.Fatalf("read back: %v", err)
+	}
+	parsed, err := config.Parse(data)
+	if err != nil {
+		t.Fatalf("re-parse written config: %v", err)
+	}
+	if _, ok := parsed.Registry.Services["discord"]; ok {
+		t.Error("discord is still in the registry after being switched off")
+	}
+	if _, ok := parsed.Registry.Services["youtube"]; !ok {
+		t.Error("switching discord off took youtube with it")
+	}
+	select {
+	case <-applied:
+	case <-time.After(2 * time.Second):
+		t.Error("the edit was written but never applied")
+	}
+
+	// And back on.
+	if code := postEnabled(t, sock, "discord", map[string]bool{"enabled": true}); code != http.StatusAccepted {
+		t.Fatalf("POST enabled=true = %d, want 202", code)
+	}
+	data, _ = os.ReadFile(cfgPath)
+	parsed, err = config.Parse(data)
+	if err != nil {
+		t.Fatalf("re-parse after enable: %v", err)
+	}
+	if _, ok := parsed.Registry.Services["discord"]; !ok {
+		t.Error("discord did not come back")
+	}
+}
+
+func TestControlSwitchingRejectsUnknownServiceAndMissingField(t *testing.T) {
+	sock, cfgPath, _ := seedConfig(t, twoServiceConfig)
+	before, _ := os.ReadFile(cfgPath)
+
+	if code := postEnabled(t, sock, "nosuch", map[string]bool{"enabled": false}); code != http.StatusBadRequest {
+		t.Errorf("unknown service = %d, want 400", code)
+	}
+	// An absent field is refused rather than defaulted, because defaulting here
+	// switches a service the wrong way and the caller is never told.
+	if code := postEnabled(t, sock, "discord", map[string]string{"note": "hi"}); code != http.StatusBadRequest {
+		t.Errorf("missing enabled field = %d, want 400", code)
+	}
+	after, _ := os.ReadFile(cfgPath)
+	if !bytes.Equal(before, after) {
+		t.Error("a rejected request rewrote the config file")
+	}
+}
+
+// Validation runs over the WHOLE candidate config before the file is touched, so
+// switching off the last service fails with the file still intact.
+func TestControlRefusesToSwitchOffTheLastService(t *testing.T) {
+	sock, cfgPath, _ := seedConfig(t, validStarterConfig)
+	before, _ := os.ReadFile(cfgPath)
+
+	if code := postEnabled(t, sock, "youtube", map[string]bool{"enabled": false}); code != http.StatusBadRequest {
+		t.Errorf("switching off the only service = %d, want 400", code)
+	}
+	after, _ := os.ReadFile(cfgPath)
+	if !bytes.Equal(before, after) {
+		t.Error("the config was written despite failing validation")
+	}
+}
+
+func TestControlSwitchingNeedsConfigEditingEnabled(t *testing.T) {
+	sock, _ := startControl(t, func() {})
+	if code := postEnabled(t, sock, "youtube", map[string]bool{"enabled": false}); code != http.StatusNotImplemented {
+		t.Errorf("without WithConfig = %d, want 501", code)
 	}
 }
