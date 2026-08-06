@@ -38,20 +38,29 @@ type Engine struct {
 	fails    faillog.Recorder
 	interval time.Duration
 	log      *slog.Logger
-	stall    func(service string) bool // LOT-43: is this service throttle-stalled right now? nil = disabled
+	// stall reports that this service's CURRENT path is not carrying traffic, and
+	// why, even though a header probe succeeds. nil = disabled.
+	stall func(service string) (reason string, stalled bool)
 
 	rotation map[string]int // service -> next lower position to silent-probe
 
 	trigger chan string // on-demand "recheck now" requests, consumed on Run's goroutine
 }
 
-// SetStallOracle wires a per-service "is this service throttle-stalled?" signal
-// (from the eye/misroute snapshot). A header-only probe cannot see the TSPU
-// IP-throttle freeze, but the eye can (frozen flows). When set, an ACTIVE probe
-// the prober reports healthy is overridden to a FAILURE if the service is stalled,
-// so Brain escalates off the throttled path to a foreign egress — the only thing
-// that escapes an IP-keyed throttle (LOT-43). nil = disabled. Call before Run.
-func (e *Engine) SetStallOracle(f func(service string) bool) { e.stall = f }
+// SetStallOracle wires a per-service "is this path actually carrying traffic?"
+// signal. A header-only probe answers a different question from the one that
+// matters — it moves a couple of hundred bytes, so a path that establishes and
+// then delivers nothing reads as healthy. Two independent sources see the real
+// thing: the eye's frozen-flow detector (the TSPU IP-throttle, LOT-43) and the
+// desktop client's desync canary (goodput below the floor).
+//
+// When set, an ACTIVE probe the prober reports healthy is overridden to a FAILURE,
+// so Brain escalates off a path that is up but useless. The oracle returns the
+// REASON as well, because the failure recorded against the service must say what
+// was actually observed rather than borrow a neighbouring explanation.
+//
+// nil = disabled. Call before Run.
+func (e *Engine) SetStallOracle(f func(service string) (reason string, stalled bool)) { e.stall = f }
 
 // New builds an Engine. interval is the probe period (short for the demo,
 // per-category minutes in production). obs and fails may be nil.
@@ -128,9 +137,11 @@ func (e *Engine) runProbe(ctx context.Context, service string, position int, kin
 	// hangs). The eye sees it as frozen flows. Override a "healthy" ACTIVE probe to
 	// a failure when the service is throttle-stalled so Brain escalates off the
 	// throttled path; only a foreign egress escapes an IP-keyed throttle.
-	if kind == "active" && v.OK && e.stall != nil && e.stall(service) {
-		v.OK = false
-		v.Err = "throttle-stall: flows frozen mid-stream (TSPU IP-throttle); escalate to a foreign egress (LOT-43)"
+	if kind == "active" && v.OK && e.stall != nil {
+		if reason, stalled := e.stall(service); stalled {
+			v.OK = false
+			v.Err = reason
+		}
 	}
 
 	// Feedback: record the outcome in the KB (EWMA). Keyed by the step's

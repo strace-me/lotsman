@@ -104,7 +104,7 @@ func TestStallOracleFailsActiveProbe(t *testing.T) {
 	bus := events.NewBus()
 	prober := &fakeProber{ok: true, rtt: 42}
 	e := New(bus, prober, fixedPositioner(0), oneServiceReg(), kb.New(), nil, nil, 5*time.Millisecond, discardLog())
-	e.SetStallOracle(func(string) bool { return true })
+	e.SetStallOracle(func(string) (string, bool) { return "flows frozen mid-stream", true })
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()

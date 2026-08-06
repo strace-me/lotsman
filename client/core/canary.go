@@ -54,6 +54,7 @@ func (z *zapretExec) judge(ctx context.Context, service string, chosen map[strin
 	}
 	ok := z.canary(ctx, service)
 	z.record(service, recipe, ok)
+	z.noteCarrying(service, ok)
 	if ok {
 		z.log.Info("desync canary: strategy works", "service", service, "recipe", recipe)
 		return
@@ -63,6 +64,45 @@ func (z *zapretExec) judge(ctx context.Context, service string, chosen map[strin
 	// next candidate.
 	z.log.Warn("desync canary: strategy did not restore the service, demoting it",
 		"service", service, "recipe", recipe)
+}
+
+// noteCarrying records the canary's verdict where the probe engine can consult it.
+//
+// Demoting the recipe was never enough on its own. Demotion only reorders the
+// PICKER; whether the service stays on the desync rung at all is the brain's
+// decision, and the brain listens to the active probe — which fetches a couple of
+// hundred bytes and is therefore blind to exactly the failure the canary measures.
+// Observed on the ThinkPad: youtube sat on a recipe the canary scored at 0 KB/s
+// ninety consecutive times while every probe returned ok in ~57ms, so the service
+// never escalated and the demotion changed nothing.
+func (z *zapretExec) noteCarrying(service string, carrying bool) {
+	z.carryMu.Lock()
+	defer z.carryMu.Unlock()
+	if z.notCarrying == nil {
+		z.notCarrying = map[string]bool{}
+	}
+	z.notCarrying[service] = !carrying
+}
+
+// StallReason reports that the desync rung this service sits on is up but not
+// carrying, and why — the probing engine's stall-oracle contract.
+//
+// Scoped to services CURRENTLY on a desync rung, deliberately. The verdict is
+// about a recipe; once the brain has escalated, the service is on a tunnel this
+// canary never measured, and continuing to fail its probe would walk it off a path
+// nobody has any evidence against. That is the same
+// verdict-about-something-unmeasured this project keeps finding, and it would be
+// self-inflicted.
+func (z *zapretExec) StallReason(service string) (string, bool) {
+	if !z.stillOnRung(service) {
+		return "", false
+	}
+	z.carryMu.Lock()
+	defer z.carryMu.Unlock()
+	if !z.notCarrying[service] {
+		return "", false
+	}
+	return "desync canary measured no goodput on this recipe: the path connects but carries nothing", true
 }
 
 // stillOnRung reports whether the service is STILL on a zapret rung.
