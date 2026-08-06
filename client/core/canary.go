@@ -196,8 +196,19 @@ func (c *Core) goodputOK(ctx context.Context, svc registry.Service) bool {
 	}
 	ok := q.GoodputKBps >= min
 	if !ok {
-		c.log.Info("canary: recipe connects but does not carry volume",
-			"service", svc.Name, "goodput_kbps", q.GoodputKBps, "min_kbps", min)
+		// Say which of the two happened. The fetch either failed outright — nothing
+		// was delivered and nothing timed itself — or it connected and crawled, and
+		// those want different next moves from whoever reads the log. The old line
+		// asserted "connects" over both, which was untrue exactly when the fetch had
+		// not connected at all: the same claim-about-the-unobserved this whole
+		// function exists to stop making.
+		if q.Bytes == 0 && q.Loss >= 1 {
+			c.log.Info("canary: the volume fetch did not complete at all — no bytes, no response",
+				"service", svc.Name, "target", target, "min_kbps", min)
+		} else {
+			c.log.Info("canary: recipe connects but does not carry volume",
+				"service", svc.Name, "goodput_kbps", q.GoodputKBps, "min_kbps", min)
+		}
 	}
 	return ok
 }
