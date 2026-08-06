@@ -6,6 +6,72 @@ older sections carry working dates rather than release dates.
 
 ## [Unreleased]
 
+### 44 of 50 exits were being thrown away
+
+- **A node's identity hashed protocol|address|port and nothing else.** The
+  owner's provider sells 50 named cities that live behind 6 addresses and are
+  told apart by REALITY shortId — so 50 nodes collapsed to 6, and the other 44
+  were dropped as duplicates. Silently, and for as long as that provider has
+  been in the config.
+- It was not a cosmetic undercount. Three entries on one address, differing only
+  by shortId, were dialled and asked what the internet saw: `198.51.100.10`,
+  `198.51.100.11`, `198.51.100.12` — the Netherlands, Denmark and Germany. The
+  provider picks the exit BY the field the identity ignored, so what was being
+  discarded was exit diversity, the thing the whole fleet exists to have.
+- The naive fix breaks LOT-1: another provider ROTATES shortId on the same node
+  every fetch, and the reconciler deliberately ignores that so a re-fetch is not
+  a fleet-wide restart. The repo's own test for it failed, which is what stopped
+  the naive fix from shipping.
+- Told apart by the SHAPE of one fetch instead. A rotating credential appears
+  once per address; a selector appears many times at once. So the identity widens
+  only for addresses carrying several nodes in the same snapshot — 50 stay 50,
+  and a rotating single node stays one node through any number of rotations.
+- Measured on the ThinkPad against the live config: **9 nodes → 53**,
+  `vpn_url_test` 52 members, `vpn_url_test_udp` 3.
+
+### The Ноды tab, and honest counting
+
+- The tab showed one number for a fleet the operator could not see. It now shows
+  what each entity actually is: nodes fetched, nodes in each pool, which are
+  warm, and every node grouped by the subscription it came from — because "6" and
+  "50" and "52" are four different questions and were all being answered with one
+  figure.
+- An empty pool a chain references is called out rather than rendered as a zero,
+  since that is the shape of a rung with no executor behind it.
+- The top bar shows the BUILD instead of the verdict. The verdict is already on
+  its own tile, and the same number in two places is one place to disagree with
+  itself; which build is answering had nowhere to appear at all.
+  `control.Report` gained `Version` — the DTO never carried it.
+
+### Reload could not apply a config that added a rule-set
+
+- `Core.generate` provisions the `.srs` a config names, and Start goes through
+  it — but the RECONCILER builds its own sing-box config and never did. Every
+  path that reconciles rather than starts (Reload, the refresh tick, the roam
+  regeneration) validated a config naming rule-sets the disk did not have, failed
+  its own `sing-box check`, and fell back to a full re-exec.
+- The fallback worked, which is why nobody noticed: the config landed, the box
+  came up. But a re-exec drops the tunnel, and avoiding exactly that is what
+  in-place reload is for. Adding a rule-set from the config editor paid that cost
+  every time.
+- `reconcileBox` provisions first at all three sites; provisioning a warm cache
+  is a no-op, so the ordering stops being something to remember.
+
+### The live harness grew a client mode
+
+- `test/live/run.sh --client` covers the desktop client: config edit and reload,
+  the service switch, a network change swapping the knowledge base, and a real
+  suspend/resume driven by `rtcwake`.
+- Suspend/resume and a live roam had never once been tested. Both passed: the
+  client survives the suspend and resumes probing **600ms** after wake.
+- Running it found two harness lies before it found anything about the client.
+  C6 judged survival by grepping the log for a shutdown line that its own
+  teardown always writes, and reported a live client as dead; it now asks the
+  kernel whether the process is there, before killing it. C8 asserted no
+  `lotsman-client` was running, which stopped being true the moment the client
+  became a permanent service — it now distinguishes the service's own processes
+  from the run's by executable path.
+
 ### Domain packs you can write yourself
 
 - **`domains:` on a hostlist.** A pack could only ever be assembled from remote
