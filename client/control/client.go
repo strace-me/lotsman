@@ -140,11 +140,19 @@ func New(socketPath string) *Client {
 // person looking at it. The kernel's two words here — "permission denied" and "no
 // such file or directory" — both render in a UI as "the service is broken", and
 // one of them is usually wrong: a system service the session may not reach is
-// running perfectly, and the fix is a logout, not a restart.
+// running perfectly.
+//
+// The remedy is NOT the obvious one. "Log out and back in" is what everybody
+// reaches for after a group change, and on a systemd desktop it does not work:
+// `systemd --user` is per USER, not per session, so it outlives the logout and
+// keeps the group set it was started with, and anything the app launcher starts
+// inherits that. Observed on the ThinkPad the day the unit was installed — a full
+// logout left the manager's groups unchanged. Killing the user manager, or a
+// reboot, is what actually refreshes them.
 func explainDial(path string, err error) error {
 	switch {
 	case errors.Is(err, fs.ErrPermission):
-		return fmt.Errorf("%w — a service IS listening at %s but this session may not reach it; if Lotsman was installed as a system service, log out and back in so the session joins the lotsman group", err, path)
+		return fmt.Errorf("%w — a service IS listening at %s but this session may not reach it. If Lotsman was just installed as a system service, this session predates the lotsman group. Logging out is NOT enough (systemd --user survives it and keeps the old groups): run `loginctl terminate-user $USER` from a text console, or reboot", err, path)
 	case errors.Is(err, fs.ErrNotExist):
 		return fmt.Errorf("%w — nothing is listening at %s (is the lotsman-client service running?)", err, path)
 	}
