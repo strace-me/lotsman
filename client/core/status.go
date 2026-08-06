@@ -25,6 +25,12 @@ type Report struct {
 	Fleet         FleetStatus    `json:"fleet"`
 	Subscriptions []SubStatus    `json:"subscriptions,omitempty"`
 	Services      []NodeStatus   `json:"services"`
+	// Notices are conditions the operator should SEE — not failures, and emphatically
+	// not alerts. This project has no alerting layer and wants none: the promise is
+	// that you learn something is broken from the device itself, and the app's job is
+	// to hold the CAUSE where you already look. A leak that only ever appeared in a
+	// log line at startup is exactly the kind of thing nobody sees.
+	Notices []Notice `json:"notices,omitempty"`
 	// Disabled names the services the operator switched off. They carry no state
 	// because none is kept for them — they are absent from the registry, so nothing
 	// probes or routes them — but the UI needs the names to offer switching them
@@ -138,6 +144,7 @@ func (c *Core) Report(ctx context.Context) Report {
 		Fleet:         FleetStatus{Total: c.lastNodes, Servers: c.lastServers, Pools: c.lastPools, Nodes: c.lastFleet},
 		Subscriptions: c.subStatuses(),
 		Services:      services,
+		Notices:       c.notices(),
 		Disabled:      disabled,
 
 		DomainListsDrifted: c.listsDrifted.Load(),
@@ -263,4 +270,29 @@ func (c *Core) observeSnapshot() observe.Snapshot {
 	c.obsMu.Lock()
 	defer c.obsMu.Unlock()
 	return c.obsSnap
+}
+
+// Notice codes. Stable strings, because a UI keys styling and dismissal off them.
+const (
+	NoticeIPv6Escape = "ipv6_escape"
+)
+
+// Notice is something worth telling the operator that is not a service failure:
+// a configuration or environment condition that makes the tool quieter or weaker
+// than it looks. Text is the whole explanation — a UI shows it verbatim rather
+// than keeping its own copy that can drift from the daemon's.
+type Notice struct {
+	Code     string   `json:"code"`
+	Text     string   `json:"text"`
+	Services []string `json:"services,omitempty"` // what the condition affects, when it is service-scoped
+}
+
+// notices evaluates every condition fresh. Caller holds stateMu (c.reg and c.opts
+// are read here, and Reload swaps c.reg).
+func (c *Core) notices() []Notice {
+	var out []Notice
+	if n := c.ipv6EscapeNotice(); n != nil {
+		out = append(out, *n)
+	}
+	return out
 }

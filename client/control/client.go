@@ -34,9 +34,21 @@ type Report struct {
 	Fleet         Fleet          `json:"fleet"`
 	Subscriptions []Subscription `json:"subscriptions"`
 	Services      []Service      `json:"services"`
+	// Notices are environment/configuration conditions worth showing — a tunnel that
+	// protects less than it looks like it does. Not failures, and not alerts.
+	Notices []Notice `json:"notices"`
 	// Disabled names services the operator switched off. They carry no runtime
 	// state — nothing probes or routes them — so they are names, not Services.
 	Disabled []string `json:"disabled"`
+}
+
+// Notice is a condition the daemon wants the operator to see. Text is the whole
+// explanation and is rendered verbatim: a UI keeping its own copy of the wording
+// would drift from the daemon that actually evaluates the condition.
+type Notice struct {
+	Code     string   `json:"code"`
+	Text     string   `json:"text"`
+	Services []string `json:"services"`
 }
 
 // Verdict is the top-line coverage rollup. State is one of
