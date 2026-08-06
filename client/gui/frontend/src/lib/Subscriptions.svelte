@@ -2,29 +2,65 @@
   import { fmtBytes } from './format.js'
 
   export let report
+  export let onAdd = null // (url) => Promise<name>; null = no backend (mock/dev)
 
   $: subs = report.subscriptions || []
   let adding = false
   let url = ''
+  let busy = false
+  let error = ''
+  let added = ''
+
+  async function submit() {
+    error = ''
+    added = ''
+    const u = url.trim()
+    if (!u) {
+      error = 'Вставь URL подписки'
+      return
+    }
+    if (!onAdd) {
+      error = 'Нет соединения со службой'
+      return
+    }
+    busy = true
+    try {
+      // The daemon validates and applies; whatever it refuses comes back as text,
+      // and it is shown verbatim rather than replaced with a friendlier guess.
+      added = await onAdd(u)
+      url = ''
+      adding = false
+    } catch (e) {
+      error = String(e && e.message ? e.message : e)
+    } finally {
+      busy = false
+    }
+  }
 </script>
 
 <section>
   <div class="row-head">
     <h2>Подписки</h2>
-    {#if subs.length}
-      <button class="fix" on:click={() => (adding = !adding)}>+ Добавить</button>
-    {/if}
+    <button class="fix" on:click={() => (adding = !adding)}>+ Добавить</button>
   </div>
 
   {#if adding}
     <div class="add-sub">
-      <input bind:value={url} placeholder="URL подписки (https://… или vless://…)" />
-      <button class="fix" disabled>Добавить</button>
+      <input
+        bind:value={url}
+        placeholder="URL подписки (https://… или vless://…)"
+        on:keydown={(e) => e.key === 'Enter' && submit()}
+      />
+      <button class="fix" on:click={submit} disabled={busy}>{busy ? 'Добавляю…' : 'Добавить'}</button>
       <div class="muted">
-        Добавление подключим к control-API (серверный <code>-init</code>-визард) следующим —
-        сейчас это поле формы.
+        Имя возьмётся из адреса, а теги останутся пустыми — теги решают, каким пулам достанется
+        нода, и угадывать это за тебя нельзя. Поправить имя, теги и формат можно на «Конфиг».
       </div>
+      {#if error}<div class="add-err">{error}</div>{/if}
     </div>
+  {/if}
+  {#if added}
+    <div class="muted add-ok">Добавлена как <code>{added}</code> — ноды подтянутся при ближайшем обновлении.</div>
   {/if}
 
   {#if subs.length}
