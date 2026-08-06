@@ -35,7 +35,7 @@ the component split is mechanical (event contracts already separate them).
 - `pkg/config` — declarative YAML → registry + subscriptions + pools; composition root, assigns chain positions, validates. A service with `disabled: true` is validated like any other and then dropped, so no consumer needs a guard. `toggle.go` flips that bit by editing the YAML node, preserving comments and layout — the dashboard switch must not reformat a hand-kept file. [Config, Parse, SetServiceEnabledYAML]
 
 ### Data model / generation
-- `pkg/subscription` — parse VPN subscriptions (several formats) into Nodes. [Node, Parse]
+- `pkg/subscription` — parse VPN subscriptions (several formats) into Nodes. Node IDENTITY is the subtle part: hashing address alone merged 50 exits into 6 (one provider sells many cities behind few IPs, keyed by REALITY shortId), while hashing the credential alone would restart the fleet on every fetch for a provider that rotates it. Identity therefore widens only for addresses carrying several nodes in ONE snapshot — see `identity.go` and LOT-1. [Node, Parse, assignIDs]
 - `pkg/pools` — group nodes into named pools by capability + tag filters (pure membership). [Pool, Filter, Capability]
 - `pkg/aggregate` — merge domain/IP lists from many sources → normalized dedup list; fetch behind interface; global shrink guard. [Result, Source, ParseList, ShrinkOK]
 - `pkg/singbox` — generate full sing-box config from services/nodes/pools; Merge does surgical node-group injection. [Generate, Merge, NodeGroup, Options]
@@ -196,7 +196,11 @@ plus a thin unprivileged UI, since only the tun and the NFQUEUE rules need root.
 - `client/desktop` — headless entrypoint (the privileged service).
 - `client/gui` — the desktop window (Wails v2 + Svelte), its own module, linking
   only `client/control`: dashboard plus configurator sections (services,
-  subscriptions, DNS, engines, strategies, lists).
+  subscriptions, DNS, engines, strategies, lists). The dashboard carries the
+  per-service on/off switch and a «Выключены» section; «Ноды» reports fetched /
+  per-pool / warm as separate figures, because collapsing them into one is what
+  hid the node-identity defect. `frontend/dist` is a BUILD ARTEFACT and not in
+  git — `npm run build` must precede `wails build`, or the window ships stale.
 - `client/tray` — the systray companion, a separate unprivileged process and its
   own module: polls `/status`, recolours the sextant by verdict, Open / Stop / Quit.
 - `client/mobile` — the only surface Kotlin touches, bound with gomobile over
