@@ -25,6 +25,17 @@ type Quality struct {
 	// after ~16KB — invisible to loss/latency alone.
 	GoodputKBps float64 // sustained download rate over the read, KiB/s
 	Bytes       int64   // total bytes pulled (0 = froze from the first byte)
+	// Short means the ENDPOINT ran out before the requested volume — every read
+	// reached end-of-body rather than being cut off by the deadline. A low goodput
+	// then measures how small the file is, not how bad the path is, and must not be
+	// read as a verdict about the path. Measured the hard way: youtube's probe
+	// target is a 204 with no body at all, so its throughput canary returned 0 KiB/s
+	// on every strategy ever tried and demoted all of them.
+	//
+	// The distinction is exactly what separates a small file from the TSPU freeze:
+	// a freeze delivers a few KB and then STALLS until the deadline, which is not
+	// end-of-body, so Short stays false and the verdict stands.
+	Short bool
 }
 
 // FromRTTs builds Quality from the round-trip times of successful samples (in
@@ -60,6 +71,13 @@ func FromBurst(okRTTs []float64, attempts int, bytes int64, goodputKBps float64)
 	return q
 }
 
+// MarkShort records that the endpoint ended the body before the requested volume,
+// so the goodput figure describes the endpoint's size rather than the path.
+func (q Quality) MarkShort() Quality {
+	q.Short = true
+	return q
+}
+
 // Worst combines per-endpoint qualities into a single worst-case aggregate: max
 // loss, MIN goodput/bytes, max latency tail, min samples. A multi-endpoint probe
 // uses it so a recipe that fixes one endpoint but breaks another is judged by the
@@ -79,6 +97,12 @@ func Worst(qs ...Quality) Quality {
 		}
 		if q.Bytes < w.Bytes {
 			w.Bytes = q.Bytes
+		}
+		// Worst-case aggregation, and "the endpoint was too small to judge" is the
+		// weaker claim: if ANY endpoint gave us a real measurement, the set has one.
+		// Only when every endpoint ran short is the whole reading uninformative.
+		if !q.Short {
+			w.Short = false
 		}
 		if q.P50ms > w.P50ms {
 			w.P50ms = q.P50ms

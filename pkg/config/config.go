@@ -177,10 +177,17 @@ type serviceYAML struct {
 	// stays in the file so the operator can switch it back on without retyping it.
 	// A bit rather than a deletion, because deleting is not what "I don't use
 	// Discord" means.
-	Disabled       bool            `yaml:"disabled,omitempty"`
-	Category       string          `yaml:"category"`
-	ProbeType      string          `yaml:"probe_type"`
-	ProbeTarget    string          `yaml:"probe_target"`
+	Disabled    bool   `yaml:"disabled,omitempty"`
+	Category    string `yaml:"category"`
+	ProbeType   string `yaml:"probe_type"`
+	ProbeTarget string `yaml:"probe_target"`
+	// VolumeTarget is a URL with real BULK to download, used only by the throughput
+	// canary. The probe target is the wrong URL for it: probes are deliberately
+	// tiny (youtube's is a 204 with no body at all), so measuring goodput against
+	// one reports the size of the endpoint and blames the strategy for it.
+	// Empty = fall back to probe_target, and the canary refuses to judge when that
+	// turns out to have nothing to give.
+	VolumeTarget   string          `yaml:"volume_target"`
 	RuleSets       []string        `yaml:"rule_sets"`
 	Domains        []string        `yaml:"domains"`
 	DomainLists    []string        `yaml:"domain_lists"`    // names of hostlists: whose domains are merged into Domains (declare a pack once, attach it to any service)
@@ -559,6 +566,7 @@ func buildRegistry(svcs []serviceYAML, cats map[string]registry.Category, hostli
 			Category:       s.Category,
 			ProbeType:      s.ProbeType,
 			ProbeTarget:    s.ProbeTarget,
+			VolumeTarget:   s.VolumeTarget,
 			RuleSets:       s.RuleSets,
 			Domains:        domains,
 			ExcludeDomains: s.ExcludeDomains,

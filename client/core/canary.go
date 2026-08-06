@@ -157,7 +157,12 @@ func (c *Core) goodputOK(ctx context.Context, svc registry.Service) bool {
 	if min <= 0 {
 		return true
 	}
-	target := svc.ProbeTarget
+	// A dedicated bulk URL when the operator gave one; the probe target otherwise,
+	// with the short-endpoint guard below to stop it producing a fake verdict.
+	target := svc.VolumeTarget
+	if target == "" {
+		target = svc.ProbeTarget
+	}
 	if target == "" || !strings.HasPrefix(target, "http") {
 		return true // nothing to pull volume from; the shallow verdict stands
 	}
@@ -173,6 +178,21 @@ func (c *Core) goodputOK(ctx context.Context, svc registry.Service) bool {
 		[]string{target}, c.opts.CanaryGoodputBytes, 1)
 	if q.Samples == 0 {
 		return true // the measurement did not happen; do not invent a verdict
+	}
+	// The endpoint ran out before we had pulled enough to judge. Then the goodput
+	// figure describes how small the URL is, not how bad the path is, and blaming
+	// the strategy for it is the exact defect this project keeps finding.
+	//
+	// This was not hypothetical. youtube's probe target is `generate_204` — a
+	// response with NO BODY — so its throughput canary returned 0 KiB/s on every
+	// strategy ever applied and demoted all of them; the knowledge base ended up
+	// with every zapret recipe for youtube at ewma 0 after ninety consecutive
+	// "failures" that measured nothing. x's target is robots.txt, a few hundred
+	// bytes, which scored a similarly meaningless 4.6 KiB/s.
+	if q.Short {
+		c.log.Warn("canary: cannot judge volume, the probe target has less to give than we ask for — set a volume_target for this service",
+			"service", svc.Name, "target", target, "bytes", q.Bytes, "want_bytes", c.opts.CanaryGoodputBytes)
+		return true
 	}
 	ok := q.GoodputKBps >= min
 	if !ok {

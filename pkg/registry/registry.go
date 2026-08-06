@@ -40,11 +40,15 @@ type ChainStep struct {
 type Service struct {
 	Name        string
 	Category    string
-	ProbeType   string   // http | tcp | stun (empty = http)
-	ProbeTarget string   // http: URL; tcp/stun: host:port
-	RuleSets    []string // sing-box rule-set tags (big curated .srs lists)
-	Domains     []string // inline domain_suffix matches (custom/small lists)
-	IPs         []string // inline ip_cidr matches (canonical CIDR; voice/geoip)
+	ProbeType   string // http | tcp | stun (empty = http)
+	ProbeTarget string // http: URL; tcp/stun: host:port
+	// VolumeTarget is a bulk URL for the throughput canary ("" = use ProbeTarget).
+	// A probe target is deliberately small, so it cannot measure throughput: the
+	// figure it produces describes the endpoint, not the path.
+	VolumeTarget string
+	RuleSets     []string // sing-box rule-set tags (big curated .srs lists)
+	Domains      []string // inline domain_suffix matches (custom/small lists)
+	IPs          []string // inline ip_cidr matches (canonical CIDR; voice/geoip)
 	// ExcludeDomains pass RAW through this service's nfqws desync profile (composer
 	// emits --hostlist-exclude-domains): CDNs/endpoints that work without desync but
 	// break under it (e.g. Epic download/EasyAntiCheat — LOT-36). Routing is
