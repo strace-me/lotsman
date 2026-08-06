@@ -10,8 +10,10 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"net"
 	"net/http"
 	"net/url"
@@ -124,10 +126,29 @@ func New(socketPath string) *Client {
 		Timeout: 5 * time.Second,
 		Transport: &http.Transport{
 			DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
-				return (&net.Dialer{}).DialContext(ctx, "unix", socketPath)
+				conn, err := (&net.Dialer{}).DialContext(ctx, "unix", socketPath)
+				if err != nil {
+					return nil, explainDial(socketPath, err)
+				}
+				return conn, nil
 			},
 		},
 	}}
+}
+
+// explainDial says what a failed connect to the control socket means for the
+// person looking at it. The kernel's two words here — "permission denied" and "no
+// such file or directory" — both render in a UI as "the service is broken", and
+// one of them is usually wrong: a system service the session may not reach is
+// running perfectly, and the fix is a logout, not a restart.
+func explainDial(path string, err error) error {
+	switch {
+	case errors.Is(err, fs.ErrPermission):
+		return fmt.Errorf("%w — a service IS listening at %s but this session may not reach it; if Lotsman was installed as a system service, log out and back in so the session joins the lotsman group", err, path)
+	case errors.Is(err, fs.ErrNotExist):
+		return fmt.Errorf("%w — nothing is listening at %s (is the lotsman-client service running?)", err, path)
+	}
+	return err
 }
 
 // Status fetches the rich /status.
