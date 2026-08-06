@@ -440,13 +440,20 @@ say "$CASE  the client survives suspend/resume"
       $REMOTE/lotsman-client -config $LC/config.yaml -singbox-config $LC/susp.json \
         -proxy 127.0.0.1:11091 -clash 127.0.0.1:19101 -control-socket $LC/susp.sock \
         -interval 5s -refresh-interval 0 > $LC/suspend.log 2>&1 &
-      echo \$! > $LC/susp.pid
+      P=\$!
+      echo \$P > $LC/susp.pid
       sleep 5
       date +%s > $LC/susp.before
+      grep -c msg=probe $LC/suspend.log > $LC/probes.before
       rtcwake -m mem -s $secs > $LC/rtcwake.log 2>&1
       date +%s > $LC/susp.after
       sleep 15
-      kill \$(cat $LC/susp.pid) 2>/dev/null
+      # Observed, not inferred: ask the kernel whether the process is still there
+      # BEFORE we tear it down. Grepping the log for a shutdown line afterwards
+      # cannot tell our own kill from a crash — and reported one as the other.
+      if kill -0 \$P 2>/dev/null; then echo alive > $LC/susp.alive; else echo dead > $LC/susp.alive; fi
+      grep -c msg=probe $LC/suspend.log > $LC/probes.after
+      kill \$P 2>/dev/null
       touch $LC/susp.done
     ' >/dev/null 2>&1 &" >/dev/null 2>&1
     echo "   the machine is suspending for ${secs}s — waiting for it to come back"
@@ -458,13 +465,13 @@ say "$CASE  the client survives suspend/resume"
       slept=$($SSH "echo \$(( \$(cat $LC/susp.after) - \$(cat $LC/susp.before) ))" </dev/null)
       [ "${slept:-0}" -ge $((secs - 5)) ] && ok "the machine really slept (${slept}s)" \
                                           || bad "only ${slept}s elapsed — rtcwake did not suspend, so nothing was tested"
-      # The honest assertions: did the process live through it, and did its loop
-      # resume? A probe line stamped after the resume is the second one.
-      $SSH "grep -q 'shutting down' $LC/suspend.log && echo died || echo lived" </dev/null | grep -q lived \
-        && ok "the client was still running after the resume" || bad "the client exited across the suspend"
-      after=$($SSH "awk -v t=\$(cat $LC/susp.after) '/msg=probe/{print}' $LC/suspend.log | wc -l" </dev/null)
-      [ "${after:-0}" -gt 0 ] && ok "the probe loop resumed ($after probes logged)" \
-                              || bad "no probe after the resume — the loop did not restart"
+      [ "$(grab susp.alive)" = alive ] && ok "the client was still running after the resume" \
+                                       || bad "the client did not survive the suspend"
+      # Probes AFTER the resume, counted as a delta across the sleep rather than
+      # by parsing timestamps — the whole log is probe lines from before it too.
+      b=$(grab probes.before); a=$(grab probes.after)
+      [ $(( ${a:-0} - ${b:-0} )) -gt 0 ] && ok "the probe loop resumed ($(( a - b )) probes after the resume)" \
+                                         || bad "no probe after the resume — the loop did not restart"
       errs=$($SSH "grep -c level=ERROR $LC/suspend.log || true" </dev/null | head -1)
       [ "${errs:-0}" = 0 ] && ok "no errors across the cycle" || meh "$errs error lines (expected without a subscription)"
     fi
