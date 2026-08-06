@@ -23,19 +23,6 @@ export function tileWhere(s) {
   return bits.join(' · ')
 }
 
-// Node health → colour + label. Accepts either the ranker's names or plain ones.
-export function nodeKind(state) {
-  return { healthy: 'ok', alive: 'ok', degraded: 'amber', frozen: 'amber', down: 'red', dead: 'red' }[state] || 'dim'
-}
-export const nodeStateText = {
-  healthy: 'жива',
-  alive: 'жива',
-  degraded: 'деградация',
-  frozen: 'заморожена',
-  down: 'мертва',
-  dead: 'мертва',
-}
-
 export function fmtBytes(n) {
   if (!n) return '—'
   const gb = n / 1e9

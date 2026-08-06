@@ -65,10 +65,14 @@ type Engine struct {
 	State string `json:"state"`
 }
 
-// Fleet is the exit pool. Total is the node count the last generate loaded; the
-// alive/frozen/dead breakdown is a later server-side addition.
+// Fleet separates the counts a single "nodes" number used to blur together: how
+// many exits the subscriptions yielded (Total), how many distinct addresses those
+// exits sit behind (Servers), and what each declared pool actually selected
+// (Pools) — the last being the number a service is really choosing from.
 type Fleet struct {
-	Total int `json:"total"`
+	Total   int            `json:"total"`
+	Servers int            `json:"servers"`
+	Pools   map[string]int `json:"pools"`
 }
 
 // Subscription is one subscription's quota/expiry.
