@@ -13,6 +13,7 @@ package burstprobe
 
 import (
 	"context"
+	"errors"
 	"io"
 	"net/http"
 	"time"
@@ -46,8 +47,16 @@ func Probe(ctx context.Context, client *http.Client, urls []string, target int64
 		var rtts []float64
 		var bytesTotal int64
 		var secsTotal float64
+		// short: every attempt reached END OF BODY before the requested volume, so
+		// this endpoint simply has less to give than we asked for. That is a fact
+		// about the URL, not about the path, and the caller must be able to tell the
+		// two apart — a stalled path does NOT reach end-of-body, it runs out of time.
+		short := true
 		for i := 0; i < attempts; i++ {
-			n, dur := readN(ctx, client, u, target)
+			n, dur, ended := readN(ctx, client, u, target)
+			if !ended || n >= target {
+				short = false
+			}
 			if n <= 0 {
 				continue // a failed attempt -> counts as loss (attempts is the denominator)
 			}
@@ -63,7 +72,11 @@ func Probe(ctx context.Context, client *http.Client, urls []string, target int64
 		if got := len(rtts); got > 0 {
 			avgBytes = bytesTotal / int64(got)
 		}
-		qs = append(qs, quality.FromBurst(rtts, attempts, avgBytes, goodput))
+		q := quality.FromBurst(rtts, attempts, avgBytes, goodput)
+		if short {
+			q = q.MarkShort()
+		}
+		qs = append(qs, q)
 	}
 	return quality.Worst(qs...)
 }
@@ -72,17 +85,20 @@ func Probe(ctx context.Context, client *http.Client, urls []string, target int64
 // wall time taken. A transport error or a body that stalls past the client/ctx
 // deadline returns whatever was read before it stopped (n may be partial); n == 0
 // means nothing was delivered.
-func readN(ctx context.Context, client *http.Client, url string, target int64) (int64, time.Duration) {
+// ended reports that the body finished on its own (EOF) rather than being cut
+// short by the deadline — the difference between "this file is small" and "this
+// path stalled", which a byte count alone cannot express.
+func readN(ctx context.Context, client *http.Client, url string, target int64) (n int64, took time.Duration, ended bool) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
-		return 0, 0
+		return 0, 0, false
 	}
 	start := time.Now()
 	resp, err := client.Do(req)
 	if err != nil {
-		return 0, time.Since(start)
+		return 0, time.Since(start), false
 	}
 	defer resp.Body.Close()
-	n, _ := io.CopyN(io.Discard, resp.Body, target) // io.EOF (served < target) is fine; n is what we got
-	return n, time.Since(start)
+	n, err = io.CopyN(io.Discard, resp.Body, target)
+	return n, time.Since(start), errors.Is(err, io.EOF)
 }

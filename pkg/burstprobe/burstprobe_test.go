@@ -85,9 +85,55 @@ func TestProbeWorstCaseAcrossEndpoints(t *testing.T) {
 // scores as low goodput, not just loss).
 func TestReadNReturnsPartialOnStall(t *testing.T) {
 	srv := server(t, 1<<20, 16<<10, 2*time.Second)
-	n, _ := readN(context.Background(), client(300*time.Millisecond), srv.URL, 512<<10)
+	n, _, ended := readN(context.Background(), client(300*time.Millisecond), srv.URL, 512<<10)
 	if n <= 0 || n > 64<<10 {
 		t.Fatalf("partial read on stall = %d bytes, want a partial chunk (~16KB)", n)
 	}
+	// And it must NOT read as end-of-body: a stall is the path failing, which is
+	// precisely what must stay distinguishable from a small file.
+	if ended {
+		t.Error("a stalled read must not report end-of-body — that is how a freeze gets excused as a small endpoint")
+	}
 	_ = io.Discard
+}
+
+// An endpoint with nothing to give must be reported as SHORT, not as a slow path.
+// youtube's probe target is a 204 — no body at all — so its throughput canary
+// scored 0 KiB/s against every strategy ever applied and demoted all of them. The
+// number was about the URL, never about the path.
+func TestProbeMarksAnEndpointThatRanOutShort(t *testing.T) {
+	empty := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusNoContent) // 204: no body, by definition
+	}))
+	defer empty.Close()
+
+	q := Probe(context.Background(), empty.Client(), []string{empty.URL}, 64<<10, 1)
+	if !q.Short {
+		t.Fatalf("a 204 must be Short — nothing was measured about the path; got %+v", q)
+	}
+
+	tiny := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Write(make([]byte, 300)) // robots.txt-sized, like the x service's target
+	}))
+	defer tiny.Close()
+	if q := Probe(context.Background(), tiny.Client(), []string{tiny.URL}, 64<<10, 1); !q.Short {
+		t.Errorf("a 300-byte endpoint must be Short, got %+v", q)
+	}
+}
+
+// A path that DELIVERS the volume asked for is not short, and its goodput is a
+// real measurement.
+func TestProbeDoesNotMarkAFullReadShort(t *testing.T) {
+	big := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Write(make([]byte, 128<<10))
+	}))
+	defer big.Close()
+
+	q := Probe(context.Background(), big.Client(), []string{big.URL}, 64<<10, 1)
+	if q.Short {
+		t.Errorf("a full read must not be Short: %+v", q)
+	}
+	if q.GoodputKBps <= 0 {
+		t.Errorf("a full read must report goodput: %+v", q)
+	}
 }
