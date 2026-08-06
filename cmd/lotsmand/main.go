@@ -620,7 +620,7 @@ func main() {
 				pr.Add(periodic.Task{Name: "hostlist-rebuild:" + hl.Name, Interval: *checkInterval, RunAtStart: true, Fn: func(c context.Context) error {
 					_, err := aggregate.Rebuild(c, agg, aggregate.RebuildSpec{
 						Name: hl.Name, Out: hl.Out, Sources: hl.Sources,
-						Exclude: hl.Exclude, MinKeepRatio: hl.MinKeepRatio,
+						Exclude: hl.Exclude, Domains: hl.Domains, MinKeepRatio: hl.MinKeepRatio,
 					}, *dryRun, log)
 					return err
 				}})

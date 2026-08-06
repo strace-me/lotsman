@@ -6,6 +6,24 @@ older sections carry working dates rather than release dates.
 
 ## [Unreleased]
 
+### Domain packs you can write yourself
+
+- **`domains:` on a hostlist.** A pack could only ever be assembled from remote
+  URLs, so declaring "the four hosts my bank uses" as a reusable list meant
+  publishing it somewhere and fetching it back. Now a pack may carry its own
+  entries, its sources, or both, and one with neither is refused by name.
+- They come from the DECLARATION, not the file, so they work on a fresh install
+  before the rebuild job has run — and for a sources-less pack, where a file may
+  never exist at all.
+- They merge AFTER exclusion, deliberately: an upstream exclude list quietly
+  deleting a domain somebody typed by hand would be invisible and maddening, and
+  what you wrote yourself outranks a third party's opinion. They go through the
+  same parser as fetched entries, so a hand-typed `YouTube.com` is lowercased and
+  a hand-typed `not a domain` is refused at config parse.
+- «Списки» in the app gained the field, and the round-trip test locks the
+  PascalCase key the form binds — a rename would otherwise still save the config
+  and silently drop what the operator typed.
+
 ### A running service that reported itself missing
 
 - **`control.DefaultSocketPath` read "permission denied" as "not there".** The

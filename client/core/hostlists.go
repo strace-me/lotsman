@@ -87,7 +87,7 @@ func (c *Core) refreshHostlists(ctx context.Context, timeout time.Duration) {
 func specOf(hl config.Hostlist) aggregate.RebuildSpec {
 	return aggregate.RebuildSpec{
 		Name: hl.Name, Out: hl.Out, Sources: hl.Sources,
-		Exclude: hl.Exclude, MinKeepRatio: hl.MinKeepRatio,
+		Exclude: hl.Exclude, Domains: hl.Domains, MinKeepRatio: hl.MinKeepRatio,
 	}
 }
 

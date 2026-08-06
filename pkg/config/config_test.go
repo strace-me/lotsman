@@ -820,3 +820,65 @@ func TestServiceToggleReportsAnUndeclaredService(t *testing.T) {
 		t.Error("SetServiceEnabledYAML claimed to have switched a service that is not declared")
 	}
 }
+
+// A pack of hand-written domains needs no URL to be published at. This is the
+// case the hostlist section could not express at all before: `domain_lists` let
+// you ATTACH a pack, but every pack had to be fetched from somewhere.
+func TestHostlistOfOwnDomainsNeedsNoSources(t *testing.T) {
+	in := `
+hostlists:
+  - name: mine
+    out: /tmp/lotsman-test-mine.txt
+    domains: [Bank.example, vpn.example]
+services:
+  - name: youtube
+    category: streaming
+    probe_target: https://x
+    domains: [youtube.com]
+    domain_lists: [mine]
+`
+	cfg, err := Parse([]byte(in))
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	got := cfg.Registry.Services["youtube"].Domains
+	// Merged from the declaration, not from a file the rebuild job has not written
+	// yet — and lowercased like any fetched entry.
+	want := map[string]bool{"youtube.com": true, "bank.example": true, "vpn.example": true}
+	if len(got) != len(want) {
+		t.Fatalf("domains = %v, want the service's own plus the pack's", got)
+	}
+	for _, d := range got {
+		if !want[d] {
+			t.Errorf("unexpected domain %q in %v", d, got)
+		}
+	}
+}
+
+func TestHostlistWithNeitherSourcesNorDomainsIsRejected(t *testing.T) {
+	in := `
+hostlists:
+  - { name: empty, out: /tmp/x.txt }
+services:
+  - { name: youtube, category: streaming, probe_target: https://x, domains: [youtube.com] }
+`
+	_, err := Parse([]byte(in))
+	if err == nil {
+		t.Fatal("expected a list with nothing to be made of to be rejected")
+	}
+	if !strings.Contains(err.Error(), "sources") {
+		t.Errorf("error should say what is missing, got %q", err)
+	}
+}
+
+func TestHostlistRejectsAnInvalidOwnDomain(t *testing.T) {
+	in := `
+hostlists:
+  - { name: mine, out: /tmp/x.txt, domains: ["not a domain"] }
+services:
+  - { name: youtube, category: streaming, probe_target: https://x, domains: [youtube.com] }
+`
+	if _, err := Parse([]byte(in)); err == nil {
+		t.Fatal("expected an invalid hand-written domain to be rejected at parse")
+	}
+}
