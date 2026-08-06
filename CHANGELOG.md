@@ -6,6 +6,40 @@ older sections carry working dates rather than release dates.
 
 ## [Unreleased]
 
+### A laptop that moved networks lost its own LAN
+
+- Home from the office, and the ThinkPad was gone from the LAN — no ssh, no
+  ping, sshd fine, internet working. `auto_route` had swallowed
+  `192.168.1.0/24`, because the tun still excluded `10.0.0.0/24`.
+- **The excludes were snapshotted into a reconciler that outlives the network.**
+  The refresh loop holds one Reconciler for the life of the process, so every
+  five minutes it regenerated the config with the subnets from wherever the
+  machine booted — re-asserting the wrong LAN rather than drifting into it.
+  `Reconciler.TunExcludes` recomputes them per run.
+- **The recovery path claimed a success it had not observed.**
+  `recaptureForNetwork` builds a fresh reconciler for exactly this, but runs
+  once per confirmed roam and folded `ErrDeferred`/`ErrNotApplied` into the
+  no-error branch — logging "roam: config regenerated for the new network" over
+  both. A degraded subscription fetch right after a move is the ordinary case,
+  and that is precisely when it declared victory. It now reports the outcome,
+  and says the machine may be unreachable on its LAN until the next refresh.
+- Neither is verified on hardware yet.
+
+### IPv6 walked past the tunnel
+
+- `auto_route` captures the address families the tun holds an address for, and
+  ours held only IPv4. So a VPN-rung service whose name resolves to AAAA
+  egressed DIRECT — `ai` most of all, which had been made VPN-only that same day
+  because a desync cannot help against an application-layer refusal.
+- Services on a desync rung were never exposed: the nft table is `inet` and its
+  rules match on interface and port, so nfqws sees v6 too. But a desync is not
+  an exit, which is the whole reason `ai` was moved.
+- `-tun-ipv6` captures it, **off by default**. Capturing IPv6 that the exit
+  nodes cannot carry trades a silent leak for dead connections, and which is
+  worse depends on the fleet — that is the operator's call. Not being told is
+  not, so the client now warns at startup when it is about to protect IPv4 only
+  on a host with a global IPv6 address, and names the services affected.
+
 ### 44 of 50 exits were being thrown away
 
 - **A node's identity hashed protocol|address|port and nothing else.** The
