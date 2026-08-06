@@ -1,20 +1,6 @@
 // Shared view helpers. Kept dumb and pure so every screen renders the same
 // vocabulary (a service's colour/glyph, a node's health, byte/time formatting).
 
-export const verdictText = {
-  working: 'всё работает',
-  partial: 'не все сервисы доступны',
-  'not-working': 'не работает',
-  down: 'выключено',
-}
-
-export function verdictKind(v) {
-  if (!v) return 'dim'
-  if (v.state === 'working') return 'ok'
-  if (v.state === 'down' || v.state === 'not-working') return 'red'
-  return 'amber'
-}
-
 // A service is red when its chain is exhausted, amber while it is still failing
 // at its current rung (подбор), dim when unmanaged (direct), else ok. This mirrors
 // the server's honest verdict — a failing service is never painted green.

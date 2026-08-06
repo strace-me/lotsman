@@ -131,19 +131,13 @@ header {
   padding-left: 18px;
   border-left: 1px solid var(--line);
 }
-.verdict .counts {
+/* The build identity: present but quiet. It is reference material you go looking
+   for, not a status you watch, so it must not compete with the tiles below. */
+.verdict .build {
   font-variant-numeric: tabular-nums;
-  color: var(--ink);
-  margin-left: 6px;
-}
-.verdict.ok .counts {
-  color: var(--ok);
-}
-.verdict.amber .counts {
-  color: var(--amber);
-}
-.verdict.red .counts {
-  color: var(--red);
+  font-size: 12px;
+  color: var(--ink-faint);
+  letter-spacing: 0.02em;
 }
 
 nav {
