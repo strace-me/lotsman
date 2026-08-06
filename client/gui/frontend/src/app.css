@@ -776,3 +776,10 @@ h2 {
 .add-ok {
   margin-bottom: 10px;
 }
+
+/* The brain asked for one thing and the engine runs another. Amber, not red: it
+   is a divergence to know about, not a failure by itself. */
+.mismatch {
+  color: var(--amber);
+  font-size: 11px;
+}

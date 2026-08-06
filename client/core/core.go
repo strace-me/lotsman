@@ -947,9 +947,21 @@ type NodeStatus struct {
 
 	// Enriched for the rich /status (all additive — a consumer decoding only the
 	// original five fields is unaffected).
-	Rung         int     `json:"rung"`                   // chain position the brain settled on
-	RungClass    string  `json:"rungClass,omitempty"`    // zapret | vpn | direct | emergency
-	Strategy     string  `json:"strategy,omitempty"`     // static chain strategy id, or the live desync recipe
+	Rung      int    `json:"rung"`                // chain position the brain settled on
+	RungClass string `json:"rungClass,omitempty"` // zapret | vpn | direct | emergency
+	// Engine is the PROCESS carrying this service right now — nfqws for a desync
+	// rung, sing-box for everything routed. The rung class alone does not say it,
+	// and "which engine is this rule living in" is the first thing you need when a
+	// service misbehaves: it decides whether you look at desync recipes or at nodes.
+	Engine string `json:"engine,omitempty"`
+	// Strategy is what is ACTUALLY running: the composed desync recipe, or the pool
+	// a routed service selects through.
+	Strategy string `json:"strategy,omitempty"`
+	// Requested is what the brain ASKED for, when that differs from Strategy. They
+	// diverge silently today — the brain can name a strategy the local engine cannot
+	// render, and the executor quietly falls back to the best recipe it can build —
+	// so a UI showing only one of the two describes a machine that does not exist.
+	Requested    string  `json:"requested,omitempty"`
 	StalledRatio float64 `json:"stalledRatio,omitempty"` // passive-eye freeze ratio (0 when the eye saw nothing)
 	LeakRatio    float64 `json:"leakRatio,omitempty"`    // passive-eye leak-to-direct ratio
 }
@@ -986,8 +998,21 @@ func (c *Core) statusLocked(ctx context.Context) []NodeStatus {
 			step := svc.Chain[s.Position]
 			ns.RungClass = step.StrategyClass
 			ns.Strategy = step.StrategyID
-			if ns.Strategy == "" && step.StrategyClass == strategy.ClassZapret && c.zapExec != nil {
-				ns.Strategy = c.zapExec.chosenRecipe(s.Service)
+			if step.StrategyClass == strategy.ClassZapret {
+				if c.zapExec != nil {
+					ns.Engine = "nfqws"
+					// What the desync engine ACTUALLY composed. It can differ from what
+					// the brain resolved, because the KB ranks strategy ids while the
+					// engine can only render recipes it holds.
+					ns.Strategy = c.zapExec.chosenRecipe(s.Service)
+				}
+			} else {
+				ns.Engine = "sing-box"
+			}
+			// Say what was asked for only when it is not what is running — a UI that
+			// always printed both would make the ordinary case look like a discrepancy.
+			if s.Strategy != "" && s.Strategy != ns.Strategy {
+				ns.Requested = s.Strategy
 			}
 		}
 		if m, ok := obs.Services[s.Service]; ok {

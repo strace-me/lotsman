@@ -16,11 +16,22 @@ export function tileGlyph(s) {
   if (s.rungClass === 'direct') return '·'
   return '✓'
 }
+// Which ENGINE is carrying this rule, then what it is running, then where. The
+// engine comes first because it decides where you look when a service misbehaves:
+// nfqws means desync recipes, sing-box means nodes and pools. The rung class alone
+// never said it.
 export function tileWhere(s) {
-  if (s.rungClass === 'direct') return 'напрямую'
-  const bits = [s.rungClass, s.strategy].filter(Boolean)
-  if (s.node) bits.push(s.node)
+  if (s.rungClass === 'direct') return [s.engine, 'напрямую'].filter(Boolean).join(' · ')
+  const bits = [s.engine || s.rungClass, s.strategy].filter(Boolean)
+  if (s.node && s.node !== s.strategy) bits.push(s.node)
   return bits.join(' · ')
+}
+
+// What the brain ASKED for, shown only when the data plane is running something
+// else. That divergence is silent today — the brain can name a strategy the local
+// engine cannot render, and the executor falls back without saying so.
+export function tileRequested(s) {
+  return s.requested ? 'запрошено: ' + s.requested : ''
 }
 
 export function fmtBytes(n) {

@@ -106,7 +106,9 @@ type Service struct {
 	Broken       bool    `json:"broken"`
 	Rung         int     `json:"rung"`
 	RungClass    string  `json:"rungClass"`
+	Engine       string  `json:"engine"`
 	Strategy     string  `json:"strategy"`
+	Requested    string  `json:"requested"`
 	StalledRatio float64 `json:"stalledRatio"`
 	LeakRatio    float64 `json:"leakRatio"`
 }
