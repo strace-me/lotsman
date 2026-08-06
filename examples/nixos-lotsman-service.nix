@@ -51,6 +51,13 @@ in
 {
   # The privilege seam: the service runs as root, the GUI does not. A 0660 socket owned
   # by this group is the only way an unprivileged UI touches it.
+  #
+  # AFTER THE FIRST REBUILD THE DESKTOP NEEDS MORE THAN A LOGOUT. `systemd --user` is
+  # per USER, not per session: it outlives a logout and keeps the group set it was
+  # started with, and everything the app launcher starts inherits that. So a session
+  # that predates this group will keep hitting "permission denied" on the control
+  # socket however many times you log out — measured on this machine. Run
+  # `loginctl terminate-user <you>` from a text console, or reboot.
   users.groups.lotsman = { };
   users.users.${user}.extraGroups = [ "lotsman" ];
 

@@ -14,12 +14,18 @@ older sections carry working dates rather than release dates.
   through to a per-user path that was never going to exist. The GUI then said `no
   such file or directory` about it while the service was running perfectly. Seen
   the day the systemd unit was installed: a desktop session started before the
-  group existed cannot traverse the directory, and a logout is the fix, not a
-  restart. A path we are merely forbidden to look at is evidence the service IS
-  there, and is now chosen on that basis.
+  group existed cannot traverse the directory. A path we are merely forbidden to
+  look at is evidence the service IS there, and is now chosen on that basis.
 - A failed dial now says what it means. "Permission denied" and "no such file"
   both render in a UI as "the service is broken", and one of them is usually
-  wrong; the client names the likely cause and the actual remedy instead.
+  wrong; the client names the likely cause and the remedy instead.
+- **And the obvious remedy is the wrong one.** "Log out and back in" is what a
+  group change normally calls for, and on a systemd desktop it does nothing:
+  `systemd --user` is per USER, not per session, so it survives the logout with
+  the group set it started with, and everything the app launcher starts inherits
+  that. Measured on the ThinkPad — a full logout left the manager's groups
+  unchanged. `loginctl terminate-user` or a reboot is what refreshes them, and
+  that is what the message and the NixOS module now say.
 
 ### A desync engine for Windows
 
