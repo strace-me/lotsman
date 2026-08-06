@@ -70,11 +70,37 @@ type EngineStatus struct {
 	State string `json:"state"` // running | stopped
 }
 
-// FleetStatus reports the exit pool. Total is the node count the last config
-// generate loaded. Per-node alive/frozen/dead health is not tracked client-side
-// yet (no Ranker is wired here), so it is omitted rather than faked — a follow-up.
+// FleetStatus counts three DIFFERENT things that a single number used to blur
+// together, and the blur was hiding a defect. Total is how many nodes the
+// subscriptions yielded; Servers is how many distinct addresses those nodes sit
+// behind — a provider may advertise fifty exits across six front-ends, and it is
+// the fifty that matter for exit diversity and the six that matter for how much
+// of your fleet one blocked address takes with it. Pools is what each declared
+// pool actually selected, which is the number a service is really choosing from.
 type FleetStatus struct {
-	Total int `json:"total"`
+	Total   int            `json:"total"`
+	Servers int            `json:"servers,omitempty"`
+	Pools   map[string]int `json:"pools,omitempty"`
+	// Nodes is every exit the subscriptions yielded, with the pools that selected
+	// it. Without this the fleet is a number you cannot check: an operator paying
+	// for fifty exits has no way to see whether fifty arrived.
+	Nodes []FleetNode `json:"nodes,omitempty"`
+}
+
+// FleetNode is one exit as configured. There is no liveness here: the client
+// keeps no per-node health of its own yet, and inventing a colour for it would be
+// exactly the kind of unobserved claim this project keeps finding. Warm is a
+// property of the POOL, not a measurement — a warmup pool is kept continuously
+// probed so a failover lands on an already-hot node instead of waiting for a cold
+// probe, which is the honest answer to "what would be substituted".
+type FleetNode struct {
+	Name     string   `json:"name"`
+	Server   string   `json:"server"`
+	Protocol string   `json:"protocol"`
+	Country  string   `json:"country,omitempty"`
+	Source   string   `json:"source,omitempty"`
+	Pools    []string `json:"pools,omitempty"`
+	Warm     bool     `json:"warm,omitempty"`
 }
 
 // SubStatus is one subscription's quota/expiry, captured from the provider's
@@ -109,7 +135,7 @@ func (c *Core) Report(ctx context.Context) Report {
 		Verdict:       verdict(running, services),
 		Network:       c.networkInfo(),
 		Engines:       c.engineStatuses(ctx),
-		Fleet:         FleetStatus{Total: c.lastNodes},
+		Fleet:         FleetStatus{Total: c.lastNodes, Servers: c.lastServers, Pools: c.lastPools, Nodes: c.lastFleet},
 		Subscriptions: c.subStatuses(),
 		Services:      services,
 		Disabled:      disabled,

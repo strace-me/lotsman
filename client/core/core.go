@@ -210,8 +210,11 @@ type Core struct {
 	// itself. Started once in Start, stopped in Stop; survives the Reloads it triggers.
 	failoverCancel context.CancelFunc
 	failoverWg     sync.WaitGroup
-	tunnelIPs      []string // proxy server IPs the desync must never touch
-	lastNodes      int      // nodes the last generate loaded; zero with subscriptions declared means no tunnel
+	tunnelIPs      []string       // proxy server IPs the desync must never touch
+	lastNodes      int            // nodes the last generate loaded; zero with subscriptions declared means no tunnel
+	lastServers    int            // distinct server addresses those nodes sit behind
+	lastPools      map[string]int // what each declared pool selected at that generate
+	lastFleet      []FleetNode    // every exit as configured, with the pools that took it
 
 	mu         sync.Mutex
 	stateMu    sync.Mutex      // serialises reads of the swappable loop state (brain/reg/eng/zap/prober) against Reload
@@ -1265,6 +1268,35 @@ func (c *Core) generate(ctx context.Context) ([]byte, error) {
 	memberships := c.conf.Pools.Memberships(nodes)
 	c.tunnelIPs = tunnelIPs(nodes, c.log)
 	c.lastNodes = len(nodes)
+	// Record the other two counts while we hold the material for them: how many
+	// distinct addresses the fleet actually sits behind, and what each pool
+	// selected. A single "nodes" number cannot answer "why does this service only
+	// have three to choose from".
+	servers := make(map[string]bool, len(nodes))
+	for _, n := range nodes {
+		servers[n.Server+":"+strconv.Itoa(n.Port)] = true
+	}
+	c.lastServers = len(servers)
+	c.lastPools = make(map[string]int, len(memberships))
+	inPools := make(map[string][]string, len(nodes))
+	warm := make(map[string]bool, len(nodes))
+	for name, members := range memberships {
+		c.lastPools[name] = len(members)
+		hot := c.conf.Pools.Pools[name].Warmup
+		for _, n := range members {
+			inPools[n.ID] = append(inPools[n.ID], name)
+			warm[n.ID] = warm[n.ID] || hot
+		}
+	}
+	c.lastFleet = make([]FleetNode, 0, len(nodes))
+	for _, n := range nodes {
+		pl := inPools[n.ID]
+		sort.Strings(pl)
+		c.lastFleet = append(c.lastFleet, FleetNode{
+			Name: n.DisplayName, Server: n.Server, Protocol: n.Protocol,
+			Country: n.Country, Source: n.Source, Pools: pl, Warm: warm[n.ID],
+		})
+	}
 
 	services := make([]registry.Service, 0, len(c.reg.Services))
 	for _, s := range c.reg.Services {

@@ -34,6 +34,18 @@ func Parse(data []byte, format Format, source string) ([]Node, error) {
 	if format == FormatAuto {
 		format = Detect(data)
 	}
+	nodes, err := parseFormat(data, format, source)
+	if err != nil {
+		return nil, err
+	}
+	// Identity is finalised over the WHOLE pull, because whether a connection
+	// parameter distinguishes two exits or is merely a rotating credential can
+	// only be told from how many nodes share an address at once. See assignIDs.
+	assignIDs(nodes)
+	return nodes, nil
+}
+
+func parseFormat(data []byte, format Format, source string) ([]Node, error) {
 	switch format {
 	case FormatClash:
 		return parseClash(data, source)

@@ -14,7 +14,11 @@
 
 <div class="stats">
   <div class="stat">
-    <div class="k">Пул нод</div>
+    <!-- Just the count. The tile used to say «Пул нод» over the whole-fleet
+         number — the label named one entity and the number another, which is how
+         nobody noticed fifty exits arriving as six. The breakdown belongs on
+         «Ноды», not here. -->
+    <div class="k">Ноды</div>
     <div class="v">{report.fleet.total}</div>
   </div>
   <div class="stat">

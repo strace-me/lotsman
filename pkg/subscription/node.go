@@ -7,7 +7,9 @@ package subscription
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"strconv"
+	"strings"
 )
 
 // Protocols recognized across formats.
@@ -69,12 +71,82 @@ func capsForProtocol(proto string) Caps {
 	}
 }
 
-// nodeID derives a stable ID from the essential connection fields, so the same
-// node appearing in successive pulls keeps its identity (for health history /
-// dedup). Cosmetic fields (display name, tags) are excluded.
+// nodeID is a node's identity across pulls: address alone. Two providers force
+// this to be more subtle than it looks, and they pull in opposite directions.
+//
+//   - vpn-a ROTATES the REALITY short_id on the same node every few minutes
+//     (LOT-1). Folding that into the identity renames every node every few
+//     minutes, which rewrites the config and restarts sing-box on pure churn.
+//   - AcmeVPN SELECTS THE EXIT by short_id: it advertises 50 entries across 6
+//     addresses, and three sharing one address came out at 198.51.100.10,
+//     198.51.100.11 and 198.51.100.12 — three different countries. Address
+//     identity collapsed 50 real exits into 6 and threw away 44 of them.
+//
+// What tells them apart is not the field, it is the SHAPE OF ONE PULL: a rotating
+// credential appears once per address, while a selector appears many times at
+// once. So the base identity stays the address, and assignIDs (below) extends it
+// only for addresses that carry more than one node in the same pull.
 func nodeID(proto, server string, port int) string {
 	h := sha256.Sum256([]byte(proto + "|" + server + "|" + strconv.Itoa(port)))
 	return hex.EncodeToString(h[:8])
+}
+
+// assignIDs finalises identity across a whole pull, which is the only place the
+// distinction above can be made. An address carrying one node keeps the plain
+// address identity, so a rotated credential is invisible; an address carrying
+// several gets each of them extended by what actually differs between them, so
+// they survive as separate exits instead of collapsing into one.
+//
+// The cost of being wrong each way is asymmetric and decides the default:
+// over-distinguishing splits a node's health history, which heals in minutes,
+// while under-distinguishing silently deletes exits you are paying for.
+func assignIDs(nodes []Node) {
+	byAddr := make(map[string]int, len(nodes))
+	for i := range nodes {
+		byAddr[nodes[i].ID]++
+	}
+	for i := range nodes {
+		if byAddr[nodes[i].ID] < 2 {
+			continue
+		}
+		h := sha256.Sum256([]byte(nodes[i].ID + "|" + connectionIdentity(nodes[i].Raw)))
+		nodes[i].ID = hex.EncodeToString(h[:8])
+	}
+}
+
+// cosmeticKeys are the fields that name a node rather than describe how to reach
+// it, across the shapes Raw takes (a Clash proxy map, a sing-box outbound).
+var cosmeticKeys = []string{"name", "tag", "remarks"}
+
+// connectionIdentity reduces a node's raw config to the part that determines the
+// connection, dropping only what a provider is free to re-label. A URL's fragment
+// is its display name; a marshalled map carries the name as a field. Anything we
+// cannot recognise is hashed whole — over-distinguishing splits a node's health
+// history on a rename, which is recoverable, while under-distinguishing merges
+// two different exits, which is not.
+func connectionIdentity(raw string) string {
+	if raw == "" {
+		return ""
+	}
+	if strings.Contains(raw, "://") {
+		if i := strings.IndexByte(raw, '#'); i >= 0 {
+			return raw[:i]
+		}
+		return raw
+	}
+	var m map[string]any
+	if err := json.Unmarshal([]byte(raw), &m); err != nil {
+		return raw
+	}
+	for _, k := range cosmeticKeys {
+		delete(m, k)
+	}
+	// encoding/json sorts map keys, so this is stable across pulls.
+	out, err := json.Marshal(m)
+	if err != nil {
+		return raw
+	}
+	return string(out)
 }
 
 // finalize fills derived fields (ID, Caps) on a node whose connection fields
