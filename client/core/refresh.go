@@ -67,6 +67,25 @@ func (r boxRunner) checkInProcess(ctx context.Context, args []string) error {
 	return r.box.Check(ctx, cfg)
 }
 
+// reconcileBox provisions the rule-sets the CURRENT config names, then reconciles.
+//
+// The order is load-bearing and was learned the hard way. The reconciler builds
+// the sing-box config itself — it does not go through Core.generate — so the
+// provisioning that generate does on startup never happened on this path. A
+// config that introduced a rule-set the disk did not have therefore failed the
+// reconciler's own `sing-box check` and fell back to a full re-exec, dropping the
+// tunnel: exactly what in-place reload exists to avoid. Observed the moment a
+// config with `web-blocked` and its six rule-sets was applied to the ThinkPad.
+//
+// Provisioning is a no-op against a warm cache, so doing it before every
+// reconcile costs nothing and removes the ordering as something to remember.
+func (c *Core) reconcileBox(ctx context.Context, rc *reconcile.Reconciler) error {
+	if err := c.ensureRuleSets(ctx); err != nil {
+		return err
+	}
+	return rc.Reconcile(ctx)
+}
+
 // newReconciler builds the config reconciler that keeps the running sing-box in
 // step with the subscriptions. Without it the client renders its config once at
 // startup and never notices a node rotating out from under it — an ordinary
@@ -145,7 +164,7 @@ func (c *Core) refreshLoop(ctx context.Context, rc *reconcile.Reconciler, every 
 		case <-t.C:
 			// A deliberate skip (degraded fetch, dry-run) is a no-op, not a failure:
 			// warning on it every tick would train the operator to ignore the log.
-			if err := rc.Reconcile(ctx); err != nil &&
+			if err := c.reconcileBox(ctx, rc); err != nil &&
 				!errors.Is(err, reconcile.ErrDeferred) && !errors.Is(err, reconcile.ErrNotApplied) {
 				c.log.Warn("subscription refresh failed (retrying next tick)", "err", err)
 			}

@@ -24,6 +24,9 @@ import (
 // Report is the rich /status payload. It is a superset of the legacy
 // {running, services}; unknown future fields are ignored on decode.
 type Report struct {
+	// Version is the build answering. A UI that cannot say which build it is
+	// talking to makes every bug report and every rollback a guess.
+	Version       string         `json:"version"`
 	Running       bool           `json:"running"`
 	Verdict       Verdict        `json:"verdict"`
 	Network       Network        `json:"network"`

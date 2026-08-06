@@ -7,6 +7,7 @@
 export function mock() {
   return {
     report: {
+      version: 'v7.0-14-g54c35c5 (54c35c5, 2026-08-06)',
       running: true,
       verdict: { state: 'partial', working: 6, failing: 1, broken: 1, total: 8 },
       network: { id: 'a1b2c3d4', kind: 'wifi', carrier: '', iface: 'wlan0', roaming: false },

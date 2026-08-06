@@ -600,7 +600,7 @@ func (c *Core) Reload(newConf *config.Config) error {
 
 	// Reconcile the box: regenerate from newConf and restart sing-box only on a real
 	// diff. A non-routing edit produces the same config → no restart → connection kept.
-	switch err := c.newReconciler().Reconcile(context.WithoutCancel(root)); {
+	switch err := c.reconcileBox(context.WithoutCancel(root), c.newReconciler()); {
 	case err == nil:
 		// Applied. newConf carries whatever the background refresh wrote, so the running
 		// config is no longer behind.
@@ -777,7 +777,7 @@ func (c *Core) recaptureForNetwork(ctx context.Context) {
 	if c.opts.SingboxConfig == "" {
 		return // nothing to reconcile against
 	}
-	if err := c.newReconciler().Reconcile(ctx); err != nil &&
+	if err := c.reconcileBox(ctx, c.newReconciler()); err != nil &&
 		!errors.Is(err, reconcile.ErrDeferred) && !errors.Is(err, reconcile.ErrNotApplied) {
 		c.log.Warn("roam: could not regenerate the config for the new network", "err", err)
 		return

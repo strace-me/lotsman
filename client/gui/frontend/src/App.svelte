@@ -7,7 +7,6 @@
   import Advanced from './lib/Advanced.svelte'
   import Config from './lib/Config.svelte'
   import { mock } from './lib/mock.js'
-  import { verdictText, verdictKind } from './lib/format.js'
 
   let report = null
   let events = []
@@ -153,10 +152,15 @@
       {/if}
     </div>
 
-    <div class="verdict {verdictKind(report && report.verdict)}">
+    <!-- The verdict used to live here. It is on the Обзор tile already, and the
+         same number in two places is one place to disagree with itself. What the
+         bar cannot say anywhere else is WHICH BUILD is answering. -->
+    <div class="verdict">
       {#if report}
-        {verdictText[report.verdict.state] || report.verdict.state}
-        <span class="counts">{report.verdict.working}/{report.verdict.total}</span>
+        <!-- Just the tag: the commit in the parenthetical is already the -g suffix,
+             and the bar is not where you read a build date. Full string on hover. -->
+        <span class="build" title="версия службы, отвечающей этому окну: {report.version || 'неизвестна'}"
+          >{(report.version || '—').split(' ')[0]}</span>
       {:else if error}
         сервис недоступен
       {:else}
