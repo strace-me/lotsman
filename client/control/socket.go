@@ -24,12 +24,28 @@ func DefaultSocketPath() string {
 	if base == "" {
 		base = os.TempDir()
 	}
-	perUser := filepath.Join(base, "lotsman", "control.sock")
+	return chooseSocketPath(filepath.Join(base, "lotsman", "control.sock"), SystemSocketPath)
+}
+
+// chooseSocketPath is the decision itself, with both candidates passed in so a
+// test can stage them; DefaultSocketPath supplies the real ones.
+func chooseSocketPath(perUser, system string) string {
 	if _, err := os.Stat(perUser); err == nil {
 		return perUser
 	}
-	if _, err := os.Stat(SystemSocketPath); err == nil {
-		return SystemSocketPath
+	// An error that is NOT "does not exist" is evidence the system socket IS there
+	// and we are simply not allowed to look at it — the directory reaching it is
+	// 0750 root:lotsman, so a process outside the group gets EACCES from the stat,
+	// not ENOENT. Treating that as absence is what made a working service report
+	// itself missing: a desktop session started before the group existed cannot
+	// traverse /run/lotsman, so the GUI fell through to a per-user path that was
+	// never going to exist and said "no such file or directory" about it.
+	//
+	// Choosing the guarded path instead means the dial fails with "permission
+	// denied", which is the truth and names the real fix (log out and back in, so
+	// the session picks up the lotsman group).
+	if _, err := os.Stat(system); err == nil || !os.IsNotExist(err) {
+		return system
 	}
 	return perUser
 }

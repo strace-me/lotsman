@@ -6,6 +6,21 @@ older sections carry working dates rather than release dates.
 
 ## [Unreleased]
 
+### A running service that reported itself missing
+
+- **`control.DefaultSocketPath` read "permission denied" as "not there".** The
+  system socket's directory is `0750 root:lotsman`, so a process outside the group
+  gets EACCES from the stat, not ENOENT — and the `err == nil` check fell straight
+  through to a per-user path that was never going to exist. The GUI then said `no
+  such file or directory` about it while the service was running perfectly. Seen
+  the day the systemd unit was installed: a desktop session started before the
+  group existed cannot traverse the directory, and a logout is the fix, not a
+  restart. A path we are merely forbidden to look at is evidence the service IS
+  there, and is now chosen on that basis.
+- A failed dial now says what it means. "Permission denied" and "no such file"
+  both render in a UI as "the service is broken", and one of them is usually
+  wrong; the client names the likely cause and the actual remedy instead.
+
 ### A desync engine for Windows
 
 - **`client/platform/winws`** runs zapret's Windows engine as a managed child,
