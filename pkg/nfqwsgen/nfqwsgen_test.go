@@ -2,6 +2,7 @@ package nfqwsgen
 
 import (
 	"reflect"
+	"slices"
 	"strings"
 	"testing"
 
@@ -187,5 +188,59 @@ func TestComposeStillInlinesWithoutAPath(t *testing.T) {
 	}})
 	if got[0] != "--hostlist-domains=youtube.com" {
 		t.Errorf("without a path the domains stay inline, got %v", got)
+	}
+}
+
+// A multi-profile recipe must compose into SEVERAL nfqws profiles, in the recipe's
+// order, all scoped to the same service. Order is the whole point: nfqws matches
+// profiles first-to-last and stops, so the narrow tcp/443 profile has to precede
+// the tcp/80,443 one or it is dead code that loads cleanly and changes nothing.
+func TestComposeExpandsAMultiProfileRecipe(t *testing.T) {
+	r := strategycat.Recipe{
+		ID: "alt12",
+		Blocks: [][]string{
+			{"--filter-tcp=443", "--hostlist-domains={{DOMAINS}}", "--dpi-desync=hostfakesplit"},
+			{"--filter-tcp=80,443", "--hostlist-domains={{DOMAINS}}", "--dpi-desync=fake,multisplit"},
+			{"--filter-udp=443", "--hostlist-domains={{DOMAINS}}", "--dpi-desync=fake"},
+		},
+	}
+	got := Compose([]Block{{Service: "youtube", Domains: []string{"youtube.com"}, Recipe: r}})
+
+	if n := countArg(got, "--new"); n != 2 {
+		t.Fatalf("three profiles need two --new delimiters, got %d in %v", n, got)
+	}
+	// nfqws creates the FIRST profile itself, so a leading --new prepends a
+	// filterless catch-all that swallows everything and leaves the rest dead.
+	if got[0] == "--new" {
+		t.Error("composed args must not start with --new")
+	}
+	order := []string{}
+	for _, a := range got {
+		if strings.HasPrefix(a, "--filter-") {
+			order = append(order, a)
+		}
+	}
+	want := []string{"--filter-tcp=443", "--filter-tcp=80,443", "--filter-udp=443"}
+	if !slices.Equal(order, want) {
+		t.Errorf("profile order = %v, want %v — a shadowed profile loads fine and does nothing", order, want)
+	}
+	if countArg(got, "--hostlist-domains=youtube.com") != 3 {
+		t.Errorf("every profile must carry the service's domains: %v", got)
+	}
+}
+
+// An exclusion belongs to every profile of the block. Attached only to the first,
+// the others would happily desync exactly the endpoints the operator excluded.
+func TestComposeRepeatsTheExclusionAcrossProfiles(t *testing.T) {
+	r := strategycat.Recipe{ID: "two", Blocks: [][]string{
+		{"--filter-tcp=443", "--hostlist-domains={{DOMAINS}}", "--dpi-desync=fake"},
+		{"--filter-udp=443", "--hostlist-domains={{DOMAINS}}", "--dpi-desync=fake"},
+	}}
+	got := Compose([]Block{{
+		Service: "gaming-epic", Domains: []string{"epicgames.com"},
+		Recipe: r, Exclude: []string{"download.epicgames.com"},
+	}})
+	if n := countArg(got, "--hostlist-exclude-domains=download.epicgames.com"); n != 2 {
+		t.Errorf("exclusion appeared %d times, want one per profile: %v", n, got)
 	}
 }

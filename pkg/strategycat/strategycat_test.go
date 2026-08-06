@@ -39,14 +39,14 @@ func TestRecipesWellFormed(t *testing.T) {
 		if r.Provenance == "" {
 			t.Errorf("%s: missing provenance", r.ID)
 		}
-		if len(r.NfqwsArgs) == 0 {
+		if len(r.AllBlocks()) == 0 {
 			t.Errorf("%s: empty nfqws_args", r.ID)
 		}
 
 		// every recipe is exactly one --new block: it must NOT contain --new,
 		// and must carry a filter selecting its traffic.
 		hasFilter := false
-		for _, a := range r.NfqwsArgs {
+		for _, a := range r.AllArgs() {
 			if a == "--new" {
 				t.Errorf("%s: nfqws_args contains --new (a recipe is a single block)", r.ID)
 			}
@@ -59,7 +59,7 @@ func TestRecipesWellFormed(t *testing.T) {
 		}
 
 		// args must be normalized: no absolute upstream paths leaked in.
-		joined := strings.Join(r.NfqwsArgs, " ")
+		joined := strings.Join(r.AllArgs(), " ")
 		for _, bad := range []string{"/opt/zapret", "%BIN%", "%LISTS%", "$B/", "$L/"} {
 			if strings.Contains(joined, bad) {
 				t.Errorf("%s: un-normalized path token %q in args", r.ID, bad)
@@ -77,7 +77,7 @@ func TestRecipesWellFormed(t *testing.T) {
 
 func TestDeriveTagsConsistentWithArgs(t *testing.T) {
 	for _, r := range Load() {
-		joined := strings.Join(r.NfqwsArgs, " ")
+		joined := strings.Join(r.AllArgs(), " ")
 		for _, tag := range r.Techniques {
 			switch {
 			case tag == "seqovl":

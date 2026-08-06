@@ -203,7 +203,7 @@ func Compose(services []registry.Service, recipes []strategycat.Recipe, pick Pic
 // with no hostlist) would desync unrelated traffic and is rejected. Pure.
 func recipeRenderable(r strategycat.Recipe) bool {
 	hasDomains := false
-	for _, a := range r.NfqwsArgs {
+	for _, a := range r.AllArgs() {
 		if strings.Contains(a, "{{DOMAINS}}") {
 			hasDomains = true
 		}

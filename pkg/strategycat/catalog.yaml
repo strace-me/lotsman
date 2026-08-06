@@ -940,3 +940,70 @@ recipes:
       - "--dpi-desync-repeats=11"
       - "--dpi-desync-fake-quic=quic_initial_www_google_com.bin"
     notes: "DEPLOYED general QUIC block (repeats=11)"
+
+  # --- multi-profile bundles ------------------------------------------------
+  # A single profile can only cover one filter, and a real bundle needs several.
+  # Flowseal's ALT12 treats a Google domain on tcp/443 one way, everything else on
+  # tcp/80,443 another way, and QUIC on udp/443 a third — so a service given only
+  # the general profile passes a TCP probe while carrying no video, which is
+  # exactly what was measured on the ThinkPad.
+  #
+  # Order is load-bearing: nfqws matches profiles first-to-last and stops, so the
+  # narrow tcp/443 profile MUST precede the tcp/80,443 one it would be shadowed by.
+  #
+  # ALT12's two --ipset profiles are deliberately absent. They target a global IP
+  # set the per-service model has nothing to point at, and a recipe stripped of an
+  # argument no longer does what its author wrote — better to ship the hostlist
+  # profiles honestly than a partial bundle under the bundle's name.
+  - id: "flowseal-alt12-google"
+    provenance: "Flowseal/zapret-discord-youtube 1.10.0, ALT12 (hostlist profiles)"
+    target_class: "general_tls"
+    protocol: "tcp"
+    techniques: ["hostfakesplit", "fake", "multisplit", "seqovl", "fooling:ts", "repeats:8", "fake-tls", "fake-quic"]
+    blocks:
+      - - "--filter-tcp=443"
+        - "--hostlist-domains={{DOMAINS}}"
+        - "--ip-id=zero"
+        - "--dpi-desync=hostfakesplit"
+        - "--dpi-desync-fooling=ts"
+        - "--dpi-desync-hostfakesplit-mod=host=www.google.com"
+      - - "--filter-tcp=80,443"
+        - "--hostlist-domains={{DOMAINS}}"
+        - "--dpi-desync=fake,multisplit"
+        - "--dpi-desync-split-seqovl=664"
+        - "--dpi-desync-split-pos=1"
+        - "--dpi-desync-fooling=ts"
+        - "--dpi-desync-repeats=8"
+        - "--dpi-desync-split-seqovl-pattern=tls_clienthello_max_ru.bin"
+        - "--dpi-desync-fake-tls=stun.bin"
+        - "--dpi-desync-fake-tls=tls_clienthello_max_ru.bin"
+        - "--dpi-desync-fake-http=tls_clienthello_max_ru.bin"
+      - - "--filter-udp=443"
+        - "--hostlist-domains={{DOMAINS}}"
+        - "--dpi-desync=fake"
+        - "--dpi-desync-repeats=11"
+        - "--dpi-desync-fake-quic=quic_initial_www_google_com.bin"
+    notes: "ALT12's Google path for one service: hostfakesplit on 443, the general fake+multisplit behind it, and the QUIC profile a TCP-only recipe leaves uncovered"
+  - id: "flowseal-alt12-general"
+    provenance: "Flowseal/zapret-discord-youtube 1.10.0, ALT12 (hostlist profiles)"
+    target_class: "general_tls"
+    protocol: "tcp"
+    techniques: ["fake", "multisplit", "seqovl", "fooling:ts", "repeats:8", "fake-tls", "fake-quic"]
+    blocks:
+      - - "--filter-tcp=80,443"
+        - "--hostlist-domains={{DOMAINS}}"
+        - "--dpi-desync=fake,multisplit"
+        - "--dpi-desync-split-seqovl=664"
+        - "--dpi-desync-split-pos=1"
+        - "--dpi-desync-fooling=ts"
+        - "--dpi-desync-repeats=8"
+        - "--dpi-desync-split-seqovl-pattern=tls_clienthello_max_ru.bin"
+        - "--dpi-desync-fake-tls=stun.bin"
+        - "--dpi-desync-fake-tls=tls_clienthello_max_ru.bin"
+        - "--dpi-desync-fake-http=tls_clienthello_max_ru.bin"
+      - - "--filter-udp=443"
+        - "--hostlist-domains={{DOMAINS}}"
+        - "--dpi-desync=fake"
+        - "--dpi-desync-repeats=11"
+        - "--dpi-desync-fake-quic=quic_initial_www_google_com.bin"
+    notes: "ALT12 without the Google-specific profile: the general TCP treatment plus QUIC, for services that are not Google properties"
