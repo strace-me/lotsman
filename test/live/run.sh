@@ -102,6 +102,12 @@ if [ "$MODE" = client ]; then
   # config defect, which is how a harness loses its credibility.
   $SSH "mkdir -p $REMOTE/tree/pkg/config $REMOTE/tree/examples" </dev/null
   $SSH "cat > $REMOTE/tree/examples/r5s.yaml" < examples/r5s.yaml
+  # Snapshot what is RUNNING before we touch anything, so C8 can compare against
+  # the machine we actually found rather than against an assumption. The first
+  # version assumed a laptop with the system sing-box up and Lotsman not
+  # installed; the moment Lotsman became a service that assumption was wrong and
+  # the case failed for the very outcome it was written to celebrate.
+  $SSH "{ systemctl is-active sing-box; systemctl is-active lotsman-client; } > $REMOTE/before.state 2>&1" </dev/null
   echo "   staged lotsman-client + 4 test binaries + the example config"
 else
 
@@ -513,14 +519,24 @@ say "$CASE  the laptop is exactly as we found it"
   fi
   $SSH "test -e $LC" </dev/null 2>/dev/null \
     && bad "could not remove $LC — root-owned leftovers from C5" || ok "scratch dir removed"
-  for p in "sing-box"; do
-    $SSH "systemctl is-active $p >/dev/null 2>&1" </dev/null && ok "$p still active" || meh "$p is not active (was it before?)"
-  done
-  # -x matches the process NAME, not the cmdline: a -f pattern also matches the
-  # ssh command carrying it, and this check reported a stray that was itself.
-  # (The opposite trap is nfqws, which rewrites its title so -x misses it — hence
-  # killq reads /proc there. Different binary, different rule.)
-  left=$($SSH 'pgrep -x lotsman-client | wc -l' </dev/null)
+  before=$($SSH "cat $REMOTE/before.state 2>/dev/null" </dev/null)
+  after=$($SSH "{ systemctl is-active sing-box; systemctl is-active lotsman-client; } 2>&1" </dev/null)
+  if [ "$before" = "$after" ]; then
+    ok "the services are as we found them ($(echo "$after" | tr '\n' '/'))"
+  else
+    bad "the run changed what is running: [$(echo "$before" | tr '\n' '/')] -> [$(echo "$after" | tr '\n' '/')]"
+  fi
+  # Count by the EXECUTABLE, not the process name. Once Lotsman is installed as a
+  # service there is always a lotsman-client running and it is not ours — matching
+  # by name made this case fail permanently on exactly the box where the install
+  # succeeded. /proc/<pid>/exe says which binary a process actually is, and only
+  # the staged one under $REMOTE belongs to this run.
+  #
+  # Read as root where we can: C5 and C6 launch the staged binary as root, and an
+  # unprivileged readlink on a root process's exe is denied — which would hide the
+  # very leak this is looking for.
+  strayCmd="for p in \$(pgrep -x lotsman-client 2>/dev/null); do readlink -f /proc/\$p/exe 2>/dev/null; done | grep -c '^$REMOTE/' || true"
+  if haveroot; then left=$(asroot "$strayCmd" | head -1); else left=$($SSH "$strayCmd" </dev/null | head -1); fi
   [ "${left:-0}" = 0 ] && ok "no test process left behind" || bad "$left stray process(es) from this run"
 fi
 
