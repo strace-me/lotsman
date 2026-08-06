@@ -4,10 +4,12 @@
   export let report
   export let events = []
   export let onRecheck = () => {}
+  export let onToggle = () => {}
 
   $: services = report.services || []
   $: problems = services.filter((s) => s.broken || s.fails > 0)
   $: working = services.filter((s) => !s.broken && s.fails === 0)
+  $: disabled = report.disabled || []
 </script>
 
 <div class="stats">
@@ -41,7 +43,10 @@
             <span class="name">{s.service}</span>
           </div>
           <div class="where">{s.broken ? 'нет живых нод' : tileWhere(s)}</div>
-          <button class="fix" on:click={() => onRecheck(s.service)}>перепроверить</button>
+          <div class="tile-actions">
+            <button class="fix" on:click={() => onRecheck(s.service)}>перепроверить</button>
+            <button class="ghost" on:click={() => onToggle(s.service, false)}>выключить</button>
+          </div>
         </div>
       {/each}
     </div>
@@ -57,10 +62,30 @@
         <span class="name">{s.service}</span>
         <span class="where">{tileWhere(s)}</span>
         <button class="ghost" on:click={() => onRecheck(s.service)}>перепроверить</button>
+        <button class="ghost" on:click={() => onToggle(s.service, false)}>выключить</button>
       </div>
     {/each}
   </div>
 </section>
+
+{#if disabled.length}
+  <section>
+    <h2>Выключены · {disabled.length}</h2>
+    <!-- Shown because a service that is absent on purpose and a service that has
+         gone missing look identical otherwise, and the operator needs to tell them
+         apart without opening the config. -->
+    <div class="rows">
+      {#each disabled as name (name)}
+        <div class="row off">
+          <span class="glyph dim">○</span>
+          <span class="name">{name}</span>
+          <span class="where">не проверяется и не маршрутизируется</span>
+          <button class="ghost" on:click={() => onToggle(name, true)}>включить</button>
+        </div>
+      {/each}
+    </div>
+  </section>
+{/if}
 
 <div class="two-col">
   <section>

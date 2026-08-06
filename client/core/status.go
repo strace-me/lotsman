@@ -25,6 +25,12 @@ type Report struct {
 	Fleet         FleetStatus    `json:"fleet"`
 	Subscriptions []SubStatus    `json:"subscriptions,omitempty"`
 	Services      []NodeStatus   `json:"services"`
+	// Disabled names the services the operator switched off. They carry no state
+	// because none is kept for them — they are absent from the registry, so nothing
+	// probes or routes them — but the UI needs the names to offer switching them
+	// back on, and the operator needs to see that a service is missing on purpose
+	// rather than gone.
+	Disabled []string `json:"disabled,omitempty"`
 	// DomainListsDrifted reports that a background refresh changed a declared domain
 	// pack, so the running config routes a slightly older set. Deliberately NOT applied
 	// on a timer — re-routing under a live tunnel unasked would drop connections the
@@ -90,6 +96,13 @@ func (c *Core) Report(ctx context.Context) Report {
 	defer c.stateMu.Unlock()
 	services := c.statusLocked(ctx)
 	running := c.Healthy(ctx)
+	// A Core that has not been given a config yet still answers /status — a UI that
+	// attaches early gets "not running" rather than a broken pipe — so nothing here
+	// may assume conf is set.
+	var disabled []string
+	if c.conf != nil {
+		disabled = c.conf.DisabledServices
+	}
 	return Report{
 		Version:       version.String(),
 		Running:       running,
@@ -99,6 +112,7 @@ func (c *Core) Report(ctx context.Context) Report {
 		Fleet:         FleetStatus{Total: c.lastNodes},
 		Subscriptions: c.subStatuses(),
 		Services:      services,
+		Disabled:      disabled,
 
 		DomainListsDrifted: c.listsDrifted.Load(),
 	}

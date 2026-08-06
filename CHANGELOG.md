@@ -4,6 +4,33 @@ All notable changes to Lotsman. Format loosely follows [Keep a Changelog]. Relea
 are tagged from v6.13 on; everything before that was a build-time string, so the
 older sections carry working dates rather than release dates.
 
+## [Unreleased]
+
+### Services can be switched off
+
+- **`disabled: true` on a service** takes it out of `buildRegistry` entirely, so
+  nothing probes, routes or desyncs it. The alternative — a flag every consumer
+  checks — makes one forgotten guard into a service that reads as off and is still
+  probed; there is no such guard to forget when the service is simply not there.
+  The declaration stays in the file, because "I don't use Discord" is not "delete
+  my Discord config". A config whose services are all disabled is rejected by name
+  rather than starting with nothing to steer.
+- **`POST /service/{name}/enabled`** is the control-API switch, and it edits the
+  YAML node in place (`config.SetServiceEnabledYAML`) rather than re-serialising
+  the document. A structured save may legitimately rewrite the file; a toggle on
+  the dashboard must not expand every zero value the operator never wrote or drop
+  their comments. Switching back on removes the key, restoring the text.
+- Validation runs over the whole candidate before the file is touched, so a
+  rejected switch leaves the config intact. Applied through `Core.Reload`, in
+  place — though sing-box does restart when a service leaves or rejoins, because
+  its route rules genuinely changed.
+- `GET /status` gained `disabled`, and the dashboard a **Выключены** section: a
+  service absent on purpose and a service that has gone missing look identical
+  otherwise.
+- Verified on the ThinkPad in proxy mode: off → absent from `services`, present in
+  `disabled`, comments intact in the file, back on → the original text; unknown
+  service, missing field and last-service-off all refused with the file unchanged.
+
 ## [v7.0] — 2026-08-05
 
 **The box can find its own strategies.** v6 could only use recipes somebody else

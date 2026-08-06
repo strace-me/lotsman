@@ -47,6 +47,19 @@
     setTimeout(load, 500)
   }
 
+  // Switching a service off is a config edit the daemon applies in place, so the
+  // next poll shows the result. Reload straight away rather than waiting for the
+  // tick — a toggle that appears to do nothing for two seconds reads as broken.
+  async function setEnabled(name, on) {
+    if (!backend) return
+    try {
+      await backend.SetServiceEnabled(name, on)
+    } catch (e) {
+      error = String(e && e.message ? e.message : e)
+    }
+    setTimeout(load, 400)
+  }
+
   async function stop() {
     if (!backend) return
     if (!confirm('Выключить сервис Lotsman? Туннель и десинк остановятся.')) return
@@ -166,7 +179,7 @@
       <Config {backend} drifted={report && report.domain_lists_drifted} />
     {:else if report}
       {#if tab === 'dashboard'}
-        <Dashboard {report} {events} onRecheck={recheck} />
+        <Dashboard {report} {events} onRecheck={recheck} onToggle={setEnabled} />
       {:else if tab === 'nodes'}
         <Nodes {report} />
       {:else if tab === 'subs'}

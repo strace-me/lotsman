@@ -37,6 +37,13 @@ func (a *App) Events(limit int, service string) ([]control.Event, error) {
 // Recheck forces an immediate probe of one service ("перепроверить").
 func (a *App) Recheck(service string) error { return a.client.Recheck(a.ctx, service) }
 
+// SetServiceEnabled switches one service on or off (the tile toggle). The daemon
+// writes the bit to the config file, so it survives a restart and is not undone by
+// the next reassert.
+func (a *App) SetServiceEnabled(service string, enabled bool) error {
+	return a.client.SetServiceEnabled(a.ctx, service, enabled)
+}
+
 // Stop is the master OFF: it tears the service down.
 func (a *App) Stop() error { return a.client.Stop(a.ctx) }
 

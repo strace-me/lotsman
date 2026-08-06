@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -41,6 +42,10 @@ type Config struct {
 	DNS             *DNS                  // split-DNS: multi-server, DoT/DoH/DoQ, VPN-detoured (nil = client default)
 	Multiplex       *Multiplex            // default outbound multiplex for TCP proxies (nil = off)
 	SubViaPool      string                // route subscription endpoint hosts through this VPN pool (LOT-28); needs -probe-proxy ("" = off, direct fetch)
+	// DisabledServices names the services the operator switched OFF. They are absent
+	// from Registry entirely — nothing probes, routes or desyncs them — and are
+	// carried here only so a UI can list them and offer to switch them back on.
+	DisabledServices []string
 }
 
 // FakeIP enables the generated fakeip DNS section (domain-accurate routing via
@@ -161,7 +166,13 @@ type captureYAML struct {
 }
 
 type serviceYAML struct {
-	Name           string          `yaml:"name"`
+	Name string `yaml:"name"`
+	// Disabled switches the service OFF: it is dropped at registry build, so no
+	// probe, route rule or desync entry is ever produced for it. The declaration
+	// stays in the file so the operator can switch it back on without retyping it.
+	// A bit rather than a deletion, because deleting is not what "I don't use
+	// Discord" means.
+	Disabled       bool            `yaml:"disabled,omitempty"`
 	Category       string          `yaml:"category"`
 	ProbeType      string          `yaml:"probe_type"`
 	ProbeTarget    string          `yaml:"probe_target"`
@@ -291,7 +302,14 @@ func Parse(data []byte) (*Config, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &Config{Registry: reg, Subscriptions: f.Subscriptions, Pools: pl, Zapret: instances, Devices: devices, Hostlists: hostlists, Strategies: strategies, UTLSFingerprint: f.UTLSFingerprint, SingboxVersion: f.SingboxVersion, FakeIP: fakeip, DNS: dns, Multiplex: mux, SubViaPool: f.SubViaPool}, nil
+	var disabled []string
+	for _, s := range f.Services {
+		if s.Disabled {
+			disabled = append(disabled, s.Name)
+		}
+	}
+	sort.Strings(disabled)
+	return &Config{Registry: reg, Subscriptions: f.Subscriptions, Pools: pl, Zapret: instances, Devices: devices, Hostlists: hostlists, Strategies: strategies, UTLSFingerprint: f.UTLSFingerprint, SingboxVersion: f.SingboxVersion, FakeIP: fakeip, DNS: dns, Multiplex: mux, SubViaPool: f.SubViaPool, DisabledServices: disabled}, nil
 }
 
 // LoadDocument reads the config file into its editable Document form (no
@@ -458,13 +476,18 @@ func buildRegistry(svcs []serviceYAML, cats map[string]registry.Category, hostli
 		return nil, fmt.Errorf("config: no services defined")
 	}
 	reg := &registry.Registry{Services: make(map[string]registry.Service, len(svcs))}
+	seen := make(map[string]bool, len(svcs))
 	for _, s := range svcs {
 		if s.Name == "" {
 			return nil, fmt.Errorf("config: service with empty name")
 		}
-		if _, dup := reg.Services[s.Name]; dup {
+		// Duplicates are caught across the WHOLE list, disabled included: two
+		// declarations of one name are a config error now, not a surprise the moment
+		// someone switches the second one on.
+		if seen[s.Name] {
 			return nil, fmt.Errorf("config: duplicate service %q", s.Name)
 		}
+		seen[s.Name] = true
 		if !validProbeType(s.ProbeType) {
 			return nil, fmt.Errorf("config: service %q: unknown probe_type %q (want http/tcp/stun)", s.Name, s.ProbeType)
 		}
@@ -509,6 +532,14 @@ func buildRegistry(svcs []serviceYAML, cats map[string]registry.Category, hostli
 		if !validProfile(profile) {
 			return nil, fmt.Errorf("config: service %q: unknown profile %q (want general/voice/streaming/gaming)", s.Name, profile)
 		}
+		// A switched-off service is validated like any other — a typo should surface
+		// now, not when it is switched back on — but never enters the registry. Every
+		// consumer (prober, brain, route generator, desync composer) reads the
+		// registry, so one omission here is the whole feature, with no per-consumer
+		// guard to forget.
+		if s.Disabled {
+			continue
+		}
 		reg.Services[s.Name] = registry.Service{
 			Name:           s.Name,
 			Category:       s.Category,
@@ -528,6 +559,9 @@ func buildRegistry(svcs []serviceYAML, cats map[string]registry.Category, hostli
 			TLSFragment:    s.TLSFragment,
 			Chain:          chain,
 		}
+	}
+	if len(reg.Services) == 0 {
+		return nil, fmt.Errorf("config: every one of the %d declared services is disabled — nothing left to steer; switch one on, or stop the service instead", len(svcs))
 	}
 	return reg, nil
 }

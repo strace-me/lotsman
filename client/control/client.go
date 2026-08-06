@@ -29,6 +29,9 @@ type Report struct {
 	Fleet         Fleet          `json:"fleet"`
 	Subscriptions []Subscription `json:"subscriptions"`
 	Services      []Service      `json:"services"`
+	// Disabled names services the operator switched off. They carry no runtime
+	// state — nothing probes or routes them — so they are names, not Services.
+	Disabled []string `json:"disabled"`
 }
 
 // Verdict is the top-line coverage rollup. State is one of
@@ -156,6 +159,14 @@ func (c *Client) Events(ctx context.Context, limit int, service string) ([]Event
 // Recheck forces an immediate probe of one service.
 func (c *Client) Recheck(ctx context.Context, service string) error {
 	return c.post(ctx, "/service/"+url.PathEscape(service)+"/recheck")
+}
+
+// SetServiceEnabled switches one service on or off. It is a config edit applied
+// in place, not a runtime override, so it survives a restart and cannot be undone
+// by the next reassert.
+func (c *Client) SetServiceEnabled(ctx context.Context, service string, enabled bool) error {
+	return c.postJSON(ctx, "/service/"+url.PathEscape(service)+"/enabled",
+		map[string]bool{"enabled": enabled})
 }
 
 // Stop is the master OFF: it tears the service down and the process exits.
