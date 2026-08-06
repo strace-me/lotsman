@@ -56,7 +56,7 @@ func recipeCoversPort(r strategycat.Recipe, port int) bool {
 	// TCP probe it cannot possibly affect — the very mistake this function exists
 	// to prevent.
 	filtered := false
-	for _, a := range r.NfqwsArgs {
+	for _, a := range r.AllArgs() {
 		for _, prefix := range []string{"--filter-tcp=", "--filter-udp="} {
 			spec, ok := strings.CutPrefix(a, prefix)
 			if !ok {

@@ -58,7 +58,8 @@ func Compose(blocks []Block) []string {
 		// stray space/;/backtick would break the args or inject a shell token. Drop
 		// anything that isn't a clean domain (defense-in-depth on the shell sink).
 		doms := validDomains(b.Domains)
-		if len(doms) == 0 || len(b.Recipe.NfqwsArgs) == 0 {
+		profiles := b.Recipe.AllBlocks()
+		if len(doms) == 0 || len(profiles) == 0 {
 			continue
 		}
 		joined := strings.Join(doms, ",")
@@ -76,14 +77,27 @@ func Compose(blocks []Block) []string {
 		// matched first to last until the first match, that catch-all swallows all
 		// traffic and applies no desync, so every block behind it is dead. Verified
 		// live: the strategy loaded cleanly and changed nothing.
-		if len(out) > 0 {
-			out = append(out, "--new")
-		}
-		for _, a := range b.Recipe.NfqwsArgs {
-			out = append(out, rewrite(a))
-		}
-		if excl := validDomains(b.Exclude); len(excl) > 0 {
-			out = append(out, "--hostlist-exclude-domains="+strings.Join(excl, ","))
+		// A recipe may carry SEVERAL profiles (Flowseal's ALT12 needs three to cover
+		// one service: a Google-specific one on tcp/443, a general one on tcp/80,443
+		// and QUIC on udp/443). Each becomes its own --new profile, in the recipe's
+		// order, because nfqws matches first-to-last and stops.
+		excl := validDomains(b.Exclude)
+		for _, profile := range profiles {
+			if len(profile) == 0 {
+				continue
+			}
+			if len(out) > 0 {
+				out = append(out, "--new")
+			}
+			for _, a := range profile {
+				out = append(out, rewrite(a))
+			}
+			// The exclusion belongs to every profile of the block, not just the first:
+			// nfqws checks it per profile, so attaching it once would leave the other
+			// profiles free to desync exactly the endpoints the operator excluded.
+			if len(excl) > 0 {
+				out = append(out, "--hostlist-exclude-domains="+strings.Join(excl, ","))
+			}
 		}
 	}
 	return out
@@ -109,7 +123,7 @@ func Validate(blocks []Block) []Conflict {
 	claims := map[string][]string{}
 	var order []string
 	for _, b := range blocks {
-		if len(b.Recipe.NfqwsArgs) == 0 {
+		if len(b.Recipe.AllBlocks()) == 0 {
 			continue
 		}
 		for _, d := range validDomains(b.Domains) {

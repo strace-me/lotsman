@@ -47,11 +47,50 @@ type Recipe struct {
 	Protocol    Protocol    `yaml:"protocol"`
 	Techniques  []string    `yaml:"techniques"`
 	NfqwsArgs   []string    `yaml:"nfqws_args"`
-	Notes       string      `yaml:"notes"`
+	// Blocks is the MULTI-PROFILE form: a strategy that needs several nfqws
+	// profiles, each with its own filter, to cover one service. Real bundles are
+	// built this way — Flowseal's ALT12 treats a Google domain with one profile on
+	// tcp/443, everything else with another on tcp/80,443, and QUIC with a third on
+	// udp/443 — and a single-profile recipe can only ever be one of those three. It
+	// was the QUIC one being missing that let a service pass its TCP probe while
+	// carrying no video.
+	//
+	// Order is load-bearing: nfqws matches profiles first-to-last and stops, so a
+	// narrow filter must precede the broad one it would otherwise be shadowed by.
+	// Empty = single-profile, described by NfqwsArgs.
+	Blocks [][]string `yaml:"blocks,omitempty"`
+	Notes  string     `yaml:"notes"`
 	// Consensus counts the independent bundles shipping this exact recipe.
 	// Set by pkg/strategyimport; absent (0) in the hand-curated catalog, where
 	// the same fact lives in Provenance as prose.
 	Consensus int `yaml:"consensus,omitempty"`
+}
+
+// AllBlocks returns the profiles this recipe composes into: its explicit Blocks,
+// or the single profile in NfqwsArgs. One accessor so no consumer has to remember
+// which form a recipe uses.
+func (r Recipe) AllBlocks() [][]string {
+	if len(r.Blocks) > 0 {
+		return r.Blocks
+	}
+	if len(r.NfqwsArgs) == 0 {
+		return nil
+	}
+	return [][]string{r.NfqwsArgs}
+}
+
+// AllArgs flattens every profile's arguments. For the scanners that ask "does this
+// recipe reference payload X / a UDP filter / an unfillable placeholder", which are
+// questions about the whole recipe rather than about one profile.
+func (r Recipe) AllArgs() []string {
+	if len(r.Blocks) == 0 {
+		return r.NfqwsArgs
+	}
+	var out []string
+	for _, b := range r.Blocks {
+		out = append(out, b...)
+	}
+	return out
 }
 
 type catalog struct {

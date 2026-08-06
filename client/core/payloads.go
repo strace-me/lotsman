@@ -24,7 +24,7 @@ import (
 // payloadRefs returns the payload filenames a recipe's args reference.
 func payloadRefs(r strategycat.Recipe) []string {
 	var out []string
-	for _, a := range r.NfqwsArgs {
+	for _, a := range r.AllArgs() {
 		_, val, ok := strings.Cut(a, "=")
 		if ok && strings.HasSuffix(val, ".bin") {
 			out = append(out, val)
