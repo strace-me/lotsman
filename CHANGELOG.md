@@ -6,6 +6,32 @@ older sections carry working dates rather than release dates.
 
 ## [Unreleased]
 
+### A desync engine for Windows
+
+- **`client/platform/winws`** runs zapret's Windows engine as a managed child,
+  with the same keep-last-good discipline as the Linux one: the previous argv
+  survives a failed launch, and a strategy the engine refuses leaves the previous
+  one running and says so.
+- The Windows gap was narrower than "no code". Both modules already cross-compiled
+  for Windows, and `pkg/strategyimport` already reads Flowseal's `.bat` bundles —
+  it drops `--wf-tcp`/`--wf-udp` from recipes precisely so the Windows and Linux
+  editions of a strategy are one catalog entry. So the whole 120-recipe pool and
+  everything the KB has learned carry over untouched; what was missing was an
+  executor to hand them to.
+- `CaptureArgs` turns the capture spec into WinDivert filter flags. The spellings
+  come from a real bundle in the test fixtures, not from memory. An empty capture
+  is an error: winws with no filter starts, reports itself healthy and desyncs
+  nothing.
+- `Core.newZapretExec` now picks the engine by platform in one place. `-nfqws-bin`
+  defaults to empty so each engine resolves its own binary — hardcoding `nfqws`
+  sent Windows looking for a binary that does not exist there.
+- **Unproven, and it should be read that way:** no part of this has run on
+  Windows. Process management, argv assembly and rollback are unit-tested; "winws
+  starts and desyncs traffic" is not tested at all. The foreign-tunnel guard is
+  worse than unproven there — it matches Linux adapter names, so on Windows it is
+  very likely blind, and the engine now says so out loud rather than letting a
+  safety check quietly stop checking.
+
 ### Services can be switched off
 
 - **`disabled: true` on a service** takes it out of `buildRegistry` entirely, so

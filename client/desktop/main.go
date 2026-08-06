@@ -75,17 +75,21 @@ const startFailureGrace = 30 * time.Second
 
 func main() {
 	var (
-		configPath    = flag.String("config", "", "path to the lotsman client config (required)")
-		singboxBin    = flag.String("singbox-bin", "sing-box", "sing-box binary")
-		singboxCfg    = flag.String("singbox-config", "singbox.json", "where to write the live sing-box config")
-		clashListen   = flag.String("clash", "127.0.0.1:9090", "loopback Clash-API host:port")
-		probeProxy    = flag.String("probe-proxy", "", `socks addr to probe through the tunnel ("" = probe direct)`)
-		interval      = flag.Duration("interval", 10*time.Second, "probe + reassert interval")
-		stateFile     = flag.String("state-file", "", `persist chain positions across restarts ("" = start cold)`)
-		kbFile        = flag.String("kb-file", "", `KB persistence path ("" = in-memory)`)
-		kbDir         = flag.String("kb-dir", "", `per-network KB dir: the store becomes <dir>/<network-id>.json so each network's learning stays separate (overrides -kb-file)`)
-		ruleSetDir    = flag.String("ruleset-dir", "", "dir holding rule-set-{geosite,geoip}/*.srs (the client provisions these; empty = generator default)")
-		nfqwsBin      = flag.String("nfqws-bin", "nfqws", "nfqws binary for the local desync rung (Linux only)")
+		configPath  = flag.String("config", "", "path to the lotsman client config (required)")
+		singboxBin  = flag.String("singbox-bin", "sing-box", "sing-box binary")
+		singboxCfg  = flag.String("singbox-config", "singbox.json", "where to write the live sing-box config")
+		clashListen = flag.String("clash", "127.0.0.1:9090", "loopback Clash-API host:port")
+		probeProxy  = flag.String("probe-proxy", "", `socks addr to probe through the tunnel ("" = probe direct)`)
+		interval    = flag.Duration("interval", 10*time.Second, "probe + reassert interval")
+		stateFile   = flag.String("state-file", "", `persist chain positions across restarts ("" = start cold)`)
+		kbFile      = flag.String("kb-file", "", `KB persistence path ("" = in-memory)`)
+		kbDir       = flag.String("kb-dir", "", `per-network KB dir: the store becomes <dir>/<network-id>.json so each network's learning stays separate (overrides -kb-file)`)
+		ruleSetDir  = flag.String("ruleset-dir", "", "dir holding rule-set-{geosite,geoip}/*.srs (the client provisions these; empty = generator default)")
+		// Empty, not "nfqws": the desync engine differs by platform (nfqws behind an
+		// nft NFQUEUE on Linux, winws behind its own WinDivert filter on Windows), so
+		// each engine resolves its own default and a hardcoded one here would send
+		// Windows looking for a binary that does not exist there.
+		nfqwsBin      = flag.String("nfqws-bin", "", `desync engine binary ("" = nfqws on Linux, winws.exe on Windows)`)
 		zapretFiles   = flag.String("zapret-files", "", "dir with zapret's fake payload .bin files (recipes naming a missing payload are skipped)")
 		qnum          = flag.Int("qnum", 200, "NFQUEUE queue number for nfqws")
 		wan           = flag.String("wan", "", "egress interface for the desync nft rules (empty = autodetect the default route)")
