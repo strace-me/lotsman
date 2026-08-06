@@ -75,7 +75,8 @@ type Hostlist struct {
 	Out          string
 	Sources      []aggregate.Source
 	Exclude      []aggregate.Source
-	MinKeepRatio float64 // global shrink guard: reject a rebuild below this fraction of the last good count (0 = disabled)
+	Domains      []string // the operator's own entries, merged with the fetched ones
+	MinKeepRatio float64  // global shrink guard: reject a rebuild below this fraction of the last good count (0 = disabled)
 }
 
 // --- on-disk shape ---
@@ -136,10 +137,14 @@ type strategyYAML struct {
 }
 
 type hostlistYAML struct {
-	Name         string   `yaml:"name"`
-	Out          string   `yaml:"out"`
-	Sources      []string `yaml:"sources"`
-	Exclude      []string `yaml:"exclude"`
+	Name    string   `yaml:"name"`
+	Out     string   `yaml:"out"`
+	Sources []string `yaml:"sources"`
+	Exclude []string `yaml:"exclude"`
+	// Domains are the operator's own entries, merged with whatever the sources
+	// yield. A pack may be nothing BUT these — until they existed the only way to
+	// declare your own reusable list was to publish it at a URL and fetch it back.
+	Domains      []string `yaml:"domains"`
 	MinKeepRatio float64  `yaml:"min_keep_ratio"`
 }
 
@@ -410,8 +415,16 @@ func buildHostlists(in []hostlistYAML) ([]Hostlist, error) {
 		if h.Out == "" {
 			return nil, fmt.Errorf("config: hostlist %q has no out path", h.Name)
 		}
-		if len(h.Sources) == 0 {
-			return nil, fmt.Errorf("config: hostlist %q has no sources", h.Name)
+		// A list needs SOMETHING to be made of, but that something may be entirely
+		// hand-written: a pack of four domains does not deserve a URL to be published
+		// at and fetched back.
+		if len(h.Sources) == 0 && len(h.Domains) == 0 {
+			return nil, fmt.Errorf("config: hostlist %q has neither sources nor domains", h.Name)
+		}
+		for _, d := range h.Domains {
+			if !aggregate.ValidDomain(d) {
+				return nil, fmt.Errorf("config: hostlist %q: invalid domain %q", h.Name, d)
+			}
 		}
 		if h.MinKeepRatio < 0 || h.MinKeepRatio > 1 {
 			return nil, fmt.Errorf("config: hostlist %q: min_keep_ratio %v out of [0,1]", h.Name, h.MinKeepRatio)
@@ -421,6 +434,7 @@ func buildHostlists(in []hostlistYAML) ([]Hostlist, error) {
 			Out:          h.Out,
 			Sources:      toSources(h.Sources),
 			Exclude:      toSources(h.Exclude),
+			Domains:      h.Domains,
 			MinKeepRatio: h.MinKeepRatio,
 		})
 	}
@@ -616,11 +630,17 @@ func mergeDomainLists(s serviceYAML, lists map[string]Hostlist) ([]string, error
 		if !ok {
 			return nil, fmt.Errorf("config: service %q: domain_lists names %q, which is not a declared hostlist", s.Name, name)
 		}
-		data, err := os.ReadFile(hl.Out)
-		if err != nil {
-			continue // not built yet, or not readable by this run; the rebuild job owns it
-		}
-		domains, _ := aggregate.ParseList(data)
+		// The operator's own entries come from the DECLARATION, not the file, so they
+		// work on a fresh install where the rebuild job has not run yet — and for a
+		// pack that has no sources at all, where a file may never exist.
+		// Both go through ParseList, so a hand-typed "YouTube.com" is lowercased the
+		// same way a fetched one is — otherwise it would slip past the dedup below
+		// and reach the generator in a case nothing else uses.
+		domains, _ := aggregate.ParseList([]byte(strings.Join(hl.Domains, "\n")))
+		if data, err := os.ReadFile(hl.Out); err == nil {
+			fetched, _ := aggregate.ParseList(data)
+			domains = append(domains, fetched...)
+		} // else: not built yet, or not readable by this run; the rebuild job owns it
 		for _, d := range domains {
 			d = strings.TrimPrefix(d, "*.")
 			if d == "" || seen[d] {

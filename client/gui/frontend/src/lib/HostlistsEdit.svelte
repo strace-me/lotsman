@@ -8,7 +8,7 @@
   export let touch = () => {}
 
   function add() {
-    ;(doc.Hostlists ||= []).push({ Name: '', Out: '', Sources: [], Exclude: [], MinKeepRatio: 0.8 })
+    ;(doc.Hostlists ||= []).push({ Name: '', Out: '', Sources: [], Exclude: [], Domains: [], MinKeepRatio: 0.8 })
     touch()
   }
   function remove(i) {
@@ -35,8 +35,10 @@
   <button class="fix" on:click={add}>+ Список</button>
 </div>
 <div class="muted hl-hint">
-  Пачка доменов, собираемая из внешних источников. Объяви её здесь, а подключай в «Сервисы» — один список можно
-  повесить на сколько угодно правил. Лоцман обновляет их сам и не затирает рабочий файл, если источник отдал огрызок.
+  Переиспользуемая пачка доменов: впиши свои, подтяни из внешних источников или и то и другое. Объяви её здесь,
+  а подключай в «Сервисы» — один список можно повесить на сколько угодно правил. Источники Лоцман обновляет сам и
+  не затирает рабочий файл, если источник отдал огрызок; свои домены живут в конфиге и работают сразу, ещё до
+  первой загрузки.
 </div>
 
 {#if doc.Hostlists && doc.Hostlists.length}
@@ -50,10 +52,16 @@
         </div>
         <label class="full">Файл<input bind:value={hl.Out} on:input={touch} placeholder="/var/lib/lotsman/ru-blocked.txt" /></label>
         <label class="full"
+          >Свои домены (по одному в строке)
+          <textarea class="hl-urls" rows="3" spellcheck="false" value={linesOf(hl.Domains)}
+            on:input={(e) => setLines(hl, 'Domains', e.target.value)}
+            placeholder="bank.example"></textarea>
+        </label>
+        <label class="full"
           >Источники (по одному URL в строке)
           <textarea class="hl-urls" rows="3" spellcheck="false" value={linesOf(hl.Sources)}
             on:input={(e) => setLines(hl, 'Sources', e.target.value)}
-            placeholder="https://example.com/domains.txt"></textarea>
+            placeholder="необязательно, если домены вписаны выше"></textarea>
         </label>
         <label class="full"
           >Исключения (по одному URL в строке)

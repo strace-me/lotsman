@@ -118,3 +118,40 @@ func TestDocumentEngineKnobsJSONKeysRoundTrip(t *testing.T) {
 		t.Errorf("strategy args mangled: %v", conf.Strategies[0].NFQWSArgs)
 	}
 }
+
+// TestHostlistDomainsJSONKeyRoundTrips locks the PascalCase key HostlistsEdit.svelte
+// binds for a pack's own domains. The GUI POSTs the Document as JSON with Go field
+// names, so renaming this field would break the form silently — the config would
+// still save, and the domains the operator typed would simply vanish.
+func TestHostlistDomainsJSONKeyRoundTrips(t *testing.T) {
+	guiDoc := `{
+	  "Services": [{"Name":"yt","Category":"streaming","ProbeTarget":"https://x","Domains":["youtube.com"],"DomainLists":["mine"]}],
+	  "Hostlists": [{"Name":"mine","Out":"/tmp/lotsman-test-mine.txt","Sources":[],"Exclude":[],"Domains":["bank.example","work.example"],"MinKeepRatio":0}]
+	}`
+	var doc Document
+	if err := json.Unmarshal([]byte(guiDoc), &doc); err != nil {
+		t.Fatalf("decode GUI doc: %v", err)
+	}
+	y, err := doc.YAML()
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	conf, err := Parse(y)
+	if err != nil {
+		t.Fatalf("re-parse: %v\n%s", err, y)
+	}
+	if len(conf.Hostlists) != 1 || len(conf.Hostlists[0].Domains) != 2 {
+		t.Fatalf("the pack's own domains did not survive: %+v", conf.Hostlists)
+	}
+	// And they reached the service that attached the pack, with no file on disk.
+	got := conf.Registry.Services["yt"].Domains
+	found := 0
+	for _, d := range got {
+		if d == "bank.example" || d == "work.example" {
+			found++
+		}
+	}
+	if found != 2 {
+		t.Errorf("service domains = %v, want the pack's two merged in", got)
+	}
+}

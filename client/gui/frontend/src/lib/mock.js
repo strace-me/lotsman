@@ -86,7 +86,8 @@ services:
         { Name: 'discord', Category: 'messaging', ProbeTarget: 'https://discord.com/api/v9/gateway', Domains: ['discord.com', 'discord.gg', 'discordapp.com'], DomainLists: [] },
       ],
       Hostlists: [
-        { Name: 'ru-blocked', Out: '/var/lib/lotsman/ru-blocked.txt', Sources: ['https://example.com/blocked.txt'], Exclude: [], MinKeepRatio: 0.8 },
+        { Name: 'ru-blocked', Out: '/var/lib/lotsman/ru-blocked.txt', Sources: ['https://example.com/blocked.txt'], Exclude: [], Domains: [], MinKeepRatio: 0.8 },
+        { Name: 'мои', Out: '/var/lib/lotsman/mine.txt', Sources: [], Exclude: [], Domains: ['bank.example', 'work.example'], MinKeepRatio: 0 },
       ],
       DNS: {
         Servers: [
