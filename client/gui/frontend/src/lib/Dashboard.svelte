@@ -10,7 +10,23 @@
   $: problems = services.filter((s) => s.broken || s.fails > 0)
   $: working = services.filter((s) => !s.broken && s.fails === 0)
   $: disabled = report.disabled || []
+  $: notices = report.notices || []
 </script>
+
+<!-- Above everything, because the point of a notice is that the numbers below it
+     look fine. The text comes from the daemon verbatim — it is the thing that
+     evaluated the condition, and a second copy of the wording here would drift. -->
+{#each notices as n (n.code)}
+  <div class="notice">
+    <span class="notice-mark">!</span>
+    <div>
+      <div>{n.text}</div>
+      {#if n.services && n.services.length}
+        <div class="notice-svc">Затронуты: {n.services.join(', ')}</div>
+      {/if}
+    </div>
+  </div>
+{/each}
 
 <div class="stats">
   <div class="stat">

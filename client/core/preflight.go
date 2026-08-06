@@ -85,23 +85,49 @@ func addrInUse(cidr string) (string, bool) {
 // trades a silent leak for dead connections, and which of those is worse is the
 // operator's call, not ours (LOT-22 family: report the leak, do not pick for them).
 func (c *Core) warnIPv6Escape() {
-	if c.opts.ProxyListen != "" || c.opts.TunIPv6 {
-		return // no tun to escape, or v6 is captured
+	if n := c.ipv6EscapeNotice(); n != nil {
+		c.log.Warn(n.Text, "tunnel_intended_services", n.Services)
 	}
-	if !hostHasGlobalIPv6() {
-		return // nothing to leak
+}
+
+// ipv6EscapeNotice returns the notice when the condition holds, and nil when it
+// does not. It is computed on demand rather than latched at startup because the
+// condition genuinely comes and goes: on the ThinkPad the warning fired at 21:03
+// and was correctly silent at 21:39, same binary, because IPv6 had been turned off
+// in between. A notice cached from startup would have kept accusing a machine that
+// had already fixed itself.
+func (c *Core) ipv6EscapeNotice() *Notice {
+	return c.ipv6EscapeNoticeFor(hostHasGlobalIPv6())
+}
+
+// ipv6EscapeNoticeFor is the decision with the host probe passed in, so the four
+// combinations are testable on any machine — a test that asked the real host
+// would pass or fail depending on whose laptop ran it.
+func (c *Core) ipv6EscapeNoticeFor(hostHasV6 bool) *Notice {
+	if c.opts.ProxyListen != "" || c.opts.TunIPv6 {
+		return nil // no tun to escape, or v6 is captured
+	}
+	if !hostHasV6 {
+		return nil // nothing to leak
 	}
 	var vpnOnly []string
-	for name, svc := range c.reg.Services {
-		if svc.TunnelIntended() {
-			vpnOnly = append(vpnOnly, name)
+	// /status answers before a config is loaded (a UI that attaches early gets an
+	// answer, not a broken pipe), so the registry may not exist yet.
+	if c.reg != nil {
+		for name, svc := range c.reg.Services {
+			if svc.TunnelIntended() {
+				vpnOnly = append(vpnOnly, name)
+			}
 		}
 	}
 	sort.Strings(vpnOnly)
-	c.log.Warn("IPv6 is NOT captured by the tunnel and this machine has a global IPv6 address — "+
-		"any service whose name resolves to AAAA egresses direct, unprotected. Pass -tun-ipv6 to capture it "+
-		"(needs exit nodes that can carry IPv6), or disable IPv6 on this host",
-		"tunnel_intended_services", vpnOnly)
+	return &Notice{
+		Code: NoticeIPv6Escape,
+		Text: "IPv6 is NOT captured by the tunnel and this machine has a global IPv6 address — " +
+			"any service whose name resolves to AAAA egresses direct, unprotected. Pass -tun-ipv6 to capture it " +
+			"(needs exit nodes that can carry IPv6), or disable IPv6 on this host",
+		Services: vpnOnly,
+	}
 }
 
 // hostHasGlobalIPv6 reports whether any interface carries a global-scope IPv6

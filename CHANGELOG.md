@@ -25,6 +25,25 @@ older sections carry working dates rather than release dates.
   and says the machine may be unreachable on its LAN until the next refresh.
 - Neither is verified on hardware yet.
 
+### The app says when the tunnel protects less than it looks like it does
+
+- `/status` gained **`notices`** — conditions the operator should SEE, rendered as
+  a banner above the numbers on «Обзор». Not an alerting layer, and not a
+  notification: this project has neither and wants neither. The promise is that
+  you learn something is broken from the device itself, and the app's job is to
+  hold the CAUSE where you already look. A leak that only ever appeared in a log
+  line at startup is exactly what nobody sees.
+- First notice is the IPv6 escape. It is evaluated **on every status read**, not
+  latched at startup, because the condition genuinely comes and goes: on the
+  ThinkPad the same binary warned at 21:03 and was correctly silent at 21:39,
+  IPv6 having been disabled in between. A notice cached from startup would have
+  gone on accusing a machine that had already fixed itself.
+- Only tunnel-intended services are named. A zapret-preferred service routes
+  direct by design, so listing it would be the same claim-about-something-not-
+  measured this project keeps finding.
+- The text comes from the daemon verbatim; the UI keeps no copy of the wording to
+  drift from the code that evaluates the condition.
+
 ### IPv6 walked past the tunnel
 
 - `auto_route` captures the address families the tun holds an address for, and

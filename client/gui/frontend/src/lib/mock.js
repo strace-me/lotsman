@@ -42,6 +42,13 @@ export function mock() {
         { service: 'dev', state: 'VPN', node: 'nl-hy2-01', rung: 0, rungClass: 'vpn', strategy: 'vpn_pool', fails: 0, broken: false },
         { service: 'ru-direct', state: 'LOCKED', node: '', rung: 0, rungClass: 'direct', strategy: 'direct', fails: 0, broken: false },
       ],
+      notices: [
+        {
+          code: 'ipv6_escape',
+          text: 'IPv6 не заходит в туннель, а у машины есть глобальный IPv6-адрес — любой сервис, чьё имя резолвится в AAAA, уходит напрямую и без защиты. Захватить его можно флагом -tun-ipv6 (нужны ноды, умеющие IPv6), либо выключить IPv6 на этом хосте.',
+          services: ['ai', 'dev', 'discord', 'social', 'web-blocked'],
+        },
+      ],
       disabled: ['torrents', 'twitch'],
     },
     events: [

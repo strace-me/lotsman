@@ -741,3 +741,29 @@ h2 {
   max-height: 320px;
   overflow: auto;
 }
+
+/* A notice is a condition, not a failure: amber, and it sits above the numbers
+   because the whole point is that those numbers look fine while it holds. */
+.notice {
+  display: flex;
+  gap: 10px;
+  align-items: flex-start;
+  background: var(--panel);
+  border: 1px solid var(--amber);
+  border-left: 3px solid var(--amber);
+  border-radius: var(--radius);
+  padding: 10px 14px;
+  margin-bottom: 12px;
+  font-size: 13px;
+  line-height: 1.45;
+}
+.notice-mark {
+  color: var(--amber);
+  font-weight: 700;
+  flex: none;
+}
+.notice-svc {
+  color: var(--ink-dim);
+  font-size: 12px;
+  margin-top: 4px;
+}
