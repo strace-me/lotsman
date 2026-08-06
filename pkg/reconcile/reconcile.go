@@ -82,6 +82,17 @@ type Reconciler struct {
 	// they would not report active). nil = never defer (preserves prior behavior).
 	ActiveRealtimeUDP func(context.Context) (string, bool)
 
+	// TunExcludes, when set, recomputes the tun's route_exclude_address on EVERY
+	// reconcile instead of using the value snapshotted into Opts. It exists because
+	// those routes are a fact about the machine's CURRENT network — the subnets
+	// auto_route must not swallow — and a long-lived reconciler holds Opts from the
+	// moment it was built. On a laptop that means the office LAN stays excluded and
+	// the home LAN gets pulled into the tunnel, so the machine is unreachable on its
+	// own network until the process restarts; worse, the periodic refresh keeps
+	// re-asserting the stale set. Measured on the ThinkPad the day it became a daily
+	// driver. nil = use Opts as given (the router, whose subnets do not move).
+	TunExcludes func() []string
+
 	// Baseline persists lastNodes across restarts so the anti-churn guard works on
 	// the very first reconcile after a restart (otherwise lastNodes resets to 0 and
 	// a degraded startup fetch is applied wholesale — LOT-29). nil = in-memory only.
@@ -180,6 +191,13 @@ func (r *Reconciler) Reconcile(ctx context.Context) error {
 	memberships := r.Pools.Memberships(nodes)
 	opts := r.Opts
 	opts.PoolOpts = singbox.PoolOptionsFrom(r.Pools)
+	if r.TunExcludes != nil && opts.Tun != nil {
+		// Copy the struct: opts is a shallow copy, so Tun still points at the caller's
+		// value and writing through it would edit what every other reader sees.
+		tun := *opts.Tun
+		tun.ExcludeRoutes = r.TunExcludes()
+		opts.Tun = &tun
+	}
 	if r.Remediations != nil {
 		// Fold in the armed controller's active remediations (LOT-18b). When none
 		// are active this is nil/empty and generation is byte-identical to today.
