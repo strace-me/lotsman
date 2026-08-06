@@ -767,3 +767,12 @@ h2 {
   font-size: 12px;
   margin-top: 4px;
 }
+
+.add-err {
+  color: var(--red);
+  font-size: 12px;
+  margin-top: 6px;
+}
+.add-ok {
+  margin-bottom: 10px;
+}

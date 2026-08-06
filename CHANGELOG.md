@@ -25,6 +25,22 @@ older sections carry working dates rather than release dates.
   and says the machine may be unreachable on its LAN until the next refresh.
 - Neither is verified on hardware yet.
 
+### Adding a subscription is no longer a dead button
+
+- «Подписки» had a URL field and a permanently disabled «Добавить» under a note
+  saying it would be wired later. Worse, the button that opened it was hidden
+  when there were no subscriptions — the one moment it is the only thing you
+  need.
+- It now goes through the same structured config the editor uses: read the
+  document, append, save. Not a second server-side path that could disagree with
+  the one already there.
+- The name is derived from the host so the entry is recognisable, and **tags are
+  left empty on purpose** — tags decide which pools may draw on a node, and
+  guessing that for somebody is how a subscription silently ends up unused. The
+  form says so, and points at «Конфиг» for the rest.
+- Whatever the daemon refuses comes back as its own text, shown verbatim, and the
+  typed URL is kept so a rejection does not cost you the paste.
+
 ### The app says when the tunnel protects less than it looks like it does
 
 - `/status` gained **`notices`** — conditions the operator should SEE, rendered as
