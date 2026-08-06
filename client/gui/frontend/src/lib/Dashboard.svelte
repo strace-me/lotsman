@@ -1,5 +1,5 @@
 <script>
-  import { tileKind, tileGlyph, tileWhere, fmtBytes, fmtTime } from './format.js'
+  import { tileKind, tileGlyph, tileWhere, tileRequested, fmtBytes, fmtTime } from './format.js'
 
   export let report
   export let events = []
@@ -62,7 +62,10 @@
             <span class="glyph {tileKind(s)}">{tileGlyph(s)}</span>
             <span class="name">{s.service}</span>
           </div>
-          <div class="where">{s.broken ? 'нет живых нод' : tileWhere(s)}</div>
+          <div class="where">
+            {s.broken ? 'нет живых нод' : tileWhere(s)}
+            {#if tileRequested(s)}<div class="mismatch">{tileRequested(s)}</div>{/if}
+          </div>
           <div class="tile-actions">
             <button class="fix" on:click={() => onRecheck(s.service)}>перепроверить</button>
             <button class="ghost" on:click={() => onToggle(s.service, false)}>выключить</button>
@@ -80,7 +83,7 @@
       <div class="row">
         <span class="glyph {tileKind(s)}">{tileGlyph(s)}</span>
         <span class="name">{s.service}</span>
-        <span class="where">{tileWhere(s)}</span>
+        <span class="where">{tileWhere(s)}{#if tileRequested(s)} <span class="mismatch">({tileRequested(s)})</span>{/if}</span>
         <button class="ghost" on:click={() => onRecheck(s.service)}>перепроверить</button>
         <button class="ghost" on:click={() => onToggle(s.service, false)}>выключить</button>
       </div>

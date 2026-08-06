@@ -192,6 +192,11 @@ type ServiceState struct {
 	State    string
 	Fails    int
 	Broken   bool
+	// Strategy is the id Brain RESOLVED for this rung — which is not always what
+	// the data plane ended up running. A zapret rung's id comes from the KB, and
+	// the local engine may be unable to render it and fall back; surfacing the
+	// asked-for value is what makes that divergence visible instead of silent.
+	Strategy string
 }
 
 // Snapshot returns the current state of every service. Safe for concurrent use.
@@ -206,6 +211,7 @@ func (b *Brain) Snapshot() []ServiceState {
 			State:    rt.svc.Chain[rt.position].State,
 			Fails:    rt.failsCurrent,
 			Broken:   rt.broken,
+			Strategy: rt.currentStrategy,
 		})
 	}
 	// Sorted, because runtimes is a MAP and Go randomises its iteration order on every
