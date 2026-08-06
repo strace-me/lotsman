@@ -2,12 +2,14 @@ package reconcile
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"log/slog"
 	"os"
 	"path/filepath"
+	"slices"
 	"sync"
 	"testing"
 	"time"
@@ -609,4 +611,81 @@ func TestReconcileDoesNotWidenConfigPermissions(t *testing.T) {
 	if got := configMode(filepath.Join(dir, "absent.json")); got != 0o644 {
 		t.Errorf("configMode(absent) = %o, want 0644", got)
 	}
+}
+
+// A laptop's tun excludes are a fact about the network it is attached to NOW, and a
+// reconciler outlives the network it was built on. Without recomputation the periodic
+// refresh keeps re-asserting the subnets from wherever the machine booted — so it
+// excludes the office LAN while sitting at home, the tun swallows 192.168.1.0/24, and
+// the machine is unreachable on its own network until the process restarts. That is
+// what this locks: the SECOND reconcile must carry the SECOND answer.
+func TestReconcileRecomputesTunExcludesEveryRun(t *testing.T) {
+	run := &fakeRunner{}
+	r, cfgPath := testReconciler(t, run, fakeLoader{nodes: []subscription.Node{node(t)}}, false)
+	r.Opts.Tun = &singbox.TunOptions{
+		MTU: 9000, Address: []string{"172.19.0.1/30"}, Stack: "system", AutoRoute: true,
+		ExcludeRoutes: []string{"10.0.0.0/24"}, // where it booted
+	}
+	current := []string{"10.0.0.0/24"}
+	r.TunExcludes = func() []string { return current }
+
+	if err := r.Reconcile(context.Background()); err != nil {
+		t.Fatalf("first reconcile: %v", err)
+	}
+	if got := tunExcludesOf(t, cfgPath); !slices.Equal(got, []string{"10.0.0.0/24"}) {
+		t.Fatalf("first run excludes = %v", got)
+	}
+
+	// The machine moves.
+	current = []string{"192.168.1.0/24"}
+	if err := r.Reconcile(context.Background()); err != nil {
+		t.Fatalf("second reconcile: %v", err)
+	}
+	if got := tunExcludesOf(t, cfgPath); !slices.Equal(got, []string{"192.168.1.0/24"}) {
+		t.Errorf("after the move excludes = %v, want the new network's subnet — the old one means no LAN", got)
+	}
+}
+
+// The hook must not write through the caller's TunOptions pointer: Opts is copied
+// shallowly per run, so mutating in place would edit what every other holder sees
+// (and race the /status readers that call tunOptions()).
+func TestReconcileTunExcludesDoesNotMutateTheCallersOptions(t *testing.T) {
+	run := &fakeRunner{}
+	r, _ := testReconciler(t, run, fakeLoader{nodes: []subscription.Node{node(t)}}, false)
+	tun := &singbox.TunOptions{MTU: 9000, Address: []string{"172.19.0.1/30"}, AutoRoute: true,
+		ExcludeRoutes: []string{"10.0.0.0/24"}}
+	r.Opts.Tun = tun
+	r.TunExcludes = func() []string { return []string{"192.168.1.0/24"} }
+
+	if err := r.Reconcile(context.Background()); err != nil {
+		t.Fatalf("reconcile: %v", err)
+	}
+	if !slices.Equal(tun.ExcludeRoutes, []string{"10.0.0.0/24"}) {
+		t.Errorf("the caller's TunOptions was mutated to %v", tun.ExcludeRoutes)
+	}
+}
+
+// tunExcludesOf reads route_exclude_address back out of the generated config.
+func tunExcludesOf(t *testing.T, path string) []string {
+	t.Helper()
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read config: %v", err)
+	}
+	var doc struct {
+		Inbounds []struct {
+			Type                string   `json:"type"`
+			RouteExcludeAddress []string `json:"route_exclude_address"`
+		} `json:"inbounds"`
+	}
+	if err := json.Unmarshal(data, &doc); err != nil {
+		t.Fatalf("decode config: %v", err)
+	}
+	for _, in := range doc.Inbounds {
+		if in.Type == "tun" {
+			return in.RouteExcludeAddress
+		}
+	}
+	t.Fatal("no tun inbound in the generated config")
+	return nil
 }

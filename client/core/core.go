@@ -81,6 +81,16 @@ type Options struct {
 	CanaryGoodputBytes int64               // bytes to pull per measurement; 0 = 64KiB
 	RuleSetDir         string              // dir holding rule-set-{geosite,geoip}/*.srs ("" = generator default, i.e. the router's /etc/sing-box)
 	Tun                *singbox.TunOptions // client ingress (nil = a sensible default tun)
+	// TunIPv6 gives the default tun an IPv6 address as well, so auto_route installs
+	// an IPv6 default route and v6 traffic is captured instead of escaping. Without
+	// it a VPN-only service whose name resolves to AAAA goes out the physical link
+	// unprotected — "VPN-only" becomes untrue for any host with working IPv6.
+	//
+	// Off by default because the failure it trades into is visible and immediate: if
+	// the exit nodes cannot reach IPv6, captured v6 flows die instead of quietly
+	// working. Warned about at startup either way, so the choice is at least an
+	// informed one. Ignored when Tun is supplied explicitly.
+	TunIPv6 bool
 
 	// ProxyListen switches the client to PROXY MODE: sing-box listens on this
 	// socks address instead of capturing the system with a tun. Nothing is
@@ -260,6 +270,7 @@ func (c *Core) Start(ctx context.Context) error {
 	if err := c.preflight(); err != nil {
 		return err
 	}
+	c.warnIPv6Escape()
 	// The process lifetime. The autonomy loop derives its own sub-context off this
 	// (in buildLoop), so a config reload can cancel + rebuild just the loop while the
 	// box, KB, control socket and metrics server (all process-level) stay up, and
@@ -780,12 +791,24 @@ func (c *Core) recaptureForNetwork(ctx context.Context) {
 	if c.opts.SingboxConfig == "" {
 		return // nothing to reconcile against
 	}
-	if err := c.reconcileBox(ctx, c.newReconciler()); err != nil &&
-		!errors.Is(err, reconcile.ErrDeferred) && !errors.Is(err, reconcile.ErrNotApplied) {
+	// Report what happened, not what was asked for. A deferred or not-applied
+	// reconcile leaves the machine carrying the OLD network's tun excludes — which
+	// is what makes it unreachable on its own LAN — and this used to log success for
+	// it, because both sentinels were folded into the "no error" branch. That is the
+	// failure hiding behind a green line.
+	//
+	// Not fatal any more, because it no longer has to be: the periodic refresh now
+	// recomputes the excludes too (Reconciler.TunExcludes), so a missed recapture is
+	// repaired within a refresh interval instead of lasting until a restart.
+	switch err := c.reconcileBox(ctx, c.newReconciler()); {
+	case err == nil:
+		c.log.Info("roam: config regenerated for the new network")
+	case errors.Is(err, reconcile.ErrDeferred), errors.Is(err, reconcile.ErrNotApplied):
+		c.log.Warn("roam: the new network's config was NOT applied yet — the tun still excludes the old network's subnets, so this machine may be unreachable on its LAN until the next refresh repairs it",
+			"reason", err)
+	default:
 		c.log.Warn("roam: could not regenerate the config for the new network", "err", err)
-		return
 	}
-	c.log.Info("roam: config regenerated for the new network")
 }
 
 // kbDecayInterval and kbDecayFactor mirror the daemon's: 0.95 every 15 minutes, a
@@ -1319,10 +1342,29 @@ func (c *Core) tunOptions() *singbox.TunOptions {
 	if c.opts.Tun != nil {
 		return c.opts.Tun
 	}
-	return &singbox.TunOptions{
-		MTU: 9000, Address: []string{"172.19.0.1/30"}, Stack: "system", AutoRoute: true,
-		ExcludeRoutes: append(append([]string{}, defaultTunExcludes...), localExcludeRoutes()...),
+	addr := []string{"172.19.0.1/30"}
+	if c.opts.TunIPv6 {
+		// A ULA /126, the v6 counterpart of the /30 above: its only job is to make
+		// auto_route install a v6 default so nothing escapes the tunnel by address
+		// family.
+		addr = append(addr, tunIPv6Address)
 	}
+	return &singbox.TunOptions{
+		MTU: 9000, Address: addr, Stack: "system", AutoRoute: true,
+		ExcludeRoutes: tunExcludes(),
+	}
+}
+
+// tunIPv6Address is the tun's IPv6 side when -tun-ipv6 is on. fd00::/8 is the
+// unique-local range, so it cannot collide with anything routable.
+const tunIPv6Address = "fdfe:dcba:9876::1/126"
+
+// tunExcludes is the full route_exclude_address set: the static multicast/broadcast
+// ranges plus whatever subnets this machine is on RIGHT NOW. It is a function rather
+// than a value because the second half changes under a laptop — see
+// reconcile.Reconciler.TunExcludes, which calls it on every reconcile.
+func tunExcludes() []string {
+	return append(append([]string{}, defaultTunExcludes...), localExcludeRoutes()...)
 }
 
 // localExcludeRoutes returns the machine's own directly-connected subnets so

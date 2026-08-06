@@ -116,6 +116,10 @@ func (c *Core) newReconciler() *reconcile.Reconciler {
 		RestartCmd: []string{"proxycore-restart"},
 		Alive:      c.controlAlive,
 		Log:        c.log,
+		// Recomputed per reconcile, not snapshotted: this reconciler outlives the
+		// network it was built on, and the subnets it must keep out of the tunnel are
+		// whichever ones the machine is attached to now.
+		TunExcludes: tunExcludes,
 	}
 	// Persist the anti-churn baseline so the degraded-fetch guard fires on the very
 	// first reconcile after a restart instead of resetting to zero and applying a

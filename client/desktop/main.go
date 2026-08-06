@@ -95,6 +95,7 @@ func main() {
 		wan           = flag.String("wan", "", "egress interface for the desync nft rules (empty = autodetect the default route)")
 		desyncExclude = flag.String("desync-exclude", "", "comma-separated IPs/CIDRs the desync must never touch (the servers of another VPN sharing this host)")
 		desyncForce   = flag.Bool("desync-force", false, "arm the desync even though another tunnel is present on this host")
+		tunIPv6       = flag.Bool("tun-ipv6", false, "TUN MODE: give the tun an IPv6 address so auto_route captures IPv6 too. Without it a VPN-only service whose name resolves to AAAA egresses DIRECT, unprotected — but capturing it breaks IPv6 outright if the exit nodes cannot carry it. The client warns at startup when this matters.")
 		hostDNS       = flag.Bool("host-dns", false, "TUN MODE: redirect the host's own resolver into the tunnel so its browser/shell resolve censored names through the trusted resolver (rewrites /etc/resolv.conf, restores on stop; needs root)")
 		hostlistDir   = flag.String("hostlist-dir", "", "dir for per-service nfqws hostlist files (default /var/lib/lotsman/hostlists as root). MUST stay readable after nfqws drops privileges, so a path under a 0700 home will not work. Empty and non-root inlines domains into argv instead, which costs an engine restart on every membership change")
 		proxyListen   = flag.String("proxy", "", "PROXY MODE: run sing-box on this socks address instead of capturing the system with a tun (no root needed, nothing intercepted)")
@@ -198,6 +199,7 @@ func main() {
 		BaselineFile:      *baselineFile,
 		DesyncForce:       *desyncForce,
 		HostDNS:           *hostDNS,
+		TunIPv6:           *tunIPv6,
 		DesyncExclude: func() []string {
 			if *desyncExclude == "" {
 				return nil
