@@ -23,6 +23,7 @@ import (
 	"github.com/strace-me/lotsman/client/platform/netid"
 	"github.com/strace-me/lotsman/client/platform/nfqws"
 	"github.com/strace-me/lotsman/client/platform/rulesets"
+	"github.com/strace-me/lotsman/client/platform/winws"
 	"github.com/strace-me/lotsman/pkg/applier"
 	"github.com/strace-me/lotsman/pkg/audit"
 	"github.com/strace-me/lotsman/pkg/brain"
@@ -176,8 +177,8 @@ type Core struct {
 	// foreignTunnels is sampled BEFORE our own tun exists. Sampling it later would
 	// always find our own interface and disable the desync rung in tun mode.
 	foreignTunnels []string
-	zap            *nfqws.Engine // local desync engine (nil = no desync rung on this platform)
-	zapExec        *zapretExec   // the zapret executor, reconciled periodically (nil = no desync rung)
+	zap            desyncPlatformEngine // local desync engine (nil = no desync rung on this platform)
+	zapExec        *zapretExec          // the zapret executor, reconciled periodically (nil = no desync rung)
 
 	// pristineChains keeps every service's chain exactly as the config declared it, so
 	// dropUnsupportedRungs can trim from the original on every rebuild instead of
@@ -1423,10 +1424,84 @@ func (c *Core) newZapretExec(ctx context.Context) *zapretExec {
 	if !c.hasZapretStep() {
 		return nil
 	}
-	if runtime.GOOS != "linux" {
-		c.log.Warn("desync rung unavailable: nfqws/NFQUEUE needs Linux", "goos", runtime.GOOS)
+	// The capture spec is the same on both platforms — the same ports carry the
+	// same censored protocols — but how traffic REACHES the engine is not: Linux
+	// queues it with an nft rule, Windows hands winws its own WinDivert filter.
+	inst := zapret.Instance{
+		Name:      "lotsman",
+		QNum:      c.qnum(),
+		Capture:   zapret.Capture{TCP: []string{"80", "443", "2053", "2083", "2087", "2096", "8443"}, UDP: []string{"443"}},
+		Connbytes: defaultConnbytes,
+	}
+	switch runtime.GOOS {
+	case "linux":
+		if c.zap = c.newNfqwsEngine(ctx, inst); c.zap == nil {
+			return nil
+		}
+	case "windows":
+		if c.zap = c.newWinwsEngine(inst); c.zap == nil {
+			return nil
+		}
+	default:
+		c.log.Warn("desync rung unavailable: no desync engine for this platform", "goos", runtime.GOOS)
 		return nil
 	}
+
+	return &zapretExec{
+		clash:  c.clash,
+		engine: c.zap,
+		recipes: usablePayloadRecipes(
+			append(strategycat.Load(), zaptune.RecipesFromDefinitions(c.conf.Strategies)...),
+			c.opts.ZapretFiles, c.log),
+		// Rank recipes by what has actually worked for this service. A cold KB scores
+		// every candidate at the prior, so this degrades to catalog order — the same
+		// choice the seed picker makes — and sharpens only as outcomes accumulate.
+		pick:      zaptune.KBPicker(c.recipeScore),
+		files:     c.opts.ZapretFiles,
+		hostlists: c.opts.HostlistDir,
+		canary:    c.canaryProbe,
+		record:    func(service, recipe string, ok bool) { c.kb.RecordOutcome(service, recipe, ok, 0) },
+		active:    c.zapretServices,
+		resolve:   rulesets.NewResolver(c.opts.SingboxBin, c.opts.RuleSetDir, c.log).Resolve,
+		log:       c.log,
+	}
+}
+
+func (c *Core) qnum() int {
+	if c.opts.QNum == 0 {
+		return defaultQNum
+	}
+	return c.opts.QNum
+}
+
+// newWinwsEngine builds the Windows desync engine. winws carries its own capture
+// filter, so unlike the Linux path there is no interface to detect and no ruleset
+// to install — the whole platform difference is that argv.
+//
+// UNPROVEN: no part of the Windows desync path has run on a Windows machine.
+func (c *Core) newWinwsEngine(inst zapret.Instance) desyncPlatformEngine {
+	// The foreign-tunnel guard cannot be trusted here and must say so. It matches
+	// interface names against Linux/BSD conventions (tun, wg, utun…), and Windows
+	// names its adapters nothing like that — so a WireGuard or OpenVPN tunnel on
+	// this host would very likely go unnoticed and get its packets mangled. A
+	// safety check that quietly stops checking is worse than one that refuses, and
+	// the only honest thing available until someone can read real adapter names off
+	// a real box is to name the gap.
+	if len(c.foreignTunnels) > 0 && !c.opts.DesyncForce {
+		c.log.Warn("desync rung DISABLED: another tunnel is on this host and winws would mangle it",
+			"interfaces", c.foreignTunnels)
+		return nil
+	}
+	c.log.Warn("the foreign-tunnel check is Linux-shaped and cannot vouch for this host",
+		"detail", "it matches adapter names like tun/wg/utun; if another VPN is running here, winws may mangle it")
+	e := winws.New(c.opts.NfqwsBin, inst, c.opts.ZapretFiles, c.log)
+	c.log.Info("desync rung enabled", "engine", "winws", "capture_tcp", inst.Capture.TCP, "capture_udp", inst.Capture.UDP)
+	return e
+}
+
+// newNfqwsEngine builds the Linux desync engine: an nft NFQUEUE ruleset plus a
+// managed nfqws child.
+func (c *Core) newNfqwsEngine(ctx context.Context, inst zapret.Instance) desyncPlatformEngine {
 	wan := c.opts.WAN
 	if wan == "" {
 		detected, err := nfqws.DetectWAN(ctx)
@@ -1450,16 +1525,6 @@ func (c *Core) newZapretExec(ctx context.Context) *zapretExec {
 			"interfaces", foreign, "excluded", c.opts.DesyncExclude)
 	}
 
-	qnum := c.opts.QNum
-	if qnum == 0 {
-		qnum = defaultQNum
-	}
-	inst := zapret.Instance{
-		Name:      "lotsman",
-		QNum:      qnum,
-		Capture:   zapret.Capture{TCP: []string{"80", "443", "2053", "2083", "2087", "2096", "8443"}, UDP: []string{"443"}},
-		Connbytes: defaultConnbytes,
-	}
 	// Never desync a tunnel: ours (derived from the live node set) or a foreign
 	// one the operator named.
 	excluded := append(append([]string{}, c.tunnelIPs...), c.opts.DesyncExclude...)
@@ -1467,7 +1532,7 @@ func (c *Core) newZapretExec(ctx context.Context) *zapretExec {
 	// whose payloads aren't there, and setting it as CWD is what actually lets nfqws
 	// FIND them — a bare --dpi-desync-fake-tls=tls_clienthello_*.bin resolves relative
 	// to CWD, so without this nfqws exits immediately even for a payload we vetted.
-	c.zap = nfqws.New(c.opts.NfqwsBin, inst, zapret.NftOptions{
+	e := nfqws.New(c.opts.NfqwsBin, inst, zapret.NftOptions{
 		Table: "inet lotsman", WAN: wan, VPNServers: excluded,
 	}, c.opts.ZapretFiles, c.log)
 	// Give the engine somewhere durable to leave its last words. An engine that dies
@@ -1476,30 +1541,12 @@ func (c *Core) newZapretExec(ctx context.Context) *zapretExec {
 	// downstream still reads healthy. Reuse whichever persistent dir the operator
 	// already named rather than inventing a knob; with none, the exit is only logged.
 	if dir := c.opts.HostlistDir; dir != "" {
-		c.zap.SetCrashLog(filepath.Join(dir, "nfqws-crash.log"))
+		e.SetCrashLog(filepath.Join(dir, "nfqws-crash.log"))
 	} else if c.opts.StateFile != "" {
-		c.zap.SetCrashLog(filepath.Join(filepath.Dir(c.opts.StateFile), "nfqws-crash.log"))
+		e.SetCrashLog(filepath.Join(filepath.Dir(c.opts.StateFile), "nfqws-crash.log"))
 	}
-	c.log.Info("desync rung enabled", "engine", "nfqws", "wan", wan, "qnum", qnum, "excluded_tunnels", len(excluded))
-
-	return &zapretExec{
-		clash:  c.clash,
-		engine: c.zap,
-		recipes: usablePayloadRecipes(
-			append(strategycat.Load(), zaptune.RecipesFromDefinitions(c.conf.Strategies)...),
-			c.opts.ZapretFiles, c.log),
-		// Rank recipes by what has actually worked for this service. A cold KB scores
-		// every candidate at the prior, so this degrades to catalog order — the same
-		// choice the seed picker makes — and sharpens only as outcomes accumulate.
-		pick:      zaptune.KBPicker(c.recipeScore),
-		files:     c.opts.ZapretFiles,
-		hostlists: c.opts.HostlistDir,
-		canary:    c.canaryProbe,
-		record:    func(service, recipe string, ok bool) { c.kb.RecordOutcome(service, recipe, ok, 0) },
-		active:    c.zapretServices,
-		resolve:   rulesets.NewResolver(c.opts.SingboxBin, c.opts.RuleSetDir, c.log).Resolve,
-		log:       c.log,
-	}
+	c.log.Info("desync rung enabled", "engine", "nfqws", "wan", wan, "qnum", inst.QNum, "excluded_tunnels", len(excluded))
+	return e
 }
 
 // dropUnsupportedRungs rewrites the chains so no rung names a class this host

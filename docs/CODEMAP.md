@@ -175,6 +175,13 @@ plus a thin unprivileged UI, since only the tun and the NFQUEUE rules need root.
 - `client/platform/nfqws` — zapret desync on Linux: nft NFQUEUE rules via
   `zapret.GenerateNft` (same renderer the router's init script uses) plus nfqws as
   a child taking argv, not a generated shell line.
+- `client/platform/winws` — the same desync on Windows, via zapret's winws. The
+  strategy flags are identical (which is why `strategyimport` drops capture args
+  from every recipe); the difference is that winws carries its own WinDivert
+  filter on the command line, so there is no ruleset to install — `CaptureArgs`
+  turns the capture spec into `--wf-tcp`/`--wf-udp`. **Nothing here has met a real
+  WinDivert.** `Core.newZapretExec` is the one place that chooses between the two
+  engines. [Engine, CaptureArgs]
 - `client/platform/rulesets` — provisions the `.srs` the config references from the
   same upstream bundle the router's updater consumes, and decompiles them back to
   domains so the desync covers what sing-box routes.

@@ -36,6 +36,16 @@ type desyncEngine interface {
 	Stop(ctx context.Context) error
 }
 
+// desyncPlatformEngine is the engine as the CORE holds it: the executor's slice
+// above, plus the measured liveness the status surface reads. It is an interface
+// because there are now two implementations — nfqws behind an nft NFQUEUE on
+// Linux, winws behind its own WinDivert filter on Windows — and the choice
+// between them is made in exactly one place (Core.newZapretExec).
+type desyncPlatformEngine interface {
+	desyncEngine
+	Alive() bool
+}
+
 type zapretExec struct {
 	clash     *dataplane.ClashClient
 	engine    desyncEngine
