@@ -63,8 +63,13 @@ type zapretExec struct {
 	// cancellation entirely — it has to die when the data plane does.
 	life   func() context.Context
 	canary func(ctx context.Context, service string) bool
-	record func(service, recipe string, ok bool)
-	log    *slog.Logger
+	// notCarrying is the canary's standing verdict per service, read by the probing
+	// engine through StallReason. Guarded separately from the executor's own lock:
+	// the probe engine asks on its goroutine while a judge writes on another.
+	carryMu     sync.Mutex
+	notCarrying map[string]bool
+	record      func(service, recipe string, ok bool)
+	log         *slog.Logger
 
 	// mu serialises the whole-config recomposition. Enable (a service entering the
 	// rung) and Reconcile (the periodic sweep that stops the engine when the rung

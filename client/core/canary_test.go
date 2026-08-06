@@ -3,6 +3,7 @@ package core
 import (
 	"context"
 	"log/slog"
+	"strings"
 	"testing"
 
 	"github.com/strace-me/lotsman/pkg/registry"
@@ -113,5 +114,48 @@ func TestCanaryRespectsCancellation(t *testing.T) {
 
 	if rec.calls != 0 {
 		t.Error("a cancelled shutdown must not record a verdict measured against a torn-down data plane")
+	}
+}
+
+// The canary's verdict must reach the BRAIN, not only the picker. Demotion
+// reorders candidates; it cannot move a service off a rung, and the brain listens
+// to a probe that is blind to the failure the canary measures.
+func TestStallReasonOnlyWhileOnTheDesyncRung(t *testing.T) {
+	onRung := true
+	z := &zapretExec{
+		log: slog.New(slog.DiscardHandler),
+		active: func() []registry.Service {
+			if onRung {
+				return []registry.Service{{Name: "youtube"}}
+			}
+			return nil
+		},
+	}
+
+	if _, stalled := z.StallReason("youtube"); stalled {
+		t.Error("no verdict yet must not stall the probe")
+	}
+
+	z.noteCarrying("youtube", false)
+	reason, stalled := z.StallReason("youtube")
+	if !stalled {
+		t.Fatal("a canary that measured no goodput must fail the probe so the brain escalates")
+	}
+	if !strings.Contains(reason, "goodput") {
+		t.Errorf("the reason must say what was observed, got %q", reason)
+	}
+
+	// Once the brain HAS escalated, the service rides a tunnel this canary never
+	// measured. Continuing to fail its probe would walk it off a path there is no
+	// evidence against — the same unmeasured-verdict family, self-inflicted.
+	onRung = false
+	if _, stalled := z.StallReason("youtube"); stalled {
+		t.Error("the verdict must not follow the service off the desync rung")
+	}
+
+	onRung = true
+	z.noteCarrying("youtube", true)
+	if _, stalled := z.StallReason("youtube"); stalled {
+		t.Error("a recipe that carries again must clear the verdict")
 	}
 }

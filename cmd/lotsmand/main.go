@@ -853,15 +853,15 @@ func main() {
 		// stalled, its active probe is failed so Brain escalates to a foreign egress
 		// (the only thing that escapes an IP-keyed throttle). Always-on (the eye runs
 		// regardless of -remediate); escalation itself is the standard chain walk.
-		eng.SetStallOracle(func(service string) bool {
+		eng.SetStallOracle(func(service string) (string, bool) {
 			eyeMu.Lock()
 			defer eyeMu.Unlock()
 			for _, v := range verdicts {
 				if v.Service == service && v.Kind == misroute.KindStalled {
-					return true
+					return "throttle-stall: flows frozen mid-stream (TSPU IP-throttle); escalate to a foreign egress (LOT-43)", true
 				}
 			}
-			return false
+			return "", false
 		})
 		// Remediation planner (LOT-18a): on each misroute verdict propose a
 		// remediation rung. PROPOSE-ONLY — it logs and publishes a metric; it does

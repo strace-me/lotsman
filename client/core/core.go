@@ -527,6 +527,15 @@ func (c *Core) buildLoop() error {
 	}
 	c.prober = rp
 	eng := probing.New(c.bus, rp, c.brain, c.reg, c.kb, c.metrics, faillog.Nop{}, c.opts.Interval, c.log)
+	// Let the desync canary fail an otherwise-healthy probe. The active probe pulls
+	// a couple of hundred bytes, so a recipe that establishes and then carries
+	// nothing reads as perfect health; the canary measures goodput and sees the
+	// truth. Without this the two disagree forever and the brain believes the probe:
+	// measured on the ThinkPad as youtube pinned to a 0 KB/s recipe through ninety
+	// consecutive canary failures, escalating never.
+	if c.zapExec != nil {
+		eng.SetStallOracle(c.zapExec.StallReason)
+	}
 	c.eng = eng
 
 	runners := []func(context.Context){c.brain.Run, ap.Run, eng.Run, c.superviseBox}
