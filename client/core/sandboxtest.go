@@ -44,21 +44,28 @@ const sandboxCandidates = 3
 // household's traffic never meets it. The probe socket also binds to the physical
 // interface, because under our own tun an unbound socket is pulled into the
 // tunnel and would measure the VPN while wearing the candidate's name.
-func (c *Core) testRecipe(ctx context.Context, svc registry.Service, recipeID string) (bool, string) {
+// measured separates "the lane ran and this is the answer" from every way of
+// failing to ask — no sandbox, wrong platform, nothing to fetch, a candidate that
+// would not compose. The distinction is load-bearing twice over: an unmeasured
+// verdict must not reach the knowledge base (principle 2), and the gate in front
+// of a FIRST application must fail OPEN on it. A sandbox that is merely broken
+// would otherwise silently pin every rule to the tunnel forever, which is a much
+// worse failure than the one the gate prevents.
+func (c *Core) testRecipe(ctx context.Context, svc registry.Service, recipeID string) (ok, measured bool, why string) {
 	sb, err := c.sandbox()
 	if err != nil {
-		return false, "no sandbox: " + err.Error()
+		return false, false, "no sandbox: " + err.Error()
 	}
 	client := dataplane.SandboxClient(zapret.TuneMark, c.wanIface, sandboxProbeTimeout)
 	if client == nil {
-		return false, "this platform cannot bind a probe to the interface, so a candidate cannot be measured without imposing it"
+		return false, false, "this platform cannot bind a probe to the interface, so a candidate cannot be measured without imposing it"
 	}
 	target := svc.VolumeTarget
 	if target == "" {
 		target = svc.ProbeTarget
 	}
 	if !strings.HasPrefix(target, "http") {
-		return false, "rule has no http target to measure a candidate against"
+		return false, false, "rule has no http target to measure a candidate against"
 	}
 
 	// Compose the candidate for THIS rule alone, pinned to the recipe under test.
@@ -67,16 +74,16 @@ func (c *Core) testRecipe(ctx context.Context, svc registry.Service, recipeID st
 	plan := zaptune.ComposePinned([]registry.Service{svc}, c.zapExec.recipes, c.zapExec.pick,
 		c.zapExec.resolve, c.opts.HostlistDir, zaptune.Pins{svc.Name: recipeID})
 	if !plan.Covered || len(plan.Args) == 0 {
-		return false, "candidate did not compose for this rule"
+		return false, false, "candidate did not compose for this rule"
 	}
 	if got := plan.Chosen[svc.Name]; got != recipeID {
 		// The pin was not honoured, so the composed argv is some OTHER recipe and a
 		// verdict from it would be filed under this one. Principle 2, and the exact
 		// failure a pinned strategy_id used to produce silently.
-		return false, fmt.Sprintf("pin not honoured: composed %q, wanted %q", got, recipeID)
+		return false, false, fmt.Sprintf("pin not honoured: composed %q, wanted %q", got, recipeID)
 	}
 	if _, err := writeHostlists(plan.Hostlists); err != nil {
-		return false, "hostlist: " + err.Error()
+		return false, false, "hostlist: " + err.Error()
 	}
 
 	c.sbMu.Lock()
@@ -87,7 +94,10 @@ func (c *Core) testRecipe(ctx context.Context, svc registry.Service, recipeID st
 		}
 	}()
 	if err := sb.Apply(ctx, absolutizePayloads(plan.Args, c.opts.ZapretFiles)); err != nil {
-		return false, "candidate did not start: " + err.Error()
+		// nfqws validates its inputs after dropping privileges, so a refusal here is
+		// a real verdict ABOUT THIS RECIPE — it cannot run on this host — even though
+		// it says nothing about the network. Measured, and worth remembering.
+		return false, true, "candidate did not start: " + err.Error()
 	}
 
 	// Pull real volume, not a status line: the failure this whole seam exists for
@@ -97,18 +107,18 @@ func (c *Core) testRecipe(ctx context.Context, svc registry.Service, recipeID st
 	q := burstprobe.Probe(ctx, client, []string{target}, want, 1)
 	switch {
 	case q.Samples == 0:
-		return false, "the candidate measurement did not happen"
+		return false, false, "the candidate measurement did not happen"
 	case q.Short:
 		// The endpoint ran out before we had pulled enough. That describes the URL,
 		// not the path, so it cannot condemn the candidate — but it cannot crown it
 		// either, and crowning it would move live traffic onto an unmeasured recipe.
-		return false, "target too small to judge a candidate — set a volume_target for this rule"
+		return false, false, "target too small to judge a candidate — set a volume_target for this rule"
 	case q.Bytes == 0 && q.Loss >= 1:
-		return false, "candidate carried nothing at all"
+		return false, true, "candidate carried nothing at all"
 	case q.GoodputKBps < c.opts.CanaryGoodputKBps:
-		return false, fmt.Sprintf("candidate carries only %.0f KiB/s (floor %.0f)", q.GoodputKBps, c.opts.CanaryGoodputKBps)
+		return false, true, fmt.Sprintf("candidate carries only %.0f KiB/s (floor %.0f)", q.GoodputKBps, c.opts.CanaryGoodputKBps)
 	}
-	return true, fmt.Sprintf("%.0f KiB/s over %d KiB", q.GoodputKBps, q.Bytes>>10)
+	return true, true, fmt.Sprintf("%.0f KiB/s over %d KiB", q.GoodputKBps, q.Bytes>>10)
 }
 
 // sandbox builds the isolated test lane on first use and reuses it after. It
@@ -181,56 +191,117 @@ func (c *Core) rotateRecipe(ctx context.Context, service, failed string) {
 	if !ok || c.zapExec == nil {
 		return
 	}
+	if !c.claimRotation(service) {
+		return
+	}
+	cand, verified := c.provenCandidate(ctx, svc, failed, false)
+	if cand == "" {
+		c.log.Info("no candidate passed the sandbox; leaving the rule to its chain",
+			"service", service, "failed", failed)
+		return
+	}
+	c.applyCandidate(ctx, service, cand, verified, failed)
+}
+
+// gateEnable is the same gate in front of a FIRST application: the rule is
+// arriving on the desync rung, so prove a recipe in the lane before its traffic
+// is routed there at all.
+//
+// Asynchronous on purpose. Enable sits on the applier's path and a measurement
+// takes seconds; blocking there would stall every other rule's convergence. So
+// the rule keeps whatever routing it already had — usually the tunnel, which
+// works — until something is proven, instead of being dropped onto an unproven
+// recipe and taken off it again three probes later.
+//
+// It fails OPEN. If the lane could not measure at all — no sandbox, wrong
+// platform, nothing to fetch — the top candidate is applied unverified, exactly
+// as before this existed. A gate that failed closed on its own breakage would
+// pin every rule to the tunnel and call it caution.
+func (c *Core) gateEnable(ctx context.Context, service string) {
+	svc, ok := c.reg.Services[service]
+	if !ok || c.zapExec == nil {
+		return
+	}
+	cand, verified := c.provenCandidate(ctx, svc, "", true)
+	if cand == "" {
+		c.log.Info("no recipe could be proven for this rule; not routing its traffic to the desync rung",
+			"service", service)
+		return
+	}
+	c.applyCandidate(ctx, service, cand, verified, "")
+}
+
+// claimRotation enforces the per-rule cooldown. Each test costs an engine start
+// and an nft table, so a rule that keeps failing must not spend the machine on
+// asking the same question.
+func (c *Core) claimRotation(service string) bool {
 	c.rotMu.Lock()
+	defer c.rotMu.Unlock()
 	if c.rotAt == nil {
 		c.rotAt = map[string]time.Time{}
 	}
 	if last, seen := c.rotAt[service]; seen && time.Since(last) < sandboxCooldown {
-		c.rotMu.Unlock()
-		return
+		return false
 	}
 	c.rotAt[service] = time.Now()
-	c.rotMu.Unlock()
+	return true
+}
 
+// provenCandidate returns the first candidate that PASSED in the sandbox, and
+// whether that answer came from an actual measurement. With failOpen, a lane that
+// could not measure at all yields the top candidate marked unverified rather than
+// nothing at all.
+func (c *Core) provenCandidate(ctx context.Context, svc registry.Service, exclude string, failOpen bool) (string, bool) {
 	test := c.testCandidate
 	if test == nil {
 		test = c.testRecipe
 	}
-	for _, cand := range c.rankedCandidates(service, failed, sandboxCandidates) {
-		if !c.zapExec.stillOnRung(service) {
-			return // it escalated while we were measuring; the rung is not ours to steer
+	cands := c.rankedCandidates(svc.Name, exclude, sandboxCandidates)
+	for _, cand := range cands {
+		if !c.zapExec.stillOnRung(svc.Name) {
+			return "", false // the brain moved it; the rung is not ours to steer
 		}
-		ok, why := test(ctx, svc, cand)
-		// A sandbox verdict is a real measurement of that recipe on this network, so
-		// it belongs in the knowledge base whichever way it went.
-		c.kb.RecordOutcome(service, cand, ok, 0)
-		// And again AFTER, because a measurement takes seconds and the brain moves on
-		// its own tick: the rung was ours when we asked and may not be when we answer.
-		// Applying then would change a rung the rule has left, for a reason nobody
-		// asked for. Exactly the in-flight race the rung prober had.
-		if !c.zapExec.stillOnRung(service) {
+		ok, measured, why := test(ctx, svc, cand)
+		// Only a real measurement teaches the knowledge base. Recording "could not
+		// ask" as a failure would demote a recipe for the sandbox's own breakage —
+		// a verdict about something the measurement did not touch.
+		if measured {
+			c.kb.RecordOutcome(svc.Name, cand, ok, 0)
+		}
+		// Re-checked AFTER too: a measurement takes seconds and the brain moves on
+		// its own tick, so the rung was ours when we asked and may not be when we
+		// answer. Exactly the in-flight race the rung prober had.
+		if !c.zapExec.stillOnRung(svc.Name) {
 			c.log.Info("rule left the desync rung mid-measurement, not applying the candidate",
-				"service", service, "candidate", cand)
-			return
+				"service", svc.Name, "candidate", cand)
+			return "", false
 		}
-		if !ok {
-			c.log.Info("candidate rejected in the sandbox, real traffic untouched",
-				"service", service, "candidate", cand, "why", why)
-			continue
+		if ok {
+			c.log.Info("candidate PASSED in the sandbox", "service", svc.Name, "candidate", cand, "evidence", why)
+			return cand, true
 		}
-		c.log.Info("candidate PASSED in the sandbox, moving the rule onto it",
-			"service", service, "candidate", cand, "evidence", why, "replacing", failed)
-		apply := c.applyForTest
-		if apply == nil {
-			apply = c.zapExec.Enable
+		if !measured && failOpen {
+			c.log.Warn("the test lane could not measure a candidate; applying it unverified rather than leaving the rule unrouted",
+				"service", svc.Name, "candidate", cand, "why", why)
+			return cand, false
 		}
-		if err := apply(ctx, service, cand); err != nil {
-			c.log.Warn("candidate passed but could not be applied", "service", service, "candidate", cand, "err", err)
-		}
-		return
+		c.log.Info("candidate rejected in the sandbox, real traffic untouched",
+			"service", svc.Name, "candidate", cand, "why", why)
 	}
-	c.log.Info("no candidate passed the sandbox; leaving the rule to its chain",
-		"service", service, "failed", failed)
+	return "", false
+}
+
+// applyCandidate is the only place a recipe becomes the thing in service.
+func (c *Core) applyCandidate(ctx context.Context, service, cand string, verified bool, replacing string) {
+	c.log.Info("moving the rule onto a recipe",
+		"service", service, "recipe", cand, "verified", verified, "replacing", replacing)
+	apply := c.applyForTest
+	if apply == nil {
+		apply = c.zapExec.applyNow
+	}
+	if err := apply(ctx, service, cand); err != nil {
+		c.log.Warn("recipe could not be applied", "service", service, "recipe", cand, "err", err)
+	}
 }
 
 // rankedCandidates lists recipes to try, best-scored first, excluding the one
@@ -245,8 +316,25 @@ func (c *Core) rankedCandidates(service, exclude string, n int) []string {
 		out = append(out, r.ID)
 	}
 	sortByScore(out, func(id string) float64 { return c.recipeScore(service, id) })
+	// The operator's own pin goes FIRST, ahead of anything the knowledge base
+	// prefers. A pin is an instruction, and testing it third would mean an operator
+	// who pinned a strategy watched something else get applied — which is the exact
+	// silent-substitution the pin mechanism was built to end.
+	if pin := c.zapExec.pinFor(service); pin != "" && pin != exclude {
+		out = append([]string{pin}, without(out, pin)...)
+	}
 	if len(out) > n {
 		out = out[:n]
+	}
+	return out
+}
+
+func without(ids []string, drop string) []string {
+	out := ids[:0]
+	for _, id := range ids {
+		if id != drop {
+			out = append(out, id)
+		}
 	}
 	return out
 }

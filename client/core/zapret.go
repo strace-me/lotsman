@@ -87,7 +87,11 @@ type zapretExec struct {
 	// this platform), which is a real state and not a silent one — Core says so at
 	// startup.
 	rotate func(ctx context.Context, service, failed string)
-	log    *slog.Logger
+	// gate proves a recipe in the isolated lane BEFORE this rule's traffic is
+	// routed to the desync rung. nil applies immediately, which is the pre-v7.1
+	// behaviour and the fallback where no sandbox exists.
+	gate func(ctx context.Context, service string)
+	log  *slog.Logger
 
 	// mu serialises the whole-config recomposition. Enable (a service entering the
 	// rung) and Reconcile (the periodic sweep that stops the engine when the rung
@@ -141,10 +145,18 @@ func (z *zapretExec) setChosen(chosen map[string]string) {
 	z.chosenMu.Unlock()
 }
 
-// Enable routes the service direct and re-applies the composed desync strategy.
+// Enable is the rule ARRIVING on the desync rung. It records the operator's pin
+// and hands off to the gate, which proves a recipe in the isolated lane before
+// any of this rule's traffic is routed here.
+//
+// It does NOT apply anything itself any more. Applying first and judging after is
+// how a wrong recipe used to reach the user: the rule was dropped onto it, the
+// site broke, three probes later it escalated away. The rule now keeps whatever
+// routing it already had — usually the tunnel, which works — until something is
+// proven. The gate fails open, so a lane that cannot measure applies the top
+// candidate exactly as before rather than leaving the rule unrouted.
 func (z *zapretExec) Enable(ctx context.Context, service, strategyID string) error {
 	z.mu.Lock()
-	defer z.mu.Unlock()
 	// The brain's resolved strategy for this rung. It used to be discarded — the
 	// parameter was literally named `_` — so a `strategy_id` on a zapret chain step
 	// pinned nothing at all: the composer ranked candidates by the knowledge base
@@ -159,6 +171,36 @@ func (z *zapretExec) Enable(ctx context.Context, service, strategyID string) err
 	} else {
 		delete(z.pinned, service)
 	}
+	z.mu.Unlock()
+
+	if z.gate == nil {
+		return z.applyNow(ctx, service, strategyID)
+	}
+	gctx := ctx
+	if z.life != nil {
+		gctx = z.life()
+	}
+	go z.gate(gctx, service)
+	return nil
+}
+
+// applyNow routes the service DIRECT and applies recipe — the only place a
+// strategy becomes the thing in service. Called by the gate for a candidate it
+// has proven, and directly when there is no gate.
+//
+// recipe wins over whatever the chain step pinned: a recipe that passed in the
+// lane is evidence, and a config pin is a preference. `2ebb7a0` already refuses a
+// pin that cannot do what its name says, so the two disagree only when the
+// measurement found something better.
+func (z *zapretExec) applyNow(ctx context.Context, service, recipe string) error {
+	z.mu.Lock()
+	defer z.mu.Unlock()
+	if recipe != "" {
+		if z.pinned == nil {
+			z.pinned = map[string]string{}
+		}
+		z.pinned[service] = recipe
+	}
 	// Route direct FIRST: the service may be sitting on a VPN pool from a previous
 	// chain step, and desyncing traffic that never leaves through the local stack
 	// does nothing. SetSelector is idempotent, so re-entering the rung is cheap.
@@ -172,14 +214,21 @@ func (z *zapretExec) Enable(ctx context.Context, service, strategyID string) err
 	if plan == nil {
 		return nil // nothing composed (rung empty or uncovered) — no verdict to take
 	}
-	// Judge asynchronously: Enable is on the applier's path and must not block it
-	// for the settle window.
+	// Judge asynchronously: this is on the applier's path and must not block it for
+	// the settle window.
 	jctx := ctx
 	if z.life != nil {
 		jctx = z.life()
 	}
 	go z.judge(jctx, service, plan.Chosen)
 	return nil
+}
+
+// pinFor reports the strategy currently pinned for a service, if any.
+func (z *zapretExec) pinFor(service string) string {
+	z.mu.Lock()
+	defer z.mu.Unlock()
+	return z.pinned[service]
 }
 
 // Reconcile recomposes the desync to match the CURRENT rung membership, stopping

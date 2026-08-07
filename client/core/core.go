@@ -197,7 +197,7 @@ type Core struct {
 	// testCandidate is the sandbox measurement, injectable so the rotation policy
 	// — which recipe is tried, in what order, and that production only ever moves
 	// onto one that PASSED — is testable without a kernel. nil uses testRecipe.
-	testCandidate func(ctx context.Context, svc registry.Service, recipeID string) (bool, string)
+	testCandidate func(ctx context.Context, svc registry.Service, recipeID string) (ok, measured bool, why string)
 	// applyForTest stands in for zapretExec.Enable so the rotation policy can be
 	// exercised without nft and a live engine. nil uses Enable.
 	applyForTest func(ctx context.Context, service, recipe string) error
@@ -1706,6 +1706,7 @@ func (c *Core) newZapretExec(ctx context.Context) *zapretExec {
 		canary:    c.canaryProbe,
 		record:    func(service, recipe string, ok bool) { c.kb.RecordOutcome(service, recipe, ok, 0) },
 		rotate:    c.rotateRecipe,
+		gate:      c.gateEnable,
 		active:    c.zapretServices,
 		resolve:   rulesets.NewResolver(c.opts.SingboxBin, c.opts.RuleSetDir, c.log).Resolve,
 		log:       c.log,
