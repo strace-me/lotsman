@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"path/filepath"
 	"sort"
 	"strings"
 )
@@ -68,6 +69,17 @@ func Rebuild(ctx context.Context, m *Manager, spec RebuildSpec, dryRun bool, log
 	}
 
 	body := []byte(strings.Join(res.Domains, "\n") + "\n")
+	// The operator picks the path; nothing guarantees its parent exists. WriteIfChanged
+	// writes a temp file NEXT TO the target first (so the swap is atomic), so a missing
+	// directory fails at the temp file with "no such file or directory" — an error about
+	// a path the operator never typed. Measured the day packs arrived: the lists fetched
+	// and merged correctly and the write failed every cycle, on `out:` pointing one
+	// directory deeper than the default.
+	if dir := filepath.Dir(spec.Out); dir != "" && dir != "." {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			return false, fmt.Errorf("hostlist %q: out dir %s: %w", spec.Name, dir, err)
+		}
+	}
 	changed, err = WriteIfChanged(spec.Out, body, 0o644)
 	if err != nil {
 		return false, fmt.Errorf("hostlist %q: write: %w", spec.Name, err)

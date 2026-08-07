@@ -233,10 +233,20 @@ func compose(services []registry.Service, recipes []strategycat.Recipe, pick Pic
 			plan.Uncovered = append(plan.Uncovered, svc.Name)
 			continue
 		}
-		b := BlockFor(svc, r, domains, dedup(svc.ExcludeDomains))
+		excl := dedup(svc.ExcludeDomains)
+		b := BlockFor(svc, r, domains, excl)
 		if hostlistDir != "" {
 			b.HostlistPath = filepath.Join(hostlistDir, svc.Name+".txt")
 			plan.Hostlists[b.HostlistPath] = domains
+			// Exclusions get a file for the same reasons the positive list does, and
+			// one more that only showed up with an upstream pack attached: 112 domains
+			// inlined into argv, repeated for every profile of the block, is about a
+			// kilobyte per profile in the process table and in every argv the engine
+			// records on exit.
+			if len(excl) > 0 {
+				b.ExcludePath = filepath.Join(hostlistDir, svc.Name+"-exclude.txt")
+				plan.Hostlists[b.ExcludePath] = excl
+			}
 		}
 		blocks = append(blocks, b)
 		plan.Chosen[svc.Name] = r.ID

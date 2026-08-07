@@ -42,6 +42,15 @@ type Block struct {
 	// matches the block's hostlist. Use for CDNs/endpoints that work raw but break
 	// under the desync (e.g. Epic download/EasyAntiCheat — LOT-36).
 	Exclude []string
+	// ExcludePath, when set, makes the exclusions reference a FILE instead of being
+	// inlined. Same two reasons as HostlistPath, and the second one arrived as a
+	// measurement: attaching an upstream exclude list put 112 domains into argv for
+	// EVERY profile of the block — about a kilobyte each, repeated, in the process
+	// table and in every line of the engine's argv history. And inlined domains are
+	// part of argv, so changing the list restarts the engine and drops the desync on
+	// every live connection; a file is re-read on mtime.
+	// The caller owns writing the file (Compose stays pure).
+	ExcludePath string
 }
 
 // Compose assembles the ordered nfqws argument list: each block becomes a
@@ -95,7 +104,9 @@ func Compose(blocks []Block) []string {
 			// The exclusion belongs to every profile of the block, not just the first:
 			// nfqws checks it per profile, so attaching it once would leave the other
 			// profiles free to desync exactly the endpoints the operator excluded.
-			if len(excl) > 0 {
+			if b.ExcludePath != "" {
+				out = append(out, "--hostlist-exclude="+b.ExcludePath)
+			} else if len(excl) > 0 {
 				out = append(out, "--hostlist-exclude-domains="+strings.Join(excl, ","))
 			}
 		}
