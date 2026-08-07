@@ -36,6 +36,9 @@
   }
 
   $: poolNames = Object.keys(doc.Pools || {}).sort()
+  // Offer what this config already uses: the full geosite/geoip catalogue is
+  // thousands of names and lives upstream, so a complete list here would rot.
+  $: knownSets = [...new Set((doc.Services || []).flatMap((s) => s.RuleSets || []))].sort()
 
   function addStep() {
     ;(rule.Chain ||= []).push({ State: 'VPN', Class: 'vpn', StrategyID: '' })
@@ -63,6 +66,12 @@
 
 <label class="full">Проба (URL)<input bind:value={rule.ProbeTarget} on:input={touch} placeholder="https://…/generate_204" /></label>
 <label class="full">Домены<input value={csv(rule.Domains)} on:input={(e) => setCSV('Domains', e.target.value)} placeholder="youtube.com, googlevideo.com" /></label>
+<!-- Rule-sets were not editable here at all, and `scope` did not count them, so a
+     rule defined entirely by them looked EMPTY — which is how the owner came to
+     ask what web-blocked was and where it had come from. Those two (ru-direct and
+     web-blocked) are exactly the rules that match the most traffic. -->
+<label class="full" title="Готовые наборы адресов, которые sing-box скачивает сам (geosite-*/geoip-*). Их содержимое здесь не показать — оно приходит с обновлением. Правило может состоять из одних наборов: так устроены ru-direct и web-blocked."
+  >Наборы правил<input value={csv(rule.RuleSets)} on:input={(e) => setCSV('RuleSets', e.target.value)} list="rf-sets" placeholder="geosite-ru-blocked, geoip-telegram" /></label>
 
 {#if lists.length}
   <div class="svc-lists">
@@ -123,6 +132,7 @@
 <datalist id="rf-classes">{#each CLASSES as x}<option value={x}></option>{/each}</datalist>
 <datalist id="rf-profiles">{#each PROFILES as x}<option value={x}></option>{/each}</datalist>
 <datalist id="rf-pools">{#each poolNames as x}<option value={x}></option>{/each}</datalist>
+<datalist id="rf-sets">{#each knownSets as x}<option value={x}></option>{/each}</datalist>
 
 <style>
   /* These lived in the old ServicesEdit and went with it. Without them the

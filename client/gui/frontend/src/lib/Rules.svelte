@@ -50,10 +50,15 @@
   const ladder = (s) =>
     (s.Chain || []).map((st) => st.Class || st.State || '?').join(' → ') || 'по категории'
 
+  // Rule-sets count too. Without them the two rules that are defined ENTIRELY by
+  // rule-sets — ru-direct and the web-blocked catch-all — read as «ничего не
+  // выбрано», i.e. as broken, when they are the two that match the most traffic.
   const scope = (s) => {
     const n = (s.Domains || []).length + (s.DomainLists || []).length
     const ips = (s.IPs || []).length
+    const sets = (s.RuleSets || []).length
     const bits = []
+    if (sets) bits.push(`${sets} ${sets === 1 ? 'набор' : 'наборов'}`)
     if (n) bits.push(`${n} доменов`)
     if (ips) bits.push(`${ips} подсетей`)
     return bits.join(' · ') || 'ничего не выбрано'
