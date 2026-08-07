@@ -1,5 +1,5 @@
 <script>
-  import { tileKind, tileGlyph, tileWhere, tileRequested, fmtBytes, fmtTime } from './format.js'
+  import { tileKind, tileGlyph, tileWhere, tileRequested, fmtBytes, fmtTime, fmtAgo } from './format.js'
 
   export let report
   export let events = []
@@ -8,18 +8,46 @@
 
   // These are RULES — a list of addresses and what to do with them. The three
   // SERVICES are lotsman, sing-box and nfqws, and they live in the header.
+  //
+  // ONE list, in the order the daemon returns, which is the order the rules are
+  // MATCHED in. It used to be three sections — «Требуют внимания» / «Подбирает» /
+  // «Работают» — and a rule changed section the moment its state changed, so the
+  // row you were reading moved out from under the cursor and everything below it
+  // shifted. The state belongs ON the row, not in which box the row lives in.
+  //
+  // «Цепочка исчерпана» still means LOTSMAN HAS RUN OUT OF MOVES and the operator
+  // has to act; a rule merely failing a probe is Lotsman WORKING, which is why it
+  // is amber and carries no verb. Measured the day it mattered: Discord carried
+  // 3.5 MB of voice while its probe timed out, and the panel called it a problem.
   $: rules = report.services || []
-  // "Требуют внимания" means LOTSMAN HAS RUN OUT OF MOVES — the chain is
-  // exhausted and nothing it can do will help, so the operator has to. A service
-  // merely failing a probe is Lotsman WORKING: it is escalating, and calling that
-  // an alarm is the crying-wolf this project deliberately has no alerting layer to
-  // avoid. Measured the day it mattered: Discord carried 3.5 MB of voice while its
-  // probe timed out, and the panel called it a problem.
-  $: problems = rules.filter((s) => s.broken)
-  $: searching = rules.filter((s) => !s.broken && s.fails > 0)
-  $: working = rules.filter((s) => !s.broken && s.fails === 0)
   $: disabled = report.disabled || []
   $: notices = report.notices || []
+
+  // Recomputed on every poll (report is a fresh object each time), so the "checked
+  // N ago" column ticks without a timer of its own.
+  $: now = report ? Date.now() : 0
+
+  // A recheck is pending until a probe has COMPLETED since the click. We keep the
+  // timestamp seen at click time and wait for it to advance — the feedback then
+  // comes from the probe running, not from the button having been pressed. The
+  // deadline is the honest bound: the daemon may have dropped the request because
+  // one was already queued, and an indicator that spun forever would be a lie.
+  let pending = {}
+  function recheck(s) {
+    pending[s.service] = { at: s.lastProbeMs || 0, until: Date.now() + 15000 }
+    pending = pending
+    onRecheck(s.service)
+  }
+  // Derived, not computed in the template: a helper that mutated `pending` while
+  // rendering would be writing state from inside the render it feeds.
+  $: waiting = new Set(
+    rules
+      .filter((s) => {
+        const p = pending[s.service]
+        return p && (s.lastProbeMs || 0) <= p.at && now <= p.until
+      })
+      .map((s) => s.service)
+  )
 </script>
 
 <!-- Above everything, because the point of a notice is that the numbers below it
@@ -70,86 +98,44 @@
   </div>
 </div>
 
-{#if problems.length}
-  <section>
-    <h2>Требуют внимания</h2>
-    <div class="tiles">
-      {#each problems as s (s.service)}
-        <div class="tile {tileKind(s)}">
-          <div class="tile-head">
-            <span class="glyph {tileKind(s)}">{tileGlyph(s)}</span>
-            <span class="name">{s.service}</span>
-          </div>
-          <div class="where">
-            {tileWhere(s)} · цепочка исчерпана
-            {#if tileRequested(s)}<div class="mismatch">{tileRequested(s)}</div>{/if}
-          </div>
-          <div class="tile-actions">
-            <button class="fix" on:click={() => onRecheck(s.service)}>перепроверить</button>
-            <button class="ghost" on:click={() => onToggle(s.service, false)}>выключить</button>
-          </div>
-        </div>
-      {/each}
-    </div>
-  </section>
-{/if}
-
-{#if searching.length}
-  <section>
-    <h2>Подбирает · {searching.length}</h2>
-    <!-- Amber, not red, and no verb telling the operator to act: this is the tool
-         doing its job. It is shown at all only because a service stuck here for a
-         long time is worth noticing. -->
-    <div class="rows">
-      {#each searching as s (s.service)}
-        <div class="row">
-          <span class="glyph amber">↻</span>
-          <span class="name">{s.service}</span>
-          <span class="where">
-            {tileWhere(s)}{#if tileRequested(s)} <span class="mismatch">({tileRequested(s)})</span>{/if}
-            <span class="dim"> · проба не прошла {s.fails}×</span>
-          </span>
-          <button class="ghost" on:click={() => onRecheck(s.service)}>перепроверить</button>
-          <button class="ghost" on:click={() => onToggle(s.service, false)}>выключить</button>
-        </div>
-      {/each}
-    </div>
-  </section>
-{/if}
-
-<section>
-  <h2>Работают · {working.length}</h2>
+<section class="rules-section">
+  <div class="row-head">
+    <h2>Правила · {rules.length}</h2>
+    <span class="muted order-note">в порядке совпадения, как в файрволе</span>
+  </div>
   <div class="rows">
-    {#each working as s (s.service)}
-      <div class="row">
-        <span class="glyph {tileKind(s)}">{tileGlyph(s)}</span>
+    {#each rules as s (s.service)}
+      <div class="row" class:attention={s.broken}>
+        <!-- Fixed-width so a glyph change cannot shift the name beside it. -->
+        <span class="glyph {tileKind(s)}" class:spin={!s.broken && s.fails > 0}>{tileGlyph(s)}</span>
         <span class="name">{s.service}</span>
-        <span class="where">{tileWhere(s)}{#if tileRequested(s)} <span class="mismatch">({tileRequested(s)})</span>{/if}</span>
-        <button class="ghost" on:click={() => onRecheck(s.service)}>перепроверить</button>
+        <span class="where" title={[tileWhere(s), tileRequested(s)].filter(Boolean).join(' · ')}>
+          {tileWhere(s)}{#if tileRequested(s)} <span class="mismatch">({tileRequested(s)})</span>{/if}
+          {#if s.broken}<span class="red"> · цепочка исчерпана</span>
+          {:else if s.fails > 0}<span class="dim"> · проба не прошла {s.fails}×</span>{/if}
+        </span>
+        <span class="checked" class:waiting={waiting.has(s.service)}>
+          {#if waiting.has(s.service)}проверяю…{:else}{fmtAgo(s.lastProbeMs, now)}{/if}
+        </span>
+        <button class="ghost" on:click={() => recheck(s)} disabled={waiting.has(s.service)}>перепроверить</button>
         <button class="ghost" on:click={() => onToggle(s.service, false)}>выключить</button>
+      </div>
+    {/each}
+
+    <!-- Kept in the same list, at the end: a rule that is off on purpose and a rule
+         that has gone missing look identical otherwise, and the operator needs to
+         tell them apart without opening the config. -->
+    {#each disabled as name (name)}
+      <div class="row off">
+        <span class="glyph dim">○</span>
+        <span class="name">{name}</span>
+        <span class="where">не проверяется и не маршрутизируется</span>
+        <span class="checked"></span>
+        <button class="ghost" on:click={() => onToggle(name, true)}>включить</button>
       </div>
     {/each}
   </div>
 </section>
-
-{#if disabled.length}
-  <section>
-    <h2>Выключены · {disabled.length}</h2>
-    <!-- Shown because a service that is absent on purpose and a service that has
-         gone missing look identical otherwise, and the operator needs to tell them
-         apart without opening the config. -->
-    <div class="rows">
-      {#each disabled as name (name)}
-        <div class="row off">
-          <span class="glyph dim">○</span>
-          <span class="name">{name}</span>
-          <span class="where">не проверяется и не маршрутизируется</span>
-          <button class="ghost" on:click={() => onToggle(name, true)}>включить</button>
-        </div>
-      {/each}
-    </div>
-  </section>
-{/if}
 
 <div class="two-col">
   <section>
@@ -185,3 +171,65 @@
     </div>
   </section>
 </div>
+
+<style>
+  .rules-section .row-head {
+    align-items: baseline;
+    gap: 12px;
+  }
+  .order-note {
+    font-size: 11px;
+  }
+  /* A rule whose chain is exhausted is the one case the operator must act on, so
+     it is marked in place rather than moved to a section of its own. */
+  .row.attention {
+    border-left: 2px solid var(--red);
+    padding-left: 8px;
+  }
+  /* The подбор glyph turns. Static, it read as a state rather than as work in
+     progress, and the whole point is that Lotsman is busy and no one need act. */
+  .glyph.spin {
+    display: inline-block;
+    animation: turn 1.4s linear infinite;
+  }
+  @keyframes turn {
+    to {
+      transform: rotate(360deg);
+    }
+  }
+  @media (prefers-reduced-motion: reduce) {
+    .glyph.spin {
+      animation: none;
+    }
+  }
+  /* The row is a fixed set of columns so nothing shifts when a state changes: the
+     glyph reserves its width, «где» absorbs the slack and truncates rather than
+     wrapping (a wrapped line changes the row HEIGHT, which moves every row below
+     it), and «проверено» has a column of its own instead of trailing the text. */
+  .glyph {
+    flex: none;
+    width: 1.2em;
+    text-align: center;
+  }
+  .rows .row .where {
+    flex: 1 1 auto;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .rows .row .ghost {
+    margin-left: 0;
+  }
+  .checked {
+    flex: none;
+    color: var(--ink-faint);
+    font-size: 11px;
+    font-variant-numeric: tabular-nums;
+    min-width: 8.5em;
+    text-align: right;
+  }
+  .checked.waiting {
+    color: var(--accent);
+  }
+</style>

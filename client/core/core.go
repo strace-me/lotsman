@@ -176,6 +176,11 @@ type Core struct {
 	pendingCount int           // consecutive polls that saw pendingNet
 
 	metrics    *metrics.Collector // populated in Start; nil until then
+	// probed is when each rule was last actually probed (unix ms), written by
+	// ObserveProbe — the engine's own callback — so the UI's "recheck" feedback
+	// comes from the probe having run, not from the request having been sent.
+	probedMu sync.Mutex
+	probed   map[string]int64
 	metricsSrv *http.Server       // non-nil only when MetricsAddr is served
 	// lastCarried is the previous observation pass's byte total per rule, so the
 	// activity oracle can ask whether traffic MOVED rather than whether a
@@ -540,7 +545,7 @@ func (c *Core) buildLoop() error {
 		rp.SetDirectProber(directMP)
 	}
 	c.prober = rp
-	eng := probing.New(c.bus, rp, c.brain, c.reg, c.kb, c.metrics, faillog.Nop{}, c.opts.Interval, c.log)
+	eng := probing.New(c.bus, rp, c.brain, c.reg, c.kb, c, faillog.Nop{}, c.opts.Interval, c.log)
 	// Let the desync canary fail an otherwise-healthy probe. The active probe pulls
 	// a couple of hundred bytes, so a recipe that establishes and then carries
 	// nothing reads as perfect health; the canary measures goodput and sees the
@@ -996,6 +1001,7 @@ type NodeStatus struct {
 	// so a UI showing only one of the two describes a machine that does not exist.
 	Requested    string  `json:"requested,omitempty"`
 	StalledRatio float64 `json:"stalledRatio,omitempty"` // passive-eye freeze ratio (0 when the eye saw nothing)
+	LastProbeMs  int64   `json:"lastProbeMs,omitempty"`  // unix ms of the last COMPLETED probe of this rule
 	LeakRatio    float64 `json:"leakRatio,omitempty"`    // passive-eye leak-to-direct ratio
 }
 
@@ -1052,9 +1058,65 @@ func (c *Core) statusLocked(ctx context.Context) []NodeStatus {
 			ns.StalledRatio = m.StalledRatio
 			ns.LeakRatio = m.LeakRatio
 		}
+		ns.LastProbeMs = c.lastProbeMs(s.Service)
 		out = append(out, ns)
 	}
-	return out
+	// The order rules are MATCHED in, which is the only order that explains their
+	// behaviour. The brain's snapshot is sorted by name because it is built from a
+	// map, and a UI that shows alphabetical order beside a first-match-wins engine
+	// invites exactly the wrong mental model — the owner asked which order this was
+	// and why, which is the question a wrong one produces.
+	byName := make(map[string]int, len(out))
+	svcs := make([]registry.Service, 0, len(out))
+	for i, ns := range out {
+		byName[ns.Service] = i
+		if svc, ok := c.reg.Services[ns.Service]; ok {
+			svcs = append(svcs, svc)
+		}
+	}
+	registry.SortRouteOrder(svcs)
+	ordered := make([]NodeStatus, 0, len(out))
+	for _, svc := range svcs {
+		if i, ok := byName[svc.Name]; ok {
+			ordered = append(ordered, out[i])
+			delete(byName, svc.Name)
+		}
+	}
+	// Anything the registry does not know about keeps its place at the end rather
+	// than vanishing: a status that silently drops a rule is worse than an odd order.
+	for _, ns := range out {
+		if _, missing := byName[ns.Service]; missing {
+			ordered = append(ordered, ns)
+		}
+	}
+	return ordered
+}
+
+// lastProbeMs is when this rule was last actually probed, in unix milliseconds.
+//
+// It exists so the "перепроверить" button can show that something happened. The
+// button posts a request onto a buffered channel that is DROPPED when one is
+// already queued, so "I clicked and nothing changed" is a real outcome and the UI
+// had no way to tell it from "it ran and the answer is the same". The timestamp is
+// written by the code that ran the probe, not by the code that asked for one.
+func (c *Core) lastProbeMs(service string) int64 {
+	c.probedMu.Lock()
+	defer c.probedMu.Unlock()
+	return c.probed[service]
+}
+
+// ObserveProbe records the probe and forwards to the metrics collector. It is the
+// ProbeObserver the engine calls after every probe it completes.
+func (c *Core) ObserveProbe(service string, ok bool, rttMs int) {
+	c.probedMu.Lock()
+	if c.probed == nil {
+		c.probed = map[string]int64{}
+	}
+	c.probed[service] = time.Now().UnixMilli()
+	c.probedMu.Unlock()
+	if c.metrics != nil {
+		c.metrics.ObserveProbe(service, ok, rttMs)
+	}
 }
 
 // Healthy reports whether the data plane is actually up: the sing-box process is
