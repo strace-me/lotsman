@@ -11,6 +11,20 @@
   // to a save that fails validation.
   const categories = ['streaming', 'messaging', 'gaming', 'generic']
 
+  // Rules are matched FIRST-MATCH-WINS, like a firewall, so the order they run in
+  // is load-bearing. But it is NOT the order of the file: the generator sorts by
+  // `priority` (lower first, negatives before everything) and only falls back to
+  // file order for ties. Showing file order would therefore be a claim about
+  // behaviour that does not hold — ru-direct sits at -10 precisely so it matches
+  // before the broad catch-alls, and a list that hid that would be lying quietly.
+  //
+  // So the editor shows the EFFECTIVE order, with the priority visible and
+  // editable, and says which is which.
+  $: ordered = (doc.Services || [])
+    .map((s, i) => ({ s, i }))
+    .sort((a, b) => (a.s.Priority || 0) - (b.s.Priority || 0) || a.i - b.i)
+  $: reordered = ordered.some((e, n) => e.i !== n)
+
   function add() {
     ;(doc.Services ||= []).push({ Name: '', Category: 'streaming', ProbeTarget: '', Domains: [] })
     touch()
@@ -43,17 +57,25 @@
 </script>
 
 <div class="row-head">
-  <h2>Сервисы</h2>
-  <button class="fix" on:click={add}>+ Сервис</button>
+  <h2>Правила</h2>
+  <button class="fix" on:click={add}>+ Правило</button>
+</div>
+<div class="muted rules-hint">
+  Порядок здесь — тот, в котором правила <b>реально</b> проверяются: побеждает первое
+  совпавшее, как в файрволе. Решает поле «приоритет» (меньше — раньше, отрицательные
+  впереди всех), и только при равных приоритетах — порядок в файле.
+  {#if reordered}<b> Он отличается от порядка в файле</b> — значит приоритеты уже расставлены.{/if}
 </div>
 
 {#if doc.Services && doc.Services.length}
   <div class="cfg-list">
-    {#each doc.Services as s, i (i)}
+    {#each ordered as { s, i } (i)}
       <div class="cfg-item col">
         <div class="cfg-fields">
           <label>Имя<input bind:value={s.Name} on:input={touch} placeholder="youtube" /></label>
           <label>Категория<input bind:value={s.Category} on:input={touch} list="cfg-cats" placeholder="streaming" /></label>
+          <label title="Меньше — проверяется раньше. Отрицательные впереди всех: так узкое правило (ru-direct) успевает совпасть до широкого catch-all."
+            >Приоритет<input type="number" bind:value={s.Priority} on:input={touch} placeholder="0" /></label>
           <button class="del" on:click={() => remove(i)} title="Удалить">✕</button>
         </div>
         <label class="full">Проба (URL)<input bind:value={s.ProbeTarget} on:input={touch} placeholder="https://…/generate_204" /></label>
@@ -80,6 +102,10 @@
 {/if}
 
 <style>
+  .rules-hint {
+    margin: 0.15rem 0 0.7rem;
+    line-height: 1.5;
+  }
   .svc-lists {
     display: flex;
     flex-wrap: wrap;

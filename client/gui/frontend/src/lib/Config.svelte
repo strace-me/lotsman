@@ -31,7 +31,7 @@
 
   const sections = [
     ['subs', 'Подписки'],
-    ['services', 'Сервисы'],
+    ['services', 'Правила'],
     ['hostlists', 'Списки'],
     ['dns', 'DNS'],
     ['engines', 'Движки'],
@@ -66,7 +66,7 @@
       if (mode === 'yaml') await backend.ValidateConfig(yaml)
       else await backend.ValidateConfigDoc(doc)
       messageKind = 'ok'
-      message = 'Конфиг валиден ✓'
+      message = 'Конфигурация валидна ✓'
     } catch (e) {
       messageKind = 'err'
       message = errStr(e)
@@ -105,7 +105,7 @@
 
 <section>
   <div class="row-head">
-    <h2>Конфиг</h2>
+    <h2>Конфигурация</h2>
     <span class="cfg-path">{path}</span>
   </div>
 

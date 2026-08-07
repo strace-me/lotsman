@@ -85,6 +85,25 @@ type Fleet struct {
 	Total   int            `json:"total"`
 	Servers int            `json:"servers"`
 	Pools   map[string]int `json:"pools"`
+	// Nodes is every exit the subscriptions yielded. The service has emitted it for
+	// a while; this DTO simply did not decode it, so the Nodes tab degraded to a
+	// single number against the real backend while looking complete against the
+	// mock — a fleet you are paying for and cannot see.
+	Nodes []FleetNode `json:"nodes"`
+}
+
+// FleetNode is one exit as configured. No liveness: the client keeps none per
+// node, and colouring a node green because it exists is the sort of unobserved
+// claim this project keeps finding. Warm is a property of the POOL — it is kept
+// continuously probed, so a failover lands on an already-hot node.
+type FleetNode struct {
+	Name     string   `json:"name"`
+	Server   string   `json:"server"`
+	Protocol string   `json:"protocol"`
+	Country  string   `json:"country"`
+	Source   string   `json:"source"`
+	Pools    []string `json:"pools"`
+	Warm     bool     `json:"warm"`
 }
 
 // Subscription is one subscription's quota/expiry.

@@ -65,10 +65,14 @@ code {
 }
 
 /* ---------- shell ---------- */
+/* The shell owns the viewport and does NOT scroll: the header and tabs must stay
+   put, and each panel below scrolls on its own. A single page-length scroll made
+   the tabs run away from the thing you were reading. */
 .app {
   display: flex;
   flex-direction: column;
-  min-height: 100vh;
+  height: 100vh;
+  overflow: hidden;
 }
 header {
   display: flex;
@@ -167,6 +171,24 @@ main {
   display: flex;
   flex-direction: column;
   gap: 20px;
+  flex: 1;
+  min-height: 0;
+  /* The fallback scroll, so nothing can ever be unreachable on a short window —
+     the per-panel scrolls below are what you normally use. */
+  overflow-y: auto;
+}
+
+/* Long lists scroll inside their own panel. Bounded in vh rather than px so a
+   small laptop screen and a big monitor both show a sensible slice. */
+.rows,
+.tiles {
+  max-height: 46vh;
+  overflow-y: auto;
+}
+.events,
+.subs {
+  max-height: 34vh;
+  overflow-y: auto;
 }
 
 /* ---------- shared content ---------- */

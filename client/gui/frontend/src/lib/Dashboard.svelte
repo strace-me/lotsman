@@ -6,16 +6,18 @@
   export let onRecheck = () => {}
   export let onToggle = () => {}
 
-  $: services = report.services || []
+  // These are RULES — a list of addresses and what to do with them. The three
+  // SERVICES are lotsman, sing-box and nfqws, and they live in the header.
+  $: rules = report.services || []
   // "Требуют внимания" means LOTSMAN HAS RUN OUT OF MOVES — the chain is
   // exhausted and nothing it can do will help, so the operator has to. A service
   // merely failing a probe is Lotsman WORKING: it is escalating, and calling that
   // an alarm is the crying-wolf this project deliberately has no alerting layer to
   // avoid. Measured the day it mattered: Discord carried 3.5 MB of voice while its
   // probe timed out, and the panel called it a problem.
-  $: problems = services.filter((s) => s.broken)
-  $: searching = services.filter((s) => !s.broken && s.fails > 0)
-  $: working = services.filter((s) => !s.broken && s.fails === 0)
+  $: problems = rules.filter((s) => s.broken)
+  $: searching = rules.filter((s) => !s.broken && s.fails > 0)
+  $: working = rules.filter((s) => !s.broken && s.fails === 0)
   $: disabled = report.disabled || []
   $: notices = report.notices || []
 </script>
@@ -50,7 +52,7 @@
     <div class="sub">{report.network.iface || report.network.id}</div>
   </div>
   <div class="stat">
-    <div class="k">Сервисы</div>
+    <div class="k">Правила</div>
     <div class="v small rollup">
       <span class="ok">{report.verdict.working} работают</span>
       <span class="amber">{report.verdict.failing} подбор</span>

@@ -67,7 +67,7 @@
     if (!backend) throw new Error('нет соединения со службой')
     const cfg = await backend.Config()
     const doc = cfg.doc
-    if (!doc) throw new Error('конфиг не разбирается структурно — поправь его на вкладке «Конфиг»')
+    if (!doc) throw new Error('конфигурация не разбирается структурно — поправь её на вкладке «Конфигурация»')
     doc.Subscriptions ||= []
     // A name is required and must be unique. Derive it from the host so the entry is
     // recognisable, and leave tags empty: tags select which pools may use a node, and
@@ -152,11 +152,16 @@
     window.removeEventListener('wheel', onZoomWheel)
   })
 
+  // Naming follows what the things ARE, which the owner had to point out: a
+  // "service" here used to mean both the three PROCESSES Lotsman runs and the
+  // routing rules it steers, in the same document. Rules are lists of addresses
+  // plus what to do with them; services are lotsman/sing-box/nfqws; nodes are
+  // concrete exits; pools are pools.
   const tabs = [
     ['dashboard', 'Обзор'],
     ['nodes', 'Ноды'],
     ['subs', 'Подписки'],
-    ['config', 'Конфиг'],
+    ['config', 'Конфигурация'],
     ['advanced', 'Ещё'],
   ]
 </script>
