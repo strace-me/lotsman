@@ -3,7 +3,6 @@
   import Sextant from './lib/Sextant.svelte'
   import Dashboard from './lib/Dashboard.svelte'
   import Nodes from './lib/Nodes.svelte'
-  import Subscriptions from './lib/Subscriptions.svelte'
   import Advanced from './lib/Advanced.svelte'
   import Config from './lib/Config.svelte'
   import { mock } from './lib/mock.js'
@@ -57,34 +56,6 @@
       error = String(e && e.message ? e.message : e)
     }
     setTimeout(load, 400)
-  }
-
-  // Adding a subscription is the one thing a new user must be able to do without
-  // learning the config editor, so it works from the Подписки tab too. It goes
-  // through the same structured config the editor uses — read the document, append,
-  // save — rather than a second server-side path that could disagree with it.
-  async function addSubscription(url) {
-    if (!backend) throw new Error('нет соединения со службой')
-    const cfg = await backend.Config()
-    const doc = cfg.doc
-    if (!doc) throw new Error('конфигурация не разбирается структурно — поправь её на вкладке «Конфигурация»')
-    doc.Subscriptions ||= []
-    // A name is required and must be unique. Derive it from the host so the entry is
-    // recognisable, and leave tags empty: tags select which pools may use a node, and
-    // guessing that for someone is how a subscription silently ends up unused.
-    let base = 'sub'
-    try {
-      base = new URL(url).hostname.split('.').slice(0, 2).join('.') || 'sub'
-    } catch (e) {
-      base = 'sub'
-    }
-    const taken = new Set(doc.Subscriptions.map((s) => s.Name))
-    let name = base
-    for (let i = 2; taken.has(name); i++) name = base + '-' + i
-    doc.Subscriptions.push({ Name: name, URL: url, Format: 'auto', Tags: [], Enabled: true })
-    await backend.SaveConfig(doc)
-    setTimeout(load, 800)
-    return name
   }
 
   async function stop() {
@@ -160,7 +131,6 @@
   const tabs = [
     ['dashboard', 'Обзор'],
     ['nodes', 'Ноды'],
-    ['subs', 'Подписки'],
     ['config', 'Конфигурация'],
     ['advanced', 'Ещё'],
   ]
@@ -219,8 +189,6 @@
         <Dashboard {report} {events} onRecheck={recheck} onToggle={setEnabled} />
       {:else if tab === 'nodes'}
         <Nodes {report} />
-      {:else if tab === 'subs'}
-        <Subscriptions {report} onAdd={addSubscription} />
       {:else if tab === 'advanced'}
         <Advanced {report} onStop={stop} />
       {/if}

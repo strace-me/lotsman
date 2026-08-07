@@ -11,6 +11,7 @@ import (
 
 	"github.com/strace-me/lotsman/pkg/aggregate"
 
+	"github.com/strace-me/lotsman/pkg/brain"
 	"github.com/strace-me/lotsman/pkg/dataplane"
 	"github.com/strace-me/lotsman/pkg/registry"
 	"github.com/strace-me/lotsman/pkg/strategy"
@@ -95,6 +96,23 @@ func (z *zapretExec) chosenRecipe(service string) string {
 	z.chosenMu.Lock()
 	defer z.chosenMu.Unlock()
 	return z.chosen[service]
+}
+
+// chosenPreset returns the upstream's own name for the bundle the running recipe
+// came from ("ALT12"), or "" when the catalog does not record one. Operators
+// reason in those names, so an id shown without it is a translation they have to
+// do in their head every time.
+func (z *zapretExec) chosenPreset(service string) string {
+	id := z.chosenRecipe(service)
+	if id == "" {
+		return ""
+	}
+	for _, r := range z.recipes {
+		if r.ID == id {
+			return r.Preset
+		}
+	}
+	return ""
 }
 
 // setChosen replaces the per-service recipe map with an independent copy, so a
@@ -264,4 +282,65 @@ func (c *Core) zapretServices() []registry.Service {
 		}
 	}
 	return out
+}
+
+// renderableRecommender narrows the knowledge base's advice to strategies this
+// machine can actually run.
+//
+// Without it the brain names ids the executor cannot render and silently falls
+// back to its own pick. Measured on the ThinkPad: four rules had the brain asking
+// for `alt12` — the ROUTER's script name, which is not a recipe in the catalog at
+// all — while nfqws ran flowseal-alt12-google. And it is self-sustaining: the
+// brain resolves the id, the prober records outcomes under it, the KB's confidence
+// in it grows, the brain resolves it again. Nothing in that loop ever tries to
+// render it, so nothing ever notices.
+//
+// Filtering at the source keeps the layering intact — the brain still knows
+// nothing about recipes; the client, which owns the catalog, answers a narrower
+// question on its behalf.
+type renderableRecommender struct {
+	kb    brain.Recommender
+	known func(id string) bool
+}
+
+func (r renderableRecommender) TopNZapret(service string, n int, exclude ...string) []string {
+	out := make([]string, 0, n)
+	for _, id := range r.kb.TopNZapret(service, n, exclude...) {
+		if r.known(id) {
+			out = append(out, id)
+		}
+	}
+	return out
+}
+
+// renderableKB wraps the live KB so the brain is only ever offered strategies
+// with a recipe behind them on this host.
+func (c *Core) renderableKB() brain.Recommender {
+	return renderableRecommender{kb: c.kb, known: c.knownRecipe}
+}
+
+// setRenderableRecipes records the ids the desync executor can actually build,
+// taken from the same filtered list it uses (catalog + config strategies, minus
+// anything whose payload files are missing here).
+func (c *Core) setRenderableRecipes(rs []strategycat.Recipe) {
+	ids := make(map[string]bool, len(rs))
+	for _, r := range rs {
+		ids[r.ID] = true
+	}
+	c.recipeMu.Lock()
+	c.recipeIDs = ids
+	c.recipeMu.Unlock()
+}
+
+// knownRecipe reports whether a recipe with this id exists here. An EMPTY set
+// means the desync executor was never built (no desync rung on this host), and
+// then this must not filter anything: an empty answer would strip the knowledge
+// base's advice for a reason that has nothing to do with the advice.
+func (c *Core) knownRecipe(id string) bool {
+	c.recipeMu.Lock()
+	defer c.recipeMu.Unlock()
+	if len(c.recipeIDs) == 0 {
+		return true
+	}
+	return c.recipeIDs[id]
 }

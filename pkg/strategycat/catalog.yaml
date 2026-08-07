@@ -793,6 +793,9 @@ recipes:
       - "--dpi-desync-split-seqovl-pattern=tls_clienthello_4pda_to.bin"
     notes: "general HTTP/TLS multisplit seqovl=568 (4pda pattern)"
   - id: "flowseal-general-fake-multisplit-664-max"
+    # Verified byte-for-byte against ALT12's general TCP block in
+    # pkg/strategyimport/testdata/flowseal-1.10.0-alt12.bat (2026-08-07).
+    preset: "ALT12"
     provenance: "Flowseal/zapret-discord-youtube 1.9.9a"
     target_class: "general_tls"
     protocol: "tcp"
@@ -956,6 +959,7 @@ recipes:
   # argument no longer does what its author wrote — better to ship the hostlist
   # profiles honestly than a partial bundle under the bundle's name.
   - id: "flowseal-alt12-google"
+    preset: "ALT12"
     provenance: "Flowseal/zapret-discord-youtube 1.10.0, ALT12 (hostlist profiles)"
     target_class: "general_tls"
     protocol: "tcp"
@@ -985,6 +989,7 @@ recipes:
         - "--dpi-desync-fake-quic=quic_initial_www_google_com.bin"
     notes: "ALT12's Google path for one service: hostfakesplit on 443, the general fake+multisplit behind it, and the QUIC profile a TCP-only recipe leaves uncovered"
   - id: "flowseal-alt12-general"
+    preset: "ALT12"
     provenance: "Flowseal/zapret-discord-youtube 1.10.0, ALT12 (hostlist profiles)"
     target_class: "general_tls"
     protocol: "tcp"
@@ -1014,6 +1019,7 @@ recipes:
   # port) — it carries no SNI, so it cannot be selected by domain at all, only by
   # port range plus the layer-7 protocol. That is exactly how Flowseal does it.
   - id: "flowseal-alt12-discord"
+    preset: "ALT12"
     provenance: "Flowseal/zapret-discord-youtube 1.10.0, ALT12 (voice + tcp profiles)"
     target_class: "discord_tcp"
     protocol: "tcp"

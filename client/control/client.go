@@ -121,18 +121,20 @@ type Subscription struct {
 
 // Service is one service's current state and the passive eye's ratios.
 type Service struct {
-	Service      string  `json:"service"`
-	State        string  `json:"state"`
-	Node         string  `json:"node"`
-	Fails        int     `json:"fails"`
-	Broken       bool    `json:"broken"`
-	Rung         int     `json:"rung"`
-	RungClass    string  `json:"rungClass"`
-	Engine       string  `json:"engine"`
-	Strategy     string  `json:"strategy"`
-	Requested    string  `json:"requested"`
-	StalledRatio float64 `json:"stalledRatio"`
-	LeakRatio    float64 `json:"leakRatio"`
+	Service   string `json:"service"`
+	State     string `json:"state"`
+	Node      string `json:"node"`
+	Fails     int    `json:"fails"`
+	Broken    bool   `json:"broken"`
+	Rung      int    `json:"rung"`
+	RungClass string `json:"rungClass"`
+	Engine    string `json:"engine"`
+	Strategy  string `json:"strategy"`
+	// StrategyPreset is the upstream's own name for the running recipe ("ALT12").
+	StrategyPreset string  `json:"strategyPreset"`
+	Requested      string  `json:"requested"`
+	StalledRatio   float64 `json:"stalledRatio"`
+	LeakRatio      float64 `json:"leakRatio"`
 }
 
 // Event is one brain rung-transition (the "история событий" surface).
