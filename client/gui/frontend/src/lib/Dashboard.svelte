@@ -7,7 +7,14 @@
   export let onToggle = () => {}
 
   $: services = report.services || []
-  $: problems = services.filter((s) => s.broken || s.fails > 0)
+  // "Требуют внимания" means LOTSMAN HAS RUN OUT OF MOVES — the chain is
+  // exhausted and nothing it can do will help, so the operator has to. A service
+  // merely failing a probe is Lotsman WORKING: it is escalating, and calling that
+  // an alarm is the crying-wolf this project deliberately has no alerting layer to
+  // avoid. Measured the day it mattered: Discord carried 3.5 MB of voice while its
+  // probe timed out, and the panel called it a problem.
+  $: problems = services.filter((s) => s.broken)
+  $: searching = services.filter((s) => !s.broken && s.fails > 0)
   $: working = services.filter((s) => !s.broken && s.fails === 0)
   $: disabled = report.disabled || []
   $: notices = report.notices || []
@@ -63,13 +70,36 @@
             <span class="name">{s.service}</span>
           </div>
           <div class="where">
-            {s.broken ? 'нет живых нод' : tileWhere(s)}
+            {tileWhere(s)} · цепочка исчерпана
             {#if tileRequested(s)}<div class="mismatch">{tileRequested(s)}</div>{/if}
           </div>
           <div class="tile-actions">
             <button class="fix" on:click={() => onRecheck(s.service)}>перепроверить</button>
             <button class="ghost" on:click={() => onToggle(s.service, false)}>выключить</button>
           </div>
+        </div>
+      {/each}
+    </div>
+  </section>
+{/if}
+
+{#if searching.length}
+  <section>
+    <h2>Подбирает · {searching.length}</h2>
+    <!-- Amber, not red, and no verb telling the operator to act: this is the tool
+         doing its job. It is shown at all only because a service stuck here for a
+         long time is worth noticing. -->
+    <div class="rows">
+      {#each searching as s (s.service)}
+        <div class="row">
+          <span class="glyph amber">↻</span>
+          <span class="name">{s.service}</span>
+          <span class="where">
+            {tileWhere(s)}{#if tileRequested(s)} <span class="mismatch">({tileRequested(s)})</span>{/if}
+            <span class="dim"> · проба не прошла {s.fails}×</span>
+          </span>
+          <button class="ghost" on:click={() => onRecheck(s.service)}>перепроверить</button>
+          <button class="ghost" on:click={() => onToggle(s.service, false)}>выключить</button>
         </div>
       {/each}
     </div>
