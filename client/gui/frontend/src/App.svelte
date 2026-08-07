@@ -17,6 +17,14 @@
   // behind its service and the only tell was a stale hint sentence in a
   // screenshot. Now the window says so itself.
   let ownVersion = ''
+  // "v7.1 (8e128fe, 2026-08-07)" -> "v7.1 · 8e128fe". Two commits at the same tag
+  // are two different builds, and the bar has to be able to tell them apart.
+  function buildLabel(v) {
+    if (!v) return '—'
+    const tag = v.split(' ')[0]
+    const m = v.match(/\(([^,)]+)/)
+    return m ? tag + ' · ' + m[1] : tag
+  }
   $: serviceVersion = (report && report.version) || ''
   $: stale =
     ownVersion && serviceVersion && ownVersion.split(' ')[0] !== serviceVersion.split(' ')[0]
@@ -185,10 +193,14 @@
          bar cannot say anywhere else is WHICH BUILD is answering. -->
     <div class="verdict">
       {#if report}
-        <!-- Just the tag: the commit in the parenthetical is already the -g suffix,
-             and the bar is not where you read a build date. Full string on hover. -->
+        <!-- Tag AND commit. Showing the tag alone was fine while `git describe`
+             produced v7.0-41-g1f49f35 — the count and the revision were IN the tag
+             string. At an exact tag it produces just "v7.1", and the commit lives
+             only in the parenthetical, so stripping it left the bar unable to say
+             which build was answering: exactly what this field is for. The date
+             stays on hover; the bar is not where you read one. -->
         <span class="build" title="версия службы, отвечающей этому окну: {report.version || 'неизвестна'}"
-          >{(report.version || '—').split(' ')[0]}</span>
+          >{buildLabel(report.version)}</span>
         {#if stale}
           <!-- Only when they DISAGREE. Printing both always would make the ordinary
                case look like a fault, which is how a real one stops being noticed. -->
