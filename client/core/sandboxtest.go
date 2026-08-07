@@ -257,11 +257,16 @@ func (c *Core) provenCandidate(ctx context.Context, svc registry.Service, exclud
 		test = c.testRecipe
 	}
 	cands := c.rankedCandidates(svc.Name, exclude, sandboxCandidates)
+	if len(cands) == 0 {
+		return "", false
+	}
+	anyMeasured := false
 	for _, cand := range cands {
 		if !c.zapExec.stillOnRung(svc.Name) {
 			return "", false // the brain moved it; the rung is not ours to steer
 		}
 		ok, measured, why := test(ctx, svc, cand)
+		anyMeasured = anyMeasured || measured
 		// Only a real measurement teaches the knowledge base. Recording "could not
 		// ask" as a failure would demote a recipe for the sandbox's own breakage —
 		// a verdict about something the measurement did not touch.
@@ -280,13 +285,17 @@ func (c *Core) provenCandidate(ctx context.Context, svc registry.Service, exclud
 			c.log.Info("candidate PASSED in the sandbox", "service", svc.Name, "candidate", cand, "evidence", why)
 			return cand, true
 		}
-		if !measured && failOpen {
-			c.log.Warn("the test lane could not measure a candidate; applying it unverified rather than leaving the rule unrouted",
-				"service", svc.Name, "candidate", cand, "why", why)
-			return cand, false
-		}
 		c.log.Info("candidate rejected in the sandbox, real traffic untouched",
-			"service", svc.Name, "candidate", cand, "why", why)
+			"service", svc.Name, "candidate", cand, "measured", measured, "why", why)
+	}
+	// Falling open is decided over the WHOLE pass, not on the first candidate that
+	// could not be measured. Deciding per-candidate meant one unmeasurable recipe
+	// short-circuited the rest and got applied unverified, so a lane that worked
+	// perfectly well for the second candidate was never asked.
+	if failOpen && !anyMeasured {
+		c.log.Warn("the test lane could not measure anything for this rule; applying the top candidate unverified rather than leaving the rule unrouted",
+			"service", svc.Name, "candidate", cands[0])
+		return cands[0], false
 	}
 	return "", false
 }
@@ -308,8 +317,19 @@ func (c *Core) applyCandidate(ctx context.Context, service, cand string, verifie
 // that just failed. It reuses the picker's own ranking so the sandbox tries what
 // production would have tried, in the same order.
 func (c *Core) rankedCandidates(service, exclude string, n int) []string {
+	svc, ok := c.reg.Services[service]
+	if !ok {
+		return nil
+	}
 	var out []string
-	for _, r := range c.zapExec.recipes {
+	// Only recipes the COMPOSER will honour for this rule. Offering anything else
+	// gets the picker's choice back instead of the candidate, so the test measures
+	// the incumbent while wearing the candidate's name — and the gate, seeing the
+	// mismatch, refuses it. Measured on hardware the day the lane first ran: every
+	// one of sixteen passes ended "pin not honoured", zero candidates ever reached
+	// the queue, and the gate looked like it was working because it refused
+	// everything.
+	for _, r := range zaptune.UsableCandidates(svc, c.zapExec.recipes) {
 		if r.ID == exclude {
 			continue
 		}
@@ -317,16 +337,26 @@ func (c *Core) rankedCandidates(service, exclude string, n int) []string {
 	}
 	sortByScore(out, func(id string) float64 { return c.recipeScore(service, id) })
 	// The operator's own pin goes FIRST, ahead of anything the knowledge base
-	// prefers. A pin is an instruction, and testing it third would mean an operator
-	// who pinned a strategy watched something else get applied — which is the exact
-	// silent-substitution the pin mechanism was built to end.
-	if pin := c.zapExec.pinFor(service); pin != "" && pin != exclude {
+	// prefers — but only if the composer would honour it. A pin is an instruction,
+	// and testing it third would mean an operator who pinned a strategy watched
+	// something else get applied, which is the silent substitution the pin
+	// mechanism exists to end.
+	if pin := c.zapExec.pinFor(service); pin != "" && pin != exclude && listed(out, pin) {
 		out = append([]string{pin}, without(out, pin)...)
 	}
 	if len(out) > n {
 		out = out[:n]
 	}
 	return out
+}
+
+func listed(ids []string, want string) bool {
+	for _, id := range ids {
+		if id == want {
+			return true
+		}
+	}
+	return false
 }
 
 func without(ids []string, drop string) []string {

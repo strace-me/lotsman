@@ -410,3 +410,25 @@ func KBPicker(score func(service, recipeID string) float64) Picker {
 		return candidates[best], true
 	}
 }
+
+// UsableCandidates returns the recipes that could ACTUALLY be composed for svc,
+// applying exactly the filter compose() applies before it honours a pin.
+//
+// It exists because a caller offering a candidate outside this set gets the
+// picker's choice back instead, silently — the composer reports the ignored pin,
+// but a caller that does not consult this list simply proposes recipes that can
+// never be honoured. Measured on hardware the day the sandbox first ran: the
+// rotation offered zms-dv3/5/6/7/14 and flowseal-alt12-discord to rules they were
+// never renderable for, every single test came back "pin not honoured", and not
+// one candidate ever reached the test lane. The gate looked like it was working —
+// it refused everything — while nothing was being measured at all.
+func UsableCandidates(svc registry.Service, recipes []strategycat.Recipe) []strategycat.Recipe {
+	port := ProbePort(svc)
+	var out []strategycat.Recipe
+	for _, r := range CandidateRecipes(svc, recipes) {
+		if recipeRenderable(r) && recipeCoversPort(r, port) {
+			out = append(out, r)
+		}
+	}
+	return out
+}

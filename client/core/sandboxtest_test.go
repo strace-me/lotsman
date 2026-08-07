@@ -14,18 +14,39 @@ import (
 // set of renderable recipes, and a KB to score them.
 func rotCore(t *testing.T, applied *[]string) *Core {
 	t.Helper()
+	// A REAL service and REAL recipe shapes. The first version of this helper used
+	// bare ids and an empty service, which passed while rankedCandidates offered the
+	// whole catalogue — and went on passing when the composer silently refused every
+	// one of them on hardware. A candidate list that is not filtered the way the
+	// composer filters is not the candidate list.
+	svc := registry.Service{
+		Name:        "youtube",
+		Category:    "streaming",
+		ProbeTarget: "https://www.youtube.com/generate_204",
+		Domains:     []string{"youtube.com"},
+	}
+	renderable := func(id string) strategycat.Recipe {
+		return strategycat.Recipe{
+			ID: id, TargetClass: "general_tls", Protocol: "tcp",
+			NfqwsArgs: []string{"--filter-tcp=443", "--hostlist-domains={{DOMAINS}}", "--dpi-desync=fake"},
+		}
+	}
 	c := &Core{
 		log: slog.New(slog.DiscardHandler),
-		reg: &registry.Registry{Services: map[string]registry.Service{
-			"youtube": {Name: "youtube"},
-		}},
-		kb: kb.New(),
+		reg: &registry.Registry{Services: map[string]registry.Service{"youtube": svc}},
+		kb:  kb.New(),
 	}
 	c.zapExec = &zapretExec{
 		log:    slog.New(slog.DiscardHandler),
-		active: func() []registry.Service { return []registry.Service{{Name: "youtube"}} },
+		active: func() []registry.Service { return []registry.Service{svc} },
 		recipes: []strategycat.Recipe{
-			{ID: "loser"}, {ID: "alpha"}, {ID: "bravo"}, {ID: "charlie"}, {ID: "delta"},
+			renderable("loser"), renderable("alpha"), renderable("bravo"),
+			renderable("charlie"), renderable("delta"),
+			// Unrenderable on purpose: no {{DOMAINS}}, so the composer would return
+			// the picker's choice instead and the test would measure the incumbent.
+			// It must never be offered as a candidate.
+			{ID: "global-junk", TargetClass: "general_tls", Protocol: "tcp",
+				NfqwsArgs: []string{"--filter-tcp=443", "--dpi-desync=fake"}},
 		},
 		clash: nil,
 	}
@@ -125,9 +146,10 @@ func TestRotationStopsWhenTheRuleLeavesTheRung(t *testing.T) {
 	var applied []string
 	c := rotCore(t, &applied)
 	onRung := true
+	svc := c.reg.Services["youtube"]
 	c.zapExec.active = func() []registry.Service {
 		if onRung {
-			return []registry.Service{{Name: "youtube"}}
+			return []registry.Service{svc}
 		}
 		return nil
 	}
@@ -183,5 +205,22 @@ func TestGateAppliesOnlyAProvenRecipe(t *testing.T) {
 
 	if len(applied) != 1 || applied[0] != "bravo" {
 		t.Fatalf("applied %v, want [bravo] — the only candidate that passed", applied)
+	}
+}
+
+// A candidate the composer would not honour must never be OFFERED. Offering it
+// gets the picker's choice back instead, so the lane measures the incumbent under
+// the candidate's name — and on hardware that turned every one of sixteen sandbox
+// passes into "pin not honoured" with nothing ever measured.
+func TestUnrenderableRecipesAreNeverOffered(t *testing.T) {
+	var applied []string
+	c := rotCore(t, &applied)
+	for _, id := range c.rankedCandidates("youtube", "", 99) {
+		if id == "global-junk" {
+			t.Fatal("offered a recipe the composer cannot honour for this rule")
+		}
+	}
+	if len(c.rankedCandidates("youtube", "", 99)) == 0 {
+		t.Fatal("filtered away everything; the renderable recipes should survive")
 	}
 }
