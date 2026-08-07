@@ -22,7 +22,10 @@ export function tileGlyph(s) {
 // never said it.
 export function tileWhere(s) {
   if (s.rungClass === 'direct') return [s.engine, 'напрямую'].filter(Boolean).join(' · ')
-  const bits = [s.engine || s.rungClass, s.strategy].filter(Boolean)
+  // The recipe id plus the upstream's own name for it, because the operator
+  // thinks in "ALT12" and the app only ever said flowseal-general-fake-…-664-max.
+  const strat = s.strategy && s.strategyPreset ? `${s.strategy} (${s.strategyPreset})` : s.strategy
+  const bits = [s.engine || s.rungClass, strat].filter(Boolean)
   if (s.node && s.node !== s.strategy) bits.push(s.node)
   return bits.join(' · ')
 }

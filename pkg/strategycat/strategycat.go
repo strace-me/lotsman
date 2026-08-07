@@ -60,6 +60,12 @@ type Recipe struct {
 	// Empty = single-profile, described by NfqwsArgs.
 	Blocks [][]string `yaml:"blocks,omitempty"`
 	Notes  string     `yaml:"notes"`
+	// Preset is the upstream's own name for the bundle this recipe came out of —
+	// "ALT12" for Flowseal. Operators reason in those names ("поставь ALT12"), not
+	// in our derived ids, so showing one without the other makes the app and the
+	// person talk past each other. Empty when the preset is not known, which is
+	// honest: several catalog entries predate anyone recording it.
+	Preset string `yaml:"preset,omitempty"`
 	// Consensus counts the independent bundles shipping this exact recipe.
 	// Set by pkg/strategyimport; absent (0) in the hand-curated catalog, where
 	// the same fact lives in Provenance as prose.

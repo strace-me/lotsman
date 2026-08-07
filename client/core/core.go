@@ -183,6 +183,11 @@ type Core struct {
 	carriedMu   sync.Mutex
 	lastCarried map[string]int64
 
+	// recipeIDs is what the desync executor can actually render here, so the
+	// brain is never offered a strategy the engine would silently replace.
+	recipeMu  sync.Mutex
+	recipeIDs map[string]bool
+
 	obsMu   sync.Mutex       // guards obsSnap between the observe loop and /metrics
 	obsSnap observe.Snapshot // last passive-observation snapshot (zero until the first pass)
 
@@ -490,7 +495,10 @@ func (c *Core) buildLoop() error {
 	}
 	c.dropUnsupportedRungs(execs)
 
-	c.brain = brain.New(c.bus, c.reg, c.kb, brain.DefaultConfig(), c.events, c.log)
+	// The brain asks the knowledge base which zapret strategy to use; the client
+	// narrows that to the ones it can actually render, so it cannot name an id the
+	// executor will silently replace (see renderableRecommender).
+	c.brain = brain.New(c.bus, c.reg, c.renderableKB(), brain.DefaultConfig(), c.events, c.log)
 	c.brain.SetReassert(c.opts.Interval)
 	if c.opts.StateFile != "" {
 		store := state.NewFileStore(c.opts.StateFile)
@@ -977,6 +985,9 @@ type NodeStatus struct {
 	// Strategy is what is ACTUALLY running: the composed desync recipe, or the pool
 	// a routed service selects through.
 	Strategy string `json:"strategy,omitempty"`
+	// StrategyPreset is the upstream bundle's own name for that recipe ("ALT12").
+	// Empty when the catalog records none.
+	StrategyPreset string `json:"strategyPreset,omitempty"`
 	// Requested is what the brain ASKED for, when that differs from Strategy. They
 	// diverge silently today — the brain can name a strategy the local engine cannot
 	// render, and the executor quietly falls back to the best recipe it can build —
@@ -1566,12 +1577,14 @@ func (c *Core) newZapretExec(ctx context.Context) *zapretExec {
 		return nil
 	}
 
+	usable := usablePayloadRecipes(
+		append(strategycat.Load(), zaptune.RecipesFromDefinitions(c.conf.Strategies)...),
+		c.opts.ZapretFiles, c.log)
+	c.setRenderableRecipes(usable)
 	return &zapretExec{
-		clash:  c.clash,
-		engine: c.zap,
-		recipes: usablePayloadRecipes(
-			append(strategycat.Load(), zaptune.RecipesFromDefinitions(c.conf.Strategies)...),
-			c.opts.ZapretFiles, c.log),
+		clash:   c.clash,
+		engine:  c.zap,
+		recipes: usable,
 		// Rank recipes by what has actually worked for this service. A cold KB scores
 		// every candidate at the prior, so this degrades to catalog order — the same
 		// choice the seed picker makes — and sharpens only as outcomes accumulate.

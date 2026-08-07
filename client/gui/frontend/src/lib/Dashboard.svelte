@@ -48,8 +48,17 @@
   </div>
   <div class="stat">
     <div class="k">Сеть</div>
-    <div class="v small">{report.network.kind || '—'}{report.network.roaming ? ' · роуминг' : ''}</div>
-    <div class="sub">{report.network.iface || report.network.id}</div>
+    <!-- `kind` is set ONLY for a modem — netid leaves it empty for Wi-Fi and
+         Ethernet on purpose — so it used to render a dash as the tile's headline
+         while the one useful fact, the interface, sat underneath in small type.
+         Show what is known: the interface, and the kind only when there is one. -->
+    <div class="v small">
+      {report.network.iface || report.network.id || 'не определена'}{report.network.roaming ? ' · роуминг' : ''}
+    </div>
+    <div class="sub">
+      {#if report.network.kind === 'cellular'}мобильная{#if report.network.carrier} · {report.network.carrier}{/if}
+      {:else}отпечаток {report.network.id || '—'}{/if}
+    </div>
   </div>
   <div class="stat">
     <div class="k">Правила</div>
