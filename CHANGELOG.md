@@ -6,6 +6,28 @@ older sections carry working dates rather than release dates.
 
 ## [Unreleased]
 
+### A silent probe of an inactive desync rung was measuring the VPN
+
+- **The recovery direction had never been measured honestly in tun mode.**
+  `SetDirectProber` is only wired in proxy mode — a direct dial from this process
+  is captured by our own tun — so `RungProber` fell through to the ordinary path
+  probe, which follows the service's ROUTE RULE. With the service on a VPN node
+  that rule sends the probe through the tunnel, so the desync rung was credited
+  with the VPN's health: silent recovery accumulated successes toward returning
+  the service to a rung nobody had measured, and each of those successes was also
+  written into the knowledge base against the desync recipe. Verified read-only on
+  the ThinkPad: no `-proxy`, no `-probe-proxy`, youtube at rung 3 working through
+  the tunnel while positions 0 and 1 counted toward `recover_at=5`.
+- `ProductionVerdict.Unmeasured` is the missing third answer. The engine counts it
+  as nothing — no EWMA sample, no failure record, no publish to the brain — and
+  logs why. **Stated cost:** in tun mode a service that escalated to VPN no longer
+  returns on its own. It was not returning on evidence before; it was returning on
+  a measurement of the tunnel. Probing the direct path for real (a socket bound to
+  the physical interface, so it escapes `auto_route` and still meets nfqws on
+  egress) is the follow-up that would restore it honestly.
+- LOT-44 named this exact failure, fixed it for the VPN direction and for proxy
+  mode, and left the one configuration the daily driver actually runs.
+
 ### The probe reused its connections, so it never met the block
 
 - **This is why YouTube read healthy while it was dead.** Establishing a
