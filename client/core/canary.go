@@ -224,9 +224,19 @@ func (c *Core) goodputOK(ctx context.Context, svc registry.Service) bool {
 // carryingFloorBytes is how much a rule must have MOVED since the previous
 // observation pass to count as demonstrably working. One interval of real use
 // clears it easily (a voice call is hundreds of KB); a keepalive or a failed
-// handshake does not. Deliberately well above the few hundred bytes a stalled
-// path dribbles before the TSPU freeze bites.
+// handshake does not.
 const carryingFloorBytes = 64 << 10
+
+// carryingFloorPerFlow is the same question asked per CONNECTION, and it is the
+// one that matters. An aggregate is trivially cleared by a browser thrashing:
+// measured on the ThinkPad while YouTube would not load, the eye saw 1110 KiB
+// across 387 live flows — 2.9 KiB each — which is not health, it is the freeze
+// signature, a client opening connection after connection and getting a few
+// kilobytes out of each before it dies. The aggregate floor waved that through.
+//
+// Above the ~16 KiB point where the TSPU volume freeze bites, so a flow that got
+// past it counts and a flow that died at it does not.
+const carryingFloorPerFlow = 24 << 10
 
 // carryingStalledMax is the share of a rule's flows that may be frozen while it
 // still counts as carrying. A path where most flows are stuck mid-stream is the
@@ -274,5 +284,11 @@ func (c *Core) CarryingReason(service string) (string, bool) {
 	if moved < carryingFloorBytes {
 		return "", false
 	}
-	return fmt.Sprintf("%d KiB moved across %d live flows since the last pass", moved>>10, m.Flows), true
+	// Per flow, not just in total. Many connections each carrying a trickle is the
+	// freeze, and summing them turns the symptom into the evidence.
+	if perFlow := moved / int64(m.Flows); perFlow < carryingFloorPerFlow {
+		return "", false
+	}
+	return fmt.Sprintf("%d KiB moved across %d live flows since the last pass (%d KiB each)",
+		moved>>10, m.Flows, (moved/int64(m.Flows))>>10), true
 }
