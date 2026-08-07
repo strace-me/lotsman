@@ -52,6 +52,14 @@ const sandboxCandidates = 3
 // would otherwise silently pin every rule to the tunnel forever, which is a much
 // worse failure than the one the gate prevents.
 func (c *Core) testRecipe(ctx context.Context, svc registry.Service, recipeID string) (ok, measured bool, why string) {
+	// BEFORE the lane goes up, not after. Whether this rule can be judged at all is
+	// knowable from its config, and asking afterwards cost an nft table and an nfqws
+	// start per question: measured on the laptop as 104 sandbox lifts in 2m23s, one
+	// every 1.4 seconds, ninety of which refused for exactly this reason. Zero
+	// information, real work, on a machine running off a battery.
+	if !c.canJudge(svc) {
+		return false, false, "rule has no volume_target, so the lane has nothing to judge a candidate by"
+	}
 	sb, err := c.sandbox()
 	if err != nil {
 		return false, false, "no sandbox: " + err.Error()
@@ -61,12 +69,6 @@ func (c *Core) testRecipe(ctx context.Context, svc registry.Service, recipeID st
 		return false, false, "this platform cannot bind a probe to the interface, so a candidate cannot be measured without imposing it"
 	}
 	target := svc.VolumeTarget
-	if target == "" {
-		target = svc.ProbeTarget
-	}
-	if !strings.HasPrefix(target, "http") {
-		return false, false, "rule has no http target to measure a candidate against"
-	}
 
 	// Compose the candidate for THIS rule alone, pinned to the recipe under test.
 	// One service, so the argv is exactly the profiles that rule would get — not a
@@ -222,6 +224,17 @@ func (c *Core) gateEnable(ctx context.Context, service string) {
 	if !ok || c.zapExec == nil {
 		return
 	}
+	// The applier RE-ASSERTS on every interval, so Enable arrives again and again
+	// for a rule that has not moved. Without this the whole pass re-ran each time —
+	// x proposed the same three recipes four times in two minutes. The cooldown must
+	// not block the APPLICATION though, only the re-test: a gate that skipped both
+	// would leave the rule with no route at all.
+	if !c.canJudge(svc) || !c.claimRotation(service) {
+		if top := c.rankedCandidates(service, "", 1); len(top) > 0 {
+			c.applyCandidate(ctx, service, top[0], false, "")
+		}
+		return
+	}
 	cand, verified := c.provenCandidate(ctx, svc, "", true)
 	if cand == "" {
 		c.log.Info("no recipe could be proven for this rule; not routing its traffic to the desync rung",
@@ -229,6 +242,15 @@ func (c *Core) gateEnable(ctx context.Context, service string) {
 		return
 	}
 	c.applyCandidate(ctx, service, cand, verified, "")
+}
+
+// canJudge reports whether the lane could form an opinion about this rule at all.
+// It needs a target with real VOLUME behind it: a probe target is deliberately
+// tiny — youtube's is a 204 with no body — and timing one measures how small the
+// URL is, which is exactly how the knowledge base once learned that every recipe
+// scored zero.
+func (c *Core) canJudge(svc registry.Service) bool {
+	return strings.HasPrefix(svc.VolumeTarget, "http")
 }
 
 // claimRotation enforces the per-rule cooldown. Each test costs an engine start
@@ -282,7 +304,10 @@ func (c *Core) provenCandidate(ctx context.Context, svc registry.Service, exclud
 			return "", false
 		}
 		if ok {
-			c.log.Info("candidate PASSED in the sandbox", "service", svc.Name, "candidate", cand, "evidence", why)
+			// measured=true on the WINNING line too. A reader counting measured=true to
+			// find real measurements got zero, because only refusals carried the field.
+			c.log.Info("candidate PASSED in the sandbox",
+				"service", svc.Name, "candidate", cand, "measured", true, "evidence", why)
 			return cand, true
 		}
 		c.log.Info("candidate rejected in the sandbox, real traffic untouched",

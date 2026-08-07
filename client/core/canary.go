@@ -310,8 +310,12 @@ func (c *Core) announceVolumeSweep() {
 	}
 	sort.Strings(with)
 	sort.Strings(without)
-	c.log.Info("volume sweep armed", "every", volumeSweepInterval,
-		"judged", with, "no_volume_target", without)
+	// The same list governs the GATE: a rule with no volume_target cannot have a
+	// candidate proven for it either, so its first recipe is applied unverified.
+	// Saying which rules those are is the difference between a feature that is
+	// partly armed and one that only looks armed.
+	c.log.Info("volume sweep and candidate gate armed", "every", volumeSweepInterval,
+		"judged", with, "unjudgeable_no_volume_target", without)
 }
 
 func hasZapretRung(svc registry.Service) bool {

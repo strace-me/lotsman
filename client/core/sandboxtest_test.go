@@ -23,7 +23,10 @@ func rotCore(t *testing.T, applied *[]string) *Core {
 		Name:        "youtube",
 		Category:    "streaming",
 		ProbeTarget: "https://www.youtube.com/generate_204",
-		Domains:     []string{"youtube.com"},
+		// Without this the lane has nothing to judge by and the gate falls open
+		// before it ever tests anything — which is the behaviour, not a test bug.
+		VolumeTarget: "https://www.youtube.com/",
+		Domains:      []string{"youtube.com"},
 	}
 	renderable := func(id string) strategycat.Recipe {
 		return strategycat.Recipe{
@@ -222,5 +225,58 @@ func TestUnrenderableRecipesAreNeverOffered(t *testing.T) {
 	}
 	if len(c.rankedCandidates("youtube", "", 99)) == 0 {
 		t.Fatal("filtered away everything; the renderable recipes should survive")
+	}
+}
+
+// A rule the lane cannot judge must not COST anything to find out. Ninety of the
+// laptop's first 104 sandbox lifts started an nft table and an nfqws only to
+// refuse for a reason its config already knew, once every 1.4 seconds, on
+// battery.
+func TestARuleWithNoVolumeTargetIsRefusedBeforeTheLaneGoesUp(t *testing.T) {
+	var applied []string
+	c := rotCore(t, &applied)
+	svc := c.reg.Services["youtube"]
+	svc.VolumeTarget = ""
+	c.reg.Services["youtube"] = svc
+
+	lifted := false
+	c.testCandidate = func(context.Context, registry.Service, string) (bool, bool, string) {
+		lifted = true
+		return false, false, "should never be asked"
+	}
+
+	c.gateEnable(context.Background(), "youtube")
+
+	if lifted {
+		t.Error("asked the lane about a rule it could never judge")
+	}
+	if len(applied) != 1 {
+		t.Fatalf("applied %v, want one: an unjudgeable rule must still be routed", applied)
+	}
+}
+
+// Enable arrives again on every re-assert. Re-running the whole pass each time
+// is what turned two minutes into 104 engine starts — but the cooldown must skip
+// only the TESTING, never the application, or the rule is left with no route.
+func TestGateCooldownSkipsTestingNotRouting(t *testing.T) {
+	var applied []string
+	c := rotCore(t, &applied)
+	calls := 0
+	c.testCandidate = func(_ context.Context, _ registry.Service, id string) (bool, bool, string) {
+		calls++
+		return id == "bravo", true, "measured"
+	}
+
+	c.gateEnable(context.Background(), "youtube")
+	first := calls
+	if first == 0 {
+		t.Fatal("the first arrival must actually test")
+	}
+	c.gateEnable(context.Background(), "youtube")
+	if calls != first {
+		t.Errorf("a re-assert inside the cooldown ran %d more tests", calls-first)
+	}
+	if len(applied) != 2 {
+		t.Errorf("applied %v, want two: the cooldown must not leave the rule unrouted", applied)
 	}
 }
