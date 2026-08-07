@@ -6,6 +6,107 @@ older sections carry working dates rather than release dates.
 
 ## [Unreleased]
 
+### Discord voice, and the three ways we were guaranteeing it could not work
+
+- Voice media is raw UDP to whichever cloud Discord parked the voice server on
+  that minute — measured: `35.217.47.243:50007` on Google Cloud, and
+  `*.discord.media` resolving into Cloudflare's `162.159.128.0/19`, nowhere near
+  the `66.22.192.0/18` the config matches. It carries no SNI, so it cannot be
+  selected by domain at all. **Zero Discord UDP flows reached sing-box** while the
+  owner sat in a voice channel; the traffic egressed `direct` and died there.
+- **The capture was a hardcoded literal.** `Capture{TCP: 80,443,2053,…; UDP: 443}`
+  — Flowseal's own filter with the UDP half truncated, dropping
+  `19294-19344,50000-50100`. A profile filtering the voice range received nothing,
+  matched nothing and said nothing: the queue and the profiles were two
+  independent statements about the same traffic and only one was maintained. The
+  capture is now DERIVED from the composed argv, unioned onto the instance's spec
+  as a floor; nft reinstalls when the port set changes and WinDivert rebuilds its
+  filter. winws's rollback now derives the PREVIOUS strategy's capture rather than
+  relaunching old args behind the failed one's filter.
+- **`recipeRenderable` required `{{DOMAINS}}`**, which cost it the feature it was
+  protecting: Flowseal's voice block — already in our catalog — was refused as
+  "global" while being narrower than most domain-scoped rules. A bounded port
+  range TOGETHER WITH `--filter-l7` now counts as a scope. Either alone still
+  fails, and 1024-65535 is still the internet.
+- **`flowseal-alt12-discord`** carries all three profiles the rule needs, which
+  was impossible before recipes could hold more than one.
+- Confirmed on live traffic: **3.5 MB of voice** through the desync during a real
+  call, in the office, where it was not even expected to hold.
+
+### A pinned strategy_id was a suggestion, not a pin
+
+- `zapretExec.Enable` took the brain's resolved strategy as a parameter named `_`
+  and discarded it. So `strategy_id` on a zapret chain step pinned NOTHING on the
+  desktop: the composer ranked candidates by the knowledge base and ran whatever
+  it preferred. Every recipe experiment run under a pin was a measurement of
+  something the operator had not chosen.
+- A pin is now honoured when it names a renderable candidate, and **reported when
+  it cannot be** — a pin that silently does nothing turns an experiment into a
+  measurement of something else. The router keeps the old path, where a chain
+  `strategy_id` is honoured by switching scripts.
+
+### The canary could escalate, then escalated too much
+
+- The canary measured throughput and demoted recipes, but demotion only reorders
+  the PICKER; whether a rule stays on the desync rung is the brain's call, and the
+  brain listens to a probe that pulls a couple of hundred bytes. Two subsystems
+  disagreed every ten seconds for hours and the one with evidence lost.
+  `probing.Engine.SetStallOracle` — built for the router's TSPU freeze, never
+  wired on the client — now carries the canary's verdict, scoped to rules still on
+  a desync rung.
+- **Then it over-corrected, and that was mine.** The verdict was stored and STOOD,
+  failing every subsequent probe until some later canary passed — so three
+  "consecutive failures" could come from one verdict, and the probe stopped being
+  a second opinion. Measured: 151 probe failures in twenty minutes driving 37
+  escalations, rules abandoning desync across the board. The verdict is now
+  consumed by the first probe that reads it.
+- The oracle returns its REASON with the verdict; the router passes its own. A
+  probe failed for one cause must not be recorded with a neighbouring cause's
+  explanation.
+
+### The throughput canary was measuring the endpoint, not the path
+
+- youtube's probe target is `generate_204` — a response with **no body**. The
+  canary pulls volume from the probe target, so it read zero bytes, computed
+  0 KiB/s and demoted whatever strategy was applied. Every time, for as long as
+  the service has existed: the knowledge base held every zapret recipe for youtube
+  at ewma 0 after ninety consecutive "failures" that measured nothing. x's target
+  is robots.txt at 2932 bytes; discord's gateway returns **35**.
+- Fixed at the source by telling two cases apart: a read reaching END-OF-BODY
+  before the requested volume means the endpoint ran out (a fact about the URL);
+  a read stopped by the deadline means the path stalled (a fact about the path,
+  and the freeze this probe exists to catch). `quality.Quality.Short` carries
+  which happened, and the canary refuses to judge rather than inventing a verdict.
+  The frozen-path test still passes — excusing small files must not excuse
+  freezes.
+- Rules gained `volume_target`, a URL with real bulk used only by this probe.
+- And "connects but does not carry volume" was untrue when the fetch had not
+  connected: with one attempt a transport error yields zero bytes and no
+  end-of-body, so it fell through to the goodput branch. The two cases now print
+  differently, because a dead fetch and a crawling one point at different causes.
+
+### Saying which engine, and when it runs something else
+
+- The rung class was standing in for the engine, and they answer different
+  questions: "zapret" does not tell you a process is carrying the rule, `nfqws`
+  does — and that decides whether you go looking at recipes or at nodes.
+  `NodeStatus` gained `Engine`.
+- It also gained `Requested`, populated only when the brain asked for one strategy
+  and the engine runs another. That divergence was silent, and it is how the pin
+  defect above was eventually noticed.
+
+### «Требуют внимания» must mean Lotsman is out of moves
+
+- The owner sat in a working voice call while the dashboard listed Discord under
+  «Требуют внимания». `broken` (chain exhausted, the operator must act) and
+  `fails > 0` (Lotsman escalating, on its own, as designed) were being painted the
+  same. Alarming over the second is the crying-wolf a project with no alerting
+  layer least needs.
+- «Требуют внимания» is now broken-only; everything mid-escalation goes to a calm
+  «Подбирает» with the failed-probe count, so a blip is distinguishable from a
+  rule stuck there.
+
+
 ### A laptop that moved networks lost its own LAN
 
 - Home from the office, and the ThinkPad was gone from the LAN — no ssh, no
@@ -23,7 +124,13 @@ older sections carry working dates rather than release dates.
   both. A degraded subscription fetch right after a move is the ordinary case,
   and that is precisely when it declared victory. It now reports the outcome,
   and says the machine may be unreachable on its LAN until the next refresh.
-- Neither is verified on hardware yet.
+- **Both verified on hardware 2026-08-07**, in the hard case the first attempt
+  missed: the laptop moved between networks with DIFFERENT subnets (office
+  `10.0.0.0/24` ← home `192.168.1.0/24`) thirteen hours after the service
+  started and WITHOUT a restart. The excludes followed, and the periodic refresh
+  two minutes later preserved them instead of re-asserting the old set — which is
+  the half that was actually broken. Incidental proof: SSH into the laptop worked
+  throughout, and would not have under the defect.
 
 ### Adding a subscription is no longer a dead button
 
