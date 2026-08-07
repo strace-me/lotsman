@@ -73,10 +73,15 @@
         >
           <div class="sub-top">
             <span class="name">{s.name}</span>
-            <span class="days">
+            <span class="days" title={s.expirySource === 'manual' ? 'дата вписана вручную в конфигурации' : s.expirySource === 'provider' ? 'срок сообщил сам провайдер' : ''}>
               {#if s.expired}истекла
               {:else if s.daysUntilExpire >= 0}{Math.round(s.daysUntilExpire)} дней
-              {:else}бессрочно{/if}
+              {:else}срок неизвестен{/if}
+              <!-- Where the number came from, because in a month nobody remembers
+                   whether it was reported or typed, and the two are not equally
+                   trustworthy. -->
+              {#if s.expirySource === 'manual'}<span class="src">вручную</span>
+              {:else if s.expirySource === 'provider'}<span class="src">от провайдера</span>{/if}
             </span>
           </div>
           {#if s.totalBytes > 0}
