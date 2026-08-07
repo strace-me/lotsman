@@ -14,6 +14,11 @@
   const PROFILES = ['', 'general', 'voice', 'streaming', 'gaming']
 
   const csv = (a) => (a || []).join(', ')
+  // Empty means "unset", which the config spells as 0 (= use the global default).
+  function setNum(field, v) {
+    rule[field] = v === '' ? 0 : Number(v)
+    touch()
+  }
   function setCSV(field, v) {
     rule[field] = v.split(',').map((x) => x.trim()).filter(Boolean)
     touch()
@@ -60,8 +65,8 @@
 <div class="cfg-fields">
   <label>Имя<input bind:value={rule.Name} on:input={touch} placeholder="youtube" /></label>
   <label>Категория<input bind:value={rule.Category} on:input={touch} list="rf-cats" placeholder="streaming" /></label>
-  <label title="Меньше — проверяется раньше. Отрицательные впереди всех: так узкое правило успевает совпасть до широкого catch-all."
-    >Приоритет<input type="number" bind:value={rule.Priority} on:input={touch} placeholder="0" /></label>
+  <label title="Меньше — проверяется раньше. Отрицательные впереди всех: так узкое правило успевает совпасть до широкого catch-all. Это НАШ порядок в списке маршрутов, в конфиг sing-box он не попадает."
+    >Приоритет<input type="number" value={rule.Priority || ''} on:input={(e) => setNum('Priority', e.target.value)} placeholder="0" /></label>
 </div>
 
 <label class="full">Проба (URL)<input bind:value={rule.ProbeTarget} on:input={touch} placeholder="https://…/generate_204" /></label>
@@ -106,10 +111,13 @@
 <button class="fix step-add" on:click={addStep}>+ Ступень</button>
 
 <div class="cfg-fields">
+  <!-- 0 means "use the global default", and a number input showing a literal 0
+       says the opposite — that someone chose zero failures. Render unset as EMPTY
+       so the placeholder (the actual default) is what you read. -->
   <label title="Сколько неудачных проб подряд до перехода на следующую ступень. Пусто = общий порог (3)."
-    >Отказов до перехода<input type="number" bind:value={rule.EscalateAfter} on:input={touch} placeholder="3" /></label>
+    >Отказов до перехода<input type="number" min="0" value={rule.EscalateAfter || ''} on:input={(e) => setNum('EscalateAfter', e.target.value)} placeholder="3" /></label>
   <label title="Сколько успешных тихих проб подряд до возврата на ступень выше. Пусто = общий порог (5)."
-    >Успехов до возврата<input type="number" bind:value={rule.RecoverAfter} on:input={touch} placeholder="5" /></label>
+    >Успехов до возврата<input type="number" min="0" value={rule.RecoverAfter || ''} on:input={(e) => setNum('RecoverAfter', e.target.value)} placeholder="5" /></label>
   <label>Профиль<input bind:value={rule.Profile} on:input={touch} list="rf-profiles" placeholder="general" /></label>
 </div>
 <div class="cfg-fields">
