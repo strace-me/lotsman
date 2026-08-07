@@ -86,8 +86,16 @@ services:
         { Name: 'fastsub', URL: 'https://fastsub.example/sub', Format: 'auto', Tags: ['normal'], Enabled: true, Expires: '2026-09-01' },
       ],
       Services: [
-        { Name: 'youtube', Category: 'streaming', ProbeTarget: 'https://www.youtube.com/generate_204', Domains: ['youtube.com', 'googlevideo.com', 'ytimg.com'], DomainLists: ['ru-blocked'] },
-        { Name: 'discord', Category: 'messaging', ProbeTarget: 'https://discord.com/api/v9/gateway', Domains: ['discord.com', 'discord.gg', 'discordapp.com'], DomainLists: [] },
+        { Name: 'youtube', Category: 'streaming', Priority: 0, ProbeTarget: 'https://www.youtube.com/generate_204', VolumeTarget: 'https://www.youtube.com/', Domains: ['youtube.com', 'googlevideo.com', 'ytimg.com'], DomainLists: ['ru-blocked'], Sticky: true, Profile: 'streaming', Chain: [
+          { State: 'PREFERRED', Class: 'zapret', StrategyID: 'flowseal-alt12-google' },
+          { State: 'ALT_ZAPRET', Class: 'zapret', StrategyID: '' },
+          { State: 'VPN', Class: 'vpn', StrategyID: 'vpn_url_test_udp' },
+        ] },
+        { Name: 'discord', Category: 'messaging', Priority: 0, ProbeTarget: 'https://discord.com/api/v9/gateway', Domains: ['discord.com', 'discord.gg', 'discordapp.com'], DomainLists: [], IPs: ['66.22.192.0/18'], EscalateAfter: 3, Chain: [
+          { State: 'VPN', Class: 'vpn', StrategyID: 'vpn_url_test_udp' },
+          { State: 'PREFERRED', Class: 'zapret', StrategyID: 'flowseal-alt12-discord' },
+          { State: 'VPN', Class: 'vpn', StrategyID: 'vpn_url_test' },
+        ] },
       ],
       Pools: {
         vpn_url_test: { Type: 'url_test', Filter: { Caps: ['tcp'], TagsInclude: [], TagsExclude: ['emergency'], CountriesInclude: [], CountriesExclude: ['ru'] }, Warmup: false, Interval: '1m', IdleTimeout: '30m' },
