@@ -736,6 +736,18 @@ h2 {
   outline: none;
   border-color: var(--accent);
 }
+/* A placeholder must not be readable as a VALUE. There was no rule for this at
+   all, so the engine default rendered the hints at nearly full contrast and the
+   owner read «youtube.com, googlevideo.com» — the hint under «Домены» — as the
+   contents of the web-blocked rule, whose domain list is in fact empty. Colour
+   alone is not enough for that, hence the italic: the two must differ in shape,
+   not only in shade. */
+.cfg-item input::placeholder,
+.rule-body input::placeholder {
+  color: var(--ink-faint);
+  opacity: 0.75;
+  font-style: italic;
+}
 .cfg-item label, .rule-body label.chk {
   flex-direction: row;
   align-items: center;
