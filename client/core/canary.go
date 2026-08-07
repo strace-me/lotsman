@@ -2,6 +2,7 @@ package core
 
 import (
 	"context"
+	"fmt"
 	"strings"
 	"time"
 
@@ -218,4 +219,60 @@ func (c *Core) goodputOK(ctx context.Context, svc registry.Service) bool {
 		}
 	}
 	return ok
+}
+
+// carryingFloorBytes is how much a rule must have MOVED since the previous
+// observation pass to count as demonstrably working. One interval of real use
+// clears it easily (a voice call is hundreds of KB); a keepalive or a failed
+// handshake does not. Deliberately well above the few hundred bytes a stalled
+// path dribbles before the TSPU freeze bites.
+const carryingFloorBytes = 64 << 10
+
+// carryingStalledMax is the share of a rule's flows that may be frozen while it
+// still counts as carrying. A path where most flows are stuck mid-stream is the
+// freeze signature, and calling that "working" because the remaining flows still
+// move bytes is exactly the false green this whole seam exists to prevent.
+const carryingStalledMax = 0.5
+
+// CarryingReason reports that a rule is demonstrably moving real traffic right
+// now, from PASSIVE observation of the operator's own connections — the probing
+// engine's activity-oracle contract.
+//
+// This is evidence of a different kind from a probe: it is the actual service
+// being used, not a synthetic fetch of one URL over one protocol. It exists
+// because the probe was measured wrong in both directions on the same machine
+// within a day, and this is the half that costs a working session: Discord's
+// gateway URL timed out for minutes while 3.5 MB of voice flowed through the same
+// rule, and escalating on that would have torn down the call.
+//
+// It requires MOVEMENT since the last pass, not merely the existence of flows: a
+// long-lived connection whose byte counter stopped advancing looks identical to a
+// busy one in a single snapshot, and treating it as healthy would be the
+// unobserved claim this project keeps finding.
+func (c *Core) CarryingReason(service string) (string, bool) {
+	snap := c.observeSnapshot()
+	m, ok := snap.Services[service]
+	if !ok || m.Flows == 0 {
+		return "", false
+	}
+	if m.StalledRatio > carryingStalledMax {
+		return "", false // most of it is frozen; movement elsewhere does not redeem that
+	}
+	c.carriedMu.Lock()
+	if c.lastCarried == nil {
+		c.lastCarried = map[string]int64{}
+	}
+	prev, seen := c.lastCarried[service]
+	c.lastCarried[service] = m.Bytes
+	c.carriedMu.Unlock()
+	// The first observation has nothing to compare against; a cumulative total is
+	// not evidence of movement.
+	if !seen || m.Bytes <= prev {
+		return "", false
+	}
+	moved := m.Bytes - prev
+	if moved < carryingFloorBytes {
+		return "", false
+	}
+	return fmt.Sprintf("%d KiB moved across %d live flows since the last pass", moved>>10, m.Flows), true
 }

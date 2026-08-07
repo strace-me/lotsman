@@ -6,6 +6,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/strace-me/lotsman/pkg/observe"
 	"github.com/strace-me/lotsman/pkg/registry"
 )
 
@@ -165,5 +166,64 @@ func TestStallReasonOnlyWhileOnTheDesyncRung(t *testing.T) {
 	z.noteCarrying("youtube", true)
 	if _, stalled := z.StallReason("youtube"); stalled {
 		t.Error("a recipe that carries again must clear the verdict")
+	}
+}
+
+// The activity oracle exists because a probe was measured wrong in BOTH
+// directions on the same machine within a day. This is the half that costs a
+// working session: Discord's gateway URL timed out for minutes while 3.5 MB of
+// voice flowed through the same rule.
+func TestCarryingRequiresMovementNotMerelyFlows(t *testing.T) {
+	c := &Core{}
+	set := func(bytes int64, flows int, stalled float64) {
+		c.obsMu.Lock()
+		c.obsSnap = observe.Snapshot{Services: map[string]observe.ServiceMetrics{
+			"discord": {Service: "discord", Flows: flows, Bytes: bytes, StalledRatio: stalled},
+		}}
+		c.obsMu.Unlock()
+	}
+
+	// First sighting has nothing to compare against: a cumulative total is not
+	// evidence that anything moved.
+	set(5<<20, 4, 0)
+	if _, ok := c.CarryingReason("discord"); ok {
+		t.Error("the first observation must not count as movement")
+	}
+
+	// A flow that exists but whose counter stopped is indistinguishable from a
+	// busy one in a single snapshot — and it is exactly what a frozen path looks
+	// like.
+	set(5<<20, 4, 0)
+	if _, ok := c.CarryingReason("discord"); ok {
+		t.Error("an unchanged byte total is not movement")
+	}
+
+	// Real movement.
+	set(5<<20+(256<<10), 4, 0)
+	reason, ok := c.CarryingReason("discord")
+	if !ok {
+		t.Fatal("256 KiB across live flows must count as carrying")
+	}
+	if !strings.Contains(reason, "KiB") {
+		t.Errorf("the reason must carry the evidence, got %q", reason)
+	}
+
+	// Movement, but most flows frozen: that is the freeze signature, and calling
+	// it healthy because the rest still moves is the false green this prevents.
+	set(6<<20, 4, 0.9)
+	if _, ok := c.CarryingReason("discord"); ok {
+		t.Error("a mostly-frozen rule must not count as carrying")
+	}
+
+	// A trickle is not use.
+	c.lastCarried["discord"] = 6 << 20
+	set(6<<20+1024, 4, 0)
+	if _, ok := c.CarryingReason("discord"); ok {
+		t.Error("1 KiB is a keepalive, not traffic")
+	}
+
+	// Nothing observed at all.
+	if _, ok := c.CarryingReason("nosuch"); ok {
+		t.Error("an unobserved rule cannot be carrying")
 	}
 }
