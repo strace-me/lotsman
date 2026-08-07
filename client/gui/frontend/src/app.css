@@ -433,6 +433,12 @@ h2 {
   border-color: var(--red);
   color: var(--red);
 }
+/* The demo marker. It has to be impossible to miss: without it the window renders
+   invented rules, nodes and config as though it had read them off the machine. */
+.banner.amber {
+  border-color: var(--amber);
+  color: var(--amber);
+}
 .muted {
   color: var(--ink-faint);
   font-size: 13px;
