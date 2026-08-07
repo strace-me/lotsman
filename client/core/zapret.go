@@ -81,7 +81,13 @@ type zapretExec struct {
 	// a standing condition is announced once instead of on every recompose.
 	warnedPins map[string]string
 	record     func(service, recipe string, ok bool)
-	log        *slog.Logger
+	// rotate is the canary's second move: the recipe in production stopped
+	// carrying, so try the next candidates in the isolated test lane and switch
+	// production only onto one that passed. nil disables rotation (no sandbox on
+	// this platform), which is a real state and not a silent one — Core says so at
+	// startup.
+	rotate func(ctx context.Context, service, failed string)
+	log    *slog.Logger
 
 	// mu serialises the whole-config recomposition. Enable (a service entering the
 	// rung) and Reconcile (the periodic sweep that stops the engine when the rung
@@ -249,19 +255,9 @@ func (z *zapretExec) composeAndApplyLocked(ctx context.Context) (*zaptune.Plan, 
 	// so nfqws cannot read a half-written list, and a no-op when the content is
 	// identical, which matters because nfqws reloads on MTIME. Rewriting an
 	// unchanged file would make it reload for nothing.
-	changed := 0
-	for path, domains := range plan.Hostlists {
-		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
-			return nil, fmt.Errorf("zapret: hostlist dir: %w", err)
-		}
-		body := []byte(strings.Join(domains, "\n") + "\n")
-		wrote, err := aggregate.WriteIfChanged(path, body, 0o644)
-		if err != nil {
-			return nil, fmt.Errorf("zapret: write hostlist %s: %w", path, err)
-		}
-		if wrote {
-			changed++
-		}
+	changed, err := writeHostlists(plan.Hostlists)
+	if err != nil {
+		return nil, err
 	}
 	// nfqws resolves a bare payload name against ITS working directory, which is
 	// ours rather than the zapret installation's.
@@ -377,4 +373,31 @@ func (c *Core) knownRecipe(id string) bool {
 		return true
 	}
 	return c.recipeIDs[id]
+}
+
+// writeHostlists puts each composed hostlist on disk and reports how many
+// actually changed. Shared by the production apply and by the sandbox test,
+// because a candidate measured against a DIFFERENT domain set than production
+// would get is not a measurement of that candidate.
+//
+// WriteIfChanged is the router's own primitive — atomic, so nfqws cannot read a
+// half-written list, and a no-op when the content is identical, which matters
+// because nfqws reloads on MTIME and rewriting an unchanged file would make it
+// reload for nothing.
+func writeHostlists(lists map[string][]string) (int, error) {
+	changed := 0
+	for path, domains := range lists {
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			return changed, fmt.Errorf("zapret: hostlist dir: %w", err)
+		}
+		body := []byte(strings.Join(domains, "\n") + "\n")
+		wrote, err := aggregate.WriteIfChanged(path, body, 0o644)
+		if err != nil {
+			return changed, fmt.Errorf("zapret: write hostlist %s: %w", path, err)
+		}
+		if wrote {
+			changed++
+		}
+	}
+	return changed, nil
 }

@@ -39,6 +39,11 @@ type MultiProber struct {
 	http      *HTTPProber
 	timeout   time.Duration
 	dialer    *socks5Dialer // nil = probe direct from the box
+	// bound dials straight out on the physical interface (SO_BINDTODEVICE),
+	// escaping our own tun. Set only by NewMultiProberBound; nil everywhere else.
+	// It takes precedence over the plain dialer for TCP probes for the same reason
+	// the HTTP client does: a dial captured by the tun measures the tunnel.
+	bound *net.Dialer
 }
 
 // OverrideRung sets a probe spec for one service at one chain position, taking
@@ -178,9 +183,12 @@ func (m *MultiProber) probeTCP(ctx context.Context, service string, position int
 		conn net.Conn
 		err  error
 	)
-	if m.dialer != nil {
+	switch {
+	case m.bound != nil:
+		conn, err = m.bound.DialContext(ctx, "tcp", target)
+	case m.dialer != nil:
 		conn, err = m.dialer.DialContext(ctx, "tcp", target)
-	} else {
+	default:
 		conn, err = (&net.Dialer{Timeout: m.timeout}).DialContext(ctx, "tcp", target)
 	}
 	v.RTTms = int(time.Since(start).Milliseconds())
