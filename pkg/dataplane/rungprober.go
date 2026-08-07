@@ -78,8 +78,24 @@ func (r *RungProber) Probe(ctx context.Context, service string, position int) ev
 	// node the ordinary probe would follow the selector and measure that node, not
 	// the direct path this rung uses. Probe direct instead so the verdict is about
 	// the rung being tested (LOT-44).
-	if r.direct != nil && r.inactiveDirectRouted(ctx, service, position) {
-		return r.direct.Probe(ctx, service, position)
+	if r.inactiveDirectRouted(ctx, service, position) {
+		if r.direct != nil {
+			return r.direct.Probe(ctx, service, position)
+		}
+		// No direct prober — tun mode. Falling through to base here was the whole
+		// point of LOT-44 and it was left in place for exactly one configuration:
+		// the packet follows the service's route rule to the VPN node, and the
+		// desync rung is credited with the tunnel's health. Measured on the
+		// ThinkPad while YouTube worked only through the VPN: silent probes of
+		// positions 0 and 1 accumulated successes toward a recovery that would put
+		// the service back on a rung nobody had measured, and every one of those
+		// successes was also recorded in the knowledge base against the desync
+		// recipe. Refuse instead — an unmeasured rung earns no recovery and
+		// teaches the KB nothing.
+		return events.ProductionVerdict{
+			Service: service, Position: position, Unmeasured: true,
+			Err: "cannot probe an inactive direct rung in tun mode: the tun would route this through the active VPN node and credit the desync with its health",
+		}
 	}
 	return r.base.Probe(ctx, service, position)
 }

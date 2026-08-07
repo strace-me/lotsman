@@ -194,3 +194,41 @@ func TestRungProberVPNRungStillWinsOverDirectProber(t *testing.T) {
 		t.Errorf("verdict = %+v, want the delay-test RTT 42", got)
 	}
 }
+
+// In tun mode there is no direct prober, because a direct dial from this process
+// is captured by our own tun. The old fallback — delegate to base — meant the
+// packet followed the service's route rule to whatever the selector pointed at,
+// so an inactive DESYNC rung was credited with the active VPN node's health.
+// Measured on the ThinkPad: silent probes of positions 0 and 1 accumulated
+// successes toward a recovery onto a rung that did not work, while YouTube only
+// loaded through the VPN. Refusing is the only honest answer available here.
+func TestInactiveDirectRungIsUnmeasuredWithoutADirectProber(t *testing.T) {
+	base := &fakeBase{verdict: events.ProductionVerdict{OK: true, RTTms: 26}}
+	// Selector sits on a VPN node, so rung 1 (direct) is INACTIVE.
+	p := NewRungProber(base, clashStub(t, "vpn_pool", 42, false), rungReg(), "", 0)
+
+	got := p.Probe(context.Background(), "web", 1)
+	if base.called {
+		t.Error("the ordinary path probe measures the VPN node, not the direct rung — it must not be consulted")
+	}
+	if !got.Unmeasured {
+		t.Fatal("an unreachable rung must be reported as unmeasured, not judged")
+	}
+	if got.OK {
+		t.Error("unmeasured must not read as a success: that is the false recovery this prevents")
+	}
+	if got.Err == "" {
+		t.Error("a component that declines must say why")
+	}
+
+	// With a direct prober wired (proxy mode) the rung IS measurable, and the
+	// refusal must not survive into a configuration that can answer.
+	direct := &fakeBase{verdict: events.ProductionVerdict{OK: true, RTTms: 11}}
+	p.SetDirectProber(direct)
+	if got := p.Probe(context.Background(), "web", 1); got.Unmeasured || !got.OK {
+		t.Errorf("with a direct prober the rung is measurable, got %+v", got)
+	}
+	if !direct.called {
+		t.Error("the direct prober must be the one consulted")
+	}
+}
