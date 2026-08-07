@@ -40,28 +40,30 @@ today they compounded into all eleven rules on VPN within an hour.
   after, so a rule the brain escalated mid-measurement would still have had a
   candidate applied. Both sides are checked now.
 
-### YouTube ran a third of the recipe it was pinned to
+### A bundle that spans two domain sets degenerates when a rule has one
 
-- **`flowseal-alt12-google`'s second profile could never match.** nfqws takes the
+- **`flowseal-alt12-google`'s second profile can never match.** nfqws takes the
   first profile whose filter fits and stops. That bundle is tcp/443 hostfakesplit,
   then tcp/80,443 `fake,multisplit seqovl=664`, then udp/443 — and its author
-  scoped the first two to DIFFERENT hostlists, Google domains one way and
-  everything else the other. Our model has one domain list per rule and puts it in
-  every block, so both carried the same domains, the first claimed 443, and the
-  multisplit behind it could only ever see port 80. YouTube does not use port 80.
-- So YouTube ran **hostfakesplit alone**, all day, under the name of a bundle
-  whose point was the multisplit — the same `fake,multisplit seqovl=664` this
-  catalogue's own notes call the one that "fixes it completely", and which x,
-  instagram and gaming-epic were running successfully on the same machine at the
-  same moment. The knowledge base scored the bundle for a third of itself. Found in
-  the argv history nfqws leaves behind on every exit, not in the code.
-- The recipe was transcribed correctly. **It is our model around it that is
-  narrower than its author's** — which is principle 6 one step further, and the
-  same reasoning that already keeps ALT12's `--ipset` profiles out of the
-  catalogue. `zapret.ShadowedBlock` refuses such a recipe and names the block.
-  Port-set exact and `--filter-l7`-aware, so the Discord bundle is untouched;
-  refusing that would have cost the voice call this project spent a day on. **One
-  recipe of seventy is refused, and it is the one that was pinned.**
+  scoped the first two to DIFFERENT hostlists. Our model has one domain list per
+  rule and puts it in every block, so both carry the same domains, the first
+  claims 443, and the second can only ever see port 80. `zapret.ShadowedBlock`
+  refuses such a recipe and names the block; port-set exact and
+  `--filter-l7`-aware, so the Discord bundle is untouched. One recipe of seventy.
+- **CORRECTION to what this was first written up as.** The first version said
+  YouTube "ran a third of the recipe" and implied the missing multisplit was why
+  it would not load. That was wrong, and reading the actual upstream preset
+  settled it: `list-google.txt` contains youtube.com, googlevideo.com, ytimg.com,
+  youtu.be, youtubei.googleapis.com and jnn-pa.googleapis.com — the owner's whole
+  rule. **In the real ALT12, YouTube gets hostfakesplit on 443 too.** The
+  transcription was faithful for this rule; the multisplit was never meant for it.
+- **The finding underneath is bigger than the one it replaced: ALT12 as published
+  does not beat the DPI in front of this owner, and the profile written for
+  everything ELSE does.** Measured by hand — `fake,multisplit seqovl=664` with the
+  ru pattern served YouTube 866-872 KB in 0.26-0.37s while instagram.com on the
+  same path in the same minute got an RST at 13ms. A pin faithful to upstream was
+  still the wrong strategy here. The catalogue is a starting point, not an
+  authority, and only the measurement decides.
 
 ### A silent probe of an inactive desync rung was measuring the VPN
 
