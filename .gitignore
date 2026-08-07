@@ -34,3 +34,21 @@ cover.out
 .claude/skills/
 .agents/
 /dist/
+
+# The owner's own working material lives in this directory and must never be
+# committed: the repo is headed for a GPLv3 release and git history survives a
+# `git rm`. On 2026-08-07 a bare `git add -A` swept 33 of these files — BMC
+# screenshots, FRU dumps, a hardware certification protocol — into a pushed
+# commit, and the history had to be rewritten to get them out. Second time in one
+# day; the first is recorded in the CHANGELOG against cfb2154.
+biosbmctests/
+A-650*
+PRERELEASE-AUDIT-*.md
+Протокол испытаний*
+private/
+skills-lock.json
+
+# Build outputs that land in the repo root
+/desktop
+/desktop.exe
+/lotsmand
