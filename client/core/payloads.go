@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"github.com/strace-me/lotsman/pkg/strategycat"
+	"github.com/strace-me/lotsman/pkg/zapret"
 )
 
 // Several desync recipes fire a crafted packet read from a payload file, named in
@@ -44,6 +45,16 @@ func usablePayloadRecipes(recipes []strategycat.Recipe, dir string, log *slog.Lo
 	out := make([]strategycat.Recipe, 0, len(recipes))
 	var dropped []string
 	for _, r := range recipes {
+		// A multi-block recipe whose later profile an earlier one already claims does
+		// not do what its author wrote: nfqws stops at the first match, so the block
+		// behind it never runs and the knowledge base scores the bundle for a fraction
+		// of itself. Refuse it whole and name the block, rather than ship a bundle
+		// under its own name doing a third of the work.
+		if i, why, bad := zapret.ShadowedBlock(r.AllBlocks()); bad {
+			log.Warn("desync recipe refused: one of its profiles can never match",
+				"recipe", r.ID, "block", i+1, "why", why)
+			continue
+		}
 		missing := false
 		for _, f := range payloadRefs(r) {
 			if _, err := os.Stat(filepath.Join(dir, filepath.Base(f))); err != nil {

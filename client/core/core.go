@@ -175,13 +175,13 @@ type Core struct {
 	pendingNet   string        // a candidate new network, awaiting debounce confirmation
 	pendingCount int           // consecutive polls that saw pendingNet
 
-	metrics    *metrics.Collector // populated in Start; nil until then
+	metrics *metrics.Collector // populated in Start; nil until then
 	// probed is when each rule was last actually probed (unix ms), written by
 	// ObserveProbe — the engine's own callback — so the UI's "recheck" feedback
 	// comes from the probe having run, not from the request having been sent.
-	probedMu sync.Mutex
-	probed   map[string]int64
-	metricsSrv *http.Server       // non-nil only when MetricsAddr is served
+	probedMu   sync.Mutex
+	probed     map[string]int64
+	metricsSrv *http.Server // non-nil only when MetricsAddr is served
 	// lastCarried is the previous observation pass's byte total per rule, so the
 	// activity oracle can ask whether traffic MOVED rather than whether a
 	// connection merely exists. A cumulative total cannot answer that.
