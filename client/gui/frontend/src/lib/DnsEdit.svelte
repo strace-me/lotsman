@@ -7,7 +7,7 @@
   export let touch = () => {}
 
   // The catalog + valid transports are package-private in pkg/config, so mirror them
-  // here the way ServicesEdit mirrors its category list.
+  // here the way RuleForm mirrors its category list.
   const providers = ['cloudflare', 'quad9', 'google', 'adguard', 'mullvad']
   const methods = ['https', 'tls', 'quic', 'h3', 'tcp', 'udp']
   const manualTypes = ['local', 'udp', 'tcp', 'tls', 'https', 'quic', 'h3']

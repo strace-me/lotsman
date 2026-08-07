@@ -2,7 +2,6 @@
   import { onMount } from 'svelte'
   import { mockConfig } from './mock.js'
   import SubsEdit from './SubsEdit.svelte'
-  import ServicesEdit from './ServicesEdit.svelte'
   import DnsEdit from './DnsEdit.svelte'
   import EnginesEdit from './EnginesEdit.svelte'
   import HostlistsEdit from './HostlistsEdit.svelte'
@@ -32,7 +31,6 @@
 
   const sections = [
     ['subs', 'Подписки'],
-    ['services', 'Правила'],
     ['pools', 'Пулы'],
     ['hostlists', 'Списки'],
     ['dns', 'DNS'],
@@ -125,8 +123,6 @@
       </div>
       {#if section === 'subs'}
         <SubsEdit {doc} {touch} />
-      {:else if section === 'services'}
-        <ServicesEdit {doc} {touch} />
       {:else if section === 'pools'}
         <PoolsEdit {doc} {touch} />
       {:else if section === 'hostlists'}

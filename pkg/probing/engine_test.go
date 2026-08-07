@@ -218,3 +218,41 @@ func TestSilentRecoveryRotatesLowerPosition(t *testing.T) {
 		t.Errorf("ProbeObserver.ObserveProbe was never called")
 	}
 }
+
+// The canary's verdict is about the rule's DESYNC, so it must reach a SILENT
+// probe of a desync rung too. Applying it only to the active probe created a
+// loop: active fails on the measurement, the silent probe of the rung below
+// passes on its own, the brain recovers, active fails again — and every
+// transition resets the failure counter, so the rule ping-ponged forever with
+// fails=0 while the verdict stayed green over a service carrying nothing.
+func TestStallOracleAlsoFailsASilentProbeOfADesyncRung(t *testing.T) {
+	bus := events.NewBus()
+	reg := &registry.Registry{Services: map[string]registry.Service{
+		"youtube": {Name: "youtube", ProbeTarget: "https://x", Chain: []registry.ChainStep{
+			{Position: 0, State: registry.StatePreferred, StrategyClass: strategy.ClassZapret},
+			{Position: 1, State: registry.StateAltZapret, StrategyClass: strategy.ClassZapret},
+			{Position: 2, State: registry.StateVPN, StrategyClass: strategy.ClassVPN, StrategyID: "vpn_url_test"},
+		}},
+	}}
+	e := New(bus, &fakeProber{ok: true, rtt: 40}, fixedPositioner(1), reg, kb.New(), nil, nil, 5*time.Millisecond, discardLog())
+	e.SetStallOracle(func(string) (string, bool) { return "carries nothing", true })
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go e.Run(ctx)
+
+	// Collect both the active probe (position 1) and the silent one (position 0).
+	seen := map[int]bool{}
+	deadline := time.After(2 * time.Second)
+	for len(seen) < 2 {
+		select {
+		case v := <-bus.Verdicts:
+			if v.OK {
+				t.Fatalf("a probe of a desync rung must fail while the canary says it carries nothing; got OK at position %d", v.Position)
+			}
+			seen[v.Position] = true
+		case <-deadline:
+			t.Fatalf("did not see both probes; saw %v", seen)
+		}
+	}
+}

@@ -15,6 +15,7 @@ import (
 	"github.com/strace-me/lotsman/pkg/faillog"
 	"github.com/strace-me/lotsman/pkg/kb"
 	"github.com/strace-me/lotsman/pkg/registry"
+	"github.com/strace-me/lotsman/pkg/strategy"
 )
 
 // Positioner reports a service's current chain position. Brain implements it.
@@ -163,7 +164,15 @@ func (e *Engine) runProbe(ctx context.Context, service string, position int, kin
 	// from the fetch. It outranks the activity veto below: a measured "carries
 	// nothing" must not be undone by "some traffic is moving".
 	byMeasurement := false
-	if kind == "active" && v.OK && e.stall != nil {
+	// The verdict is about this rule's DESYNC, so it must apply to a silent probe of
+	// a desync rung too. Applying it only to the active probe created a loop: the
+	// active probe failed on the measurement while the silent probe of the rung
+	// below passed on its own, the brain recovered, the active probe failed again —
+	// and every transition resets the failure counter, so the rule ping-ponged
+	// forever with fails=0 and the verdict stayed green over a service that was
+	// carrying nothing. Measured on the ThinkPad: 54 such failures in six minutes
+	// while YouTube did not load and the app said 11/11.
+	if v.OK && e.stall != nil && (kind == "active" || e.isZapretRung(service, position)) {
 		if reason, stalled := e.stall(service); stalled {
 			v.OK, v.Err, byMeasurement = false, reason, true
 		}
@@ -206,6 +215,17 @@ func (e *Engine) runProbe(ctx context.Context, service string, position int, kin
 	case e.bus.Verdicts <- v:
 	case <-ctx.Done():
 	}
+}
+
+// isZapretRung reports whether the given chain position is a desync rung, so the
+// canary's verdict about the desync reaches every probe of that path rather than
+// only the active one.
+func (e *Engine) isZapretRung(service string, position int) bool {
+	svc, ok := e.reg.Services[service]
+	if !ok || position < 0 || position >= len(svc.Chain) {
+		return false
+	}
+	return svc.Chain[position].StrategyClass == strategy.ClassZapret
 }
 
 func round2(f float64) float64 { return float64(int(f*100+0.5)) / 100 }
