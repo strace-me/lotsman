@@ -125,6 +125,17 @@ type Plan struct {
 	// only when the content actually changes is what makes membership changes
 	// restart-free — nfqws re-reads a hostlist when its mtime moves.
 	Hostlists map[string][]string
+	// PinsIgnored names the services whose pinned recipe was not among the usable
+	// candidates, so the caller can say so out loud. A pin that quietly does
+	// nothing turns every experiment run under it into a measurement of something
+	// else.
+	PinsIgnored []PinIgnored
+}
+
+// PinIgnored is one pin the composer could not honour.
+type PinIgnored struct {
+	Service string
+	Want    string
 }
 
 // Compose builds the nfqws config for the services CURRENTLY on a zapret rung
@@ -138,7 +149,29 @@ type Plan struct {
 // hostlistDir, when non-empty, scopes each block by a per-service hostlist FILE
 // under that directory instead of inlining its domains into the arguments. The
 // files themselves are returned in Plan.Hostlists for the caller to write.
+// Pins name the recipe the BRAIN asked for, per service — a `strategy_id` on the
+// chain step the service currently occupies. Honouring it is the difference
+// between a pin and a suggestion: without this the composer ranked candidates by
+// the knowledge base and quietly ran something else, so an operator who pinned
+// ALT12 was testing whatever the picker preferred that minute. nil = no pins.
+type Pins map[string]string
+
+// ComposePinned is Compose with the brain's per-service strategy pins honoured.
+// A pin is used when it names a recipe that is actually among the renderable
+// candidates for that service; when it does not, the pick falls back to the
+// picker and the caller is told which pin could not be honoured, because a pin
+// that silently does nothing is worse than no pin at all.
+func ComposePinned(services []registry.Service, recipes []strategycat.Recipe, pick Picker, resolve Resolver, hostlistDir string, pins Pins) Plan {
+	return compose(services, recipes, pick, resolve, hostlistDir, pins)
+}
+
+// Compose composes with no pins — the router's path, where the executor honours
+// a chain strategy_id by switching scripts rather than by choosing a recipe.
 func Compose(services []registry.Service, recipes []strategycat.Recipe, pick Picker, resolve Resolver, hostlistDir string) Plan {
+	return compose(services, recipes, pick, resolve, hostlistDir, nil)
+}
+
+func compose(services []registry.Service, recipes []strategycat.Recipe, pick Picker, resolve Resolver, hostlistDir string, pins Pins) Plan {
 	plan := Plan{Chosen: map[string]string{}, Hostlists: map[string][]string{}}
 	var blocks []nfqwsgen.Block
 	for _, svc := range services {
@@ -176,7 +209,26 @@ func Compose(services []registry.Service, recipes []strategycat.Recipe, pick Pic
 			plan.Uncovered = append(plan.Uncovered, svc.Name)
 			continue
 		}
-		r, ok := pick(svc, cands)
+		// A pin wins over the ranking when it names one of the renderable
+		// candidates. When it does not, say which pin was ignored and why — an
+		// operator who pinned a recipe and silently got another one is testing
+		// something other than what they think.
+		var r strategycat.Recipe
+		var ok bool
+		if want := pins[svc.Name]; want != "" {
+			for _, c := range cands {
+				if c.ID == want {
+					r, ok = c, true
+					break
+				}
+			}
+			if !ok {
+				plan.PinsIgnored = append(plan.PinsIgnored, PinIgnored{Service: svc.Name, Want: want})
+			}
+		}
+		if !ok {
+			r, ok = pick(svc, cands)
+		}
 		if !ok {
 			plan.Uncovered = append(plan.Uncovered, svc.Name)
 			continue

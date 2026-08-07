@@ -68,8 +68,11 @@ type zapretExec struct {
 	// the probe engine asks on its goroutine while a judge writes on another.
 	carryMu     sync.Mutex
 	notCarrying map[string]bool
-	record      func(service, recipe string, ok bool)
-	log         *slog.Logger
+	// pinned is the brain's resolved strategy per service — a chain step's
+	// strategy_id. Guarded by z.mu, which Enable and the recompose both hold.
+	pinned map[string]string
+	record func(service, recipe string, ok bool)
+	log    *slog.Logger
 
 	// mu serialises the whole-config recomposition. Enable (a service entering the
 	// rung) and Reconcile (the periodic sweep that stops the engine when the rung
@@ -107,9 +110,23 @@ func (z *zapretExec) setChosen(chosen map[string]string) {
 }
 
 // Enable routes the service direct and re-applies the composed desync strategy.
-func (z *zapretExec) Enable(ctx context.Context, service, _ string) error {
+func (z *zapretExec) Enable(ctx context.Context, service, strategyID string) error {
 	z.mu.Lock()
 	defer z.mu.Unlock()
+	// The brain's resolved strategy for this rung. It used to be discarded — the
+	// parameter was literally named `_` — so a `strategy_id` on a zapret chain step
+	// pinned nothing at all: the composer ranked candidates by the knowledge base
+	// and ran whatever it preferred. An operator who pinned ALT12 was measuring
+	// something else, which is how a day of recipe experiments nearly went into the
+	// record under the wrong names.
+	if z.pinned == nil {
+		z.pinned = map[string]string{}
+	}
+	if strategyID != "" {
+		z.pinned[service] = strategyID
+	} else {
+		delete(z.pinned, service)
+	}
 	// Route direct FIRST: the service may be sitting on a VPN pool from a previous
 	// chain step, and desyncing traffic that never leaves through the local stack
 	// does nothing. SetSelector is idempotent, so re-entering the rung is cheap.
@@ -162,7 +179,11 @@ func (z *zapretExec) composeAndApplyLocked(ctx context.Context) (*zaptune.Plan, 
 		z.setChosen(nil)
 		return nil, nil
 	}
-	plan := zaptune.Compose(active, z.recipes, z.pick, z.resolve, z.hostlists)
+	plan := zaptune.ComposePinned(active, z.recipes, z.pick, z.resolve, z.hostlists, z.pinned)
+	for _, p := range plan.PinsIgnored {
+		z.log.Warn("zapret: the pinned strategy is not usable for this service, picking instead — check the id and that the recipe renders here",
+			"service", p.Service, "pinned", p.Want)
+	}
 	if !plan.Covered {
 		// Composing a PARTIAL strategy is worse than composing none: a service whose
 		// rule_set domains could not be resolved would be desynced for only its

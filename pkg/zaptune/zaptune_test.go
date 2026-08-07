@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	"github.com/strace-me/lotsman/pkg/registry"
+	"github.com/strace-me/lotsman/pkg/strategy"
 	"github.com/strace-me/lotsman/pkg/strategycat"
 )
 
@@ -123,5 +124,57 @@ func TestPortAndL7ScopeCountsAsScoped(t *testing.T) {
 	}}
 	if !recipeRenderable(domain) {
 		t.Error("domain-scoped recipes must still render")
+	}
+}
+
+// A strategy_id on a zapret chain step is a PIN, not a suggestion. Until the
+// composer honoured it the executor discarded the brain's choice entirely — the
+// parameter was named `_` — so an operator who pinned a recipe was measuring
+// whatever the knowledge base preferred that minute.
+func TestComposeHonoursAPin(t *testing.T) {
+	svc := registry.Service{
+		Name: "discord", ProbeTarget: "https://discord.com/api/v9/gateway",
+		Domains: []string{"discord.com"},
+		Chain:   []registry.ChainStep{{StrategyClass: strategy.ClassZapret}},
+	}
+	wanted := strategycat.Recipe{ID: "pinned-one", TargetClass: strategycat.ClassGeneralTLS, NfqwsArgs: []string{
+		"--filter-tcp=80,443", "--hostlist-domains={{DOMAINS}}", "--dpi-desync=fake",
+	}}
+	other := strategycat.Recipe{ID: "picker-favourite", TargetClass: strategycat.ClassGeneralTLS, NfqwsArgs: []string{
+		"--filter-tcp=80,443", "--hostlist-domains={{DOMAINS}}", "--dpi-desync=multisplit",
+	}}
+	// A picker that always prefers the OTHER recipe, so only the pin can win.
+	pick := func(_ registry.Service, cands []strategycat.Recipe) (strategycat.Recipe, bool) {
+		for _, c := range cands {
+			if c.ID == "picker-favourite" {
+				return c, true
+			}
+		}
+		return cands[0], true
+	}
+	recipes := []strategycat.Recipe{other, wanted}
+
+	plan := ComposePinned([]registry.Service{svc}, recipes, pick, nil, "", Pins{"discord": "pinned-one"})
+	if got := plan.Chosen["discord"]; got != "pinned-one" {
+		t.Errorf("chosen = %q, want the pinned recipe", got)
+	}
+	if len(plan.PinsIgnored) != 0 {
+		t.Errorf("an honoured pin must not be reported ignored: %+v", plan.PinsIgnored)
+	}
+
+	// Unpinned, the picker decides — the pin must not become a permanent override.
+	plan = ComposePinned([]registry.Service{svc}, recipes, pick, nil, "", nil)
+	if got := plan.Chosen["discord"]; got != "picker-favourite" {
+		t.Errorf("without a pin the picker must decide, got %q", got)
+	}
+
+	// A pin naming something unusable falls back AND says so. Silence here would
+	// leave an experiment running under a name that is not what is loaded.
+	plan = ComposePinned([]registry.Service{svc}, recipes, pick, nil, "", Pins{"discord": "no-such-recipe"})
+	if got := plan.Chosen["discord"]; got != "picker-favourite" {
+		t.Errorf("an unusable pin must fall back to the picker, got %q", got)
+	}
+	if len(plan.PinsIgnored) != 1 || plan.PinsIgnored[0].Want != "no-such-recipe" {
+		t.Errorf("an ignored pin must be reported, got %+v", plan.PinsIgnored)
 	}
 }
