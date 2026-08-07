@@ -33,11 +33,15 @@ import (
 
 // Engine owns one nfqws instance and its nft table.
 type Engine struct {
-	bin     string
-	inst    zapret.Instance
-	nftOpts zapret.NftOptions
-	fakeDir string // working dir for nfqws so its bare fake-payload filenames resolve; "" = inherit ours
-	log     *slog.Logger
+	bin  string
+	inst zapret.Instance
+	// baseCapture is the spec the engine was built with — the floor the derived
+	// capture is unioned onto, so recomposition can widen the queue but never
+	// narrow it below the ports the deployment always wants carried.
+	baseCapture zapret.Capture
+	nftOpts     zapret.NftOptions
+	fakeDir     string // working dir for nfqws so its bare fake-payload filenames resolve; "" = inherit ours
+	log         *slog.Logger
 
 	mu       sync.Mutex
 	cmd      *exec.Cmd
@@ -66,7 +70,7 @@ func New(bin string, inst zapret.Instance, nftOpts zapret.NftOptions, fakeDir st
 	if bin == "" {
 		bin = "nfqws"
 	}
-	return &Engine{bin: bin, inst: inst, nftOpts: nftOpts, fakeDir: fakeDir, log: log}
+	return &Engine{bin: bin, inst: inst, baseCapture: inst.Capture, nftOpts: nftOpts, fakeDir: fakeDir, log: log}
 }
 
 // Apply installs the nft rules (idempotent) and (re)starts nfqws with args — the
@@ -90,7 +94,11 @@ func (e *Engine) Apply(ctx context.Context, args []string) (restarted bool, err 
 	if e.cmd != nil && slices.Equal(e.lastArgs, args) {
 		return false, nil // already running this exact strategy — no restart
 	}
-	if err := e.installNftLocked(ctx); err != nil {
+	// The queue must carry exactly what the strategy filters on. Deriving it from
+	// the argv rather than holding a second literal is what stops a profile from
+	// being born dead: Discord voice filters udp 50000-50100, and against a
+	// hardcoded capture of udp/443 it matched nothing and said nothing.
+	if err := e.installNftLocked(ctx, args); err != nil {
 		return false, err
 	}
 	// Remember what was working before letting go of it. nfqws binds one NFQUEUE,
@@ -216,11 +224,27 @@ func (e *Engine) Alive() bool {
 	return e.cmd != nil
 }
 
-// installNftLocked (re)installs this instance's nft table. Caller holds e.mu.
-func (e *Engine) installNftLocked(ctx context.Context) error {
-	if e.armed {
+// installNftLocked (re)installs this instance's nft table so it carries the ports
+// the given strategy filters on. Caller holds e.mu.
+//
+// It re-installs when the required port set CHANGES, not just once: the strategy
+// is recomposed whenever services move between rungs, and a new recipe may filter
+// ports the current table does not queue. Leaving the table as installed would
+// leave that profile receiving nothing — the silent half of the failure this
+// derivation exists to remove.
+func (e *Engine) installNftLocked(ctx context.Context, args []string) error {
+	// The instance's own spec is a FLOOR, not the whole answer: it keeps the
+	// ordinary web ports queued even at a moment when no composed profile happens
+	// to name them.
+	want := e.baseCapture.Union(zapret.CaptureFromArgs(args))
+	if e.armed && e.inst.Capture.Equal(want) {
 		return nil
 	}
+	if e.armed && !e.inst.Capture.Equal(want) {
+		e.log.Info("nfqws: capture changed, reinstalling the queue",
+			"tcp", want.TCP, "udp", want.UDP)
+	}
+	e.inst.Capture = want
 	rules := zapret.GenerateNft([]zapret.Instance{e.inst}, e.nftOpts)
 	// Drop a stale table from a previous run first; absence is fine.
 	_ = run(ctx, "nft", "delete", "table", e.nftOpts.Table)
@@ -230,7 +254,8 @@ func (e *Engine) installNftLocked(ctx context.Context) error {
 		return fmt.Errorf("nfqws: install nft rules: %w: %s", err, out)
 	}
 	e.armed = true
-	e.log.Info("nfqws nft rules installed", "table", e.nftOpts.Table, "wan", e.nftOpts.WAN, "qnum", e.inst.QNum)
+	e.log.Info("nfqws nft rules installed", "table", e.nftOpts.Table, "wan", e.nftOpts.WAN,
+		"qnum", e.inst.QNum, "tcp", e.inst.Capture.TCP, "udp", e.inst.Capture.UDP)
 	return nil
 }
 

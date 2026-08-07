@@ -1007,3 +1007,44 @@ recipes:
         - "--dpi-desync-repeats=11"
         - "--dpi-desync-fake-quic=quic_initial_www_google_com.bin"
     notes: "ALT12 without the Google-specific profile: the general TCP treatment plus QUIC, for services that are not Google properties"
+  # Discord needs THREE profiles, and until recipes could carry more than one it
+  # could only ever have had the TCP half. Voice media is raw UDP to whichever
+  # cloud Discord parked the voice server on today (measured: Cloudflare
+  # 162.159.128.0/19 for *.discord.media, Google Cloud 35.217.x for the media
+  # port) — it carries no SNI, so it cannot be selected by domain at all, only by
+  # port range plus the layer-7 protocol. That is exactly how Flowseal does it.
+  - id: "flowseal-alt12-discord"
+    provenance: "Flowseal/zapret-discord-youtube 1.10.0, ALT12 (voice + tcp profiles)"
+    target_class: "discord_tcp"
+    protocol: "tcp"
+    techniques: ["fake", "multisplit", "seqovl", "fooling:ts", "repeats:8", "fake-tls", "l7-filter"]
+    blocks:
+      # Voice first: it is the narrowest filter and the only one that can match UDP.
+      - - "--filter-udp=19294-19344,50000-50100"
+        - "--filter-l7=discord,stun"
+        - "--dpi-desync=fake"
+        - "--dpi-desync-fake-discord=stun.bin"
+        - "--dpi-desync-fake-stun=stun.bin"
+        - "--dpi-desync-repeats=3"
+      # discord.media rides the alternate TLS ports.
+      - - "--filter-tcp=2053,2083,2087,2096,8443"
+        - "--hostlist-domains={{DOMAINS}}"
+        - "--dpi-desync=fake,multisplit"
+        - "--dpi-desync-split-seqovl=681"
+        - "--dpi-desync-split-pos=1"
+        - "--dpi-desync-fooling=ts"
+        - "--dpi-desync-repeats=8"
+        - "--dpi-desync-split-seqovl-pattern=tls_clienthello_www_google_com.bin"
+        - "--dpi-desync-fake-tls=tls_clienthello_www_google_com.bin"
+      # Everything else Discord does over ordinary TLS.
+      - - "--filter-tcp=80,443"
+        - "--hostlist-domains={{DOMAINS}}"
+        - "--dpi-desync=fake,multisplit"
+        - "--dpi-desync-split-seqovl=664"
+        - "--dpi-desync-split-pos=1"
+        - "--dpi-desync-fooling=ts"
+        - "--dpi-desync-repeats=8"
+        - "--dpi-desync-split-seqovl-pattern=tls_clienthello_max_ru.bin"
+        - "--dpi-desync-fake-tls=stun.bin"
+        - "--dpi-desync-fake-tls=tls_clienthello_max_ru.bin"
+    notes: "ALT12's Discord treatment for one service: voice UDP by port+L7 (no SNI exists for it), discord.media on the alternate ports, and ordinary TLS behind them. Uses stun.bin where ALT12 1.10.0 uses ACTIVE_DISCORD_UDP.bin, which zapret 72.12 does not ship."

@@ -82,3 +82,46 @@ func TestPromoteToRecipeRejects(t *testing.T) {
 		t.Error("no args must not promote")
 	}
 }
+
+// Raw UDP carries no SNI, so voice media cannot be selected by domain at all.
+// Requiring {{DOMAINS}} therefore refused the one recipe that fixes Discord voice
+// — Flowseal's own ALT12 block — while admitting far broader domain-scoped rules.
+func TestPortAndL7ScopeCountsAsScoped(t *testing.T) {
+	voice := strategycat.Recipe{
+		ID: "flowseal-discord-stun",
+		NfqwsArgs: []string{
+			"--filter-udp=19294-19344,50000-50100",
+			"--filter-l7=discord,stun",
+			"--dpi-desync=fake",
+			"--dpi-desync-repeats=6",
+		},
+	}
+	if !recipeRenderable(voice) {
+		t.Error("a 152-port profile with an L7 filter is a targeted rule and must render")
+	}
+
+	// The bound is what keeps the old protection: a games-class profile spanning
+	// most of the port space would desync traffic nobody asked about.
+	global := strategycat.Recipe{ID: "global", NfqwsArgs: []string{
+		"--filter-udp=1024-65535", "--filter-l7=stun", "--dpi-desync=fake",
+	}}
+	if recipeRenderable(global) {
+		t.Error("1024-65535 is not a scope, it is the internet")
+	}
+
+	// Ports without a protocol check are not enough either.
+	noL7 := strategycat.Recipe{ID: "no-l7", NfqwsArgs: []string{
+		"--filter-udp=50000-50100", "--dpi-desync=fake",
+	}}
+	if recipeRenderable(noL7) {
+		t.Error("a port range with no --filter-l7 must still be refused")
+	}
+
+	// And the domain path is untouched.
+	domain := strategycat.Recipe{ID: "d", NfqwsArgs: []string{
+		"--filter-tcp=80,443", "--hostlist-domains={{DOMAINS}}", "--dpi-desync=fake",
+	}}
+	if !recipeRenderable(domain) {
+		t.Error("domain-scoped recipes must still render")
+	}
+}

@@ -23,6 +23,7 @@ import (
 	"github.com/strace-me/lotsman/pkg/registry"
 	"github.com/strace-me/lotsman/pkg/strategy"
 	"github.com/strace-me/lotsman/pkg/strategycat"
+	"github.com/strace-me/lotsman/pkg/zapret"
 )
 
 // classesFor maps a service to the recipe target-classes worth trying for it,
@@ -211,7 +212,41 @@ func recipeRenderable(r strategycat.Recipe) bool {
 			return false // an unfillable placeholder remains
 		}
 	}
-	return hasDomains
+	return hasDomains || narrowlyPortScoped(r)
+}
+
+// maxDomainlessPorts bounds how much traffic a recipe with no host selector may
+// claim. Discord's voice profile is 152 ports (19294-19344 plus 50000-50100) and
+// is a targeted rule; a games-class STUN profile spanning 1024-65535 is most of
+// the internet and would desync traffic nobody asked about.
+const maxDomainlessPorts = 4096
+
+// narrowlyPortScoped reports whether a recipe without {{DOMAINS}} is nevertheless
+// properly scoped — by a small port range, and by the layer-7 protocol.
+//
+// Requiring a host selector was too strong, and it cost the feature it was
+// protecting: raw UDP carries no SNI, so voice media CANNOT be selected by domain
+// at all, and the one recipe that fixes Discord voice (flowseal-discord-stun,
+// straight out of Flowseal's ALT12) was refused as "global" while being narrower
+// than most domain-scoped rules. Ports plus --filter-l7 is a real scope; it is
+// simply not a domain one.
+//
+// Both conditions are required. The port bound alone would admit a wide range with
+// no protocol check, and --filter-l7 alone would admit it across every port.
+func narrowlyPortScoped(r strategycat.Recipe) bool {
+	hasL7 := false
+	for _, a := range r.AllArgs() {
+		if strings.HasPrefix(a, "--filter-l7=") {
+			hasL7 = true
+			break
+		}
+	}
+	if !hasL7 {
+		return false
+	}
+	scope := zapret.CaptureFromArgs(r.AllArgs())
+	n := scope.PortCount()
+	return n > 0 && n <= maxDomainlessPorts
 }
 
 // FirstPicker is the 10b seed picker: take the first eligible candidate (catalog
