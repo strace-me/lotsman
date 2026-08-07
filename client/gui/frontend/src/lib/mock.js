@@ -34,9 +34,9 @@ export function mock() {
       ],
       services: [
         { service: 'youtube', state: 'VPN', node: 'nl-hy2-01', rung: 0, rungClass: 'vpn', strategy: 'vpn_pool', fails: 0, broken: false },
-        { service: 'discord', state: 'PREFERRED', node: '', rung: 0, rungClass: 'zapret', strategy: 'flowseal-syndata', fails: 0, broken: false },
+        { service: 'discord', state: 'PREFERRED', node: '', rung: 1, rungClass: 'zapret', engine: 'nfqws', strategy: 'flowseal-alt12-discord', fails: 2, broken: false },
         { service: 'ai', state: 'BROKEN', node: '', rung: 3, rungClass: 'emergency', strategy: 'emergency_pool', stalledRatio: 0.91, fails: 6, broken: true },
-        { service: 'web-blocked', state: 'VPN', node: 'de-vless-02', rung: 0, rungClass: 'vpn', strategy: 'vpn_pool', fails: 2, broken: false },
+        { service: 'web-blocked', state: 'VPN', node: 'de-vless-02', rung: 0, rungClass: 'vpn', engine: 'sing-box', strategy: 'vpn_pool', fails: 2, broken: false },
         { service: 'social', state: 'VPN', node: 'nl-hy2-01', rung: 0, rungClass: 'vpn', strategy: 'vpn_pool', fails: 0, broken: false },
         { service: 'gaming-epic', state: 'PREFERRED', node: '', rung: 0, rungClass: 'zapret', strategy: 'alt-zapret', fails: 0, broken: false },
         { service: 'dev', state: 'VPN', node: 'nl-hy2-01', rung: 0, rungClass: 'vpn', strategy: 'vpn_pool', fails: 0, broken: false },
