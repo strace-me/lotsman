@@ -51,6 +51,24 @@ type Declaration struct {
 	Format  Format   `yaml:"format"`
 	Tags    []string `yaml:"tags"`
 	Enabled bool     `yaml:"enabled"`
+	// Expires is the operator's own expiry date, `2026-09-01`. Most providers
+	// report theirs in a `Subscription-Userinfo` header and this stays empty — but
+	// not all of them do, and for those the only place the date can come from is
+	// the person who paid. It is a SOURCE, not an override: a header, when present,
+	// is the provider's own word and wins.
+	Expires string `yaml:"expires,omitempty"`
+}
+
+// ExpiresAt parses Expires, reporting whether the operator supplied a usable date.
+func (d Declaration) ExpiresAt() (time.Time, bool) {
+	if d.Expires == "" {
+		return time.Time{}, false
+	}
+	t, err := time.Parse("2006-01-02", strings.TrimSpace(d.Expires))
+	if err != nil {
+		return time.Time{}, false
+	}
+	return t, true
 }
 
 // Fetcher retrieves raw subscription bytes. An interface so the Manager is

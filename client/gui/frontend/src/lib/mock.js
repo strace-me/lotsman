@@ -29,8 +29,8 @@ export function mock() {
         ],
       },
       subscriptions: [
-        { name: 'demo-vless', usedBytes: 8.6e9, totalBytes: 10.7e9, fractionUsed: 0.8, daysUntilExpire: 12, expired: false },
-        { name: 'fastsub', usedBytes: 2.1e9, totalBytes: 0, fractionUsed: -1, daysUntilExpire: 3, expired: false },
+        { name: 'demo-vless', usedBytes: 8.6e9, totalBytes: 10.7e9, fractionUsed: 0.8, daysUntilExpire: 12, expired: false, expirySource: 'provider' },
+        { name: 'fastsub', usedBytes: 2.1e9, totalBytes: 0, fractionUsed: -1, daysUntilExpire: 3, expired: false, expirySource: 'manual' },
       ],
       services: [
         { service: 'youtube', state: 'VPN', node: 'nl-hy2-01', rung: 0, rungClass: 'vpn', strategy: 'vpn_pool', fails: 0, broken: false },
@@ -82,13 +82,17 @@ services:
 `,
     doc: {
       Subscriptions: [
-        { Name: 'demo-vless', URL: 'https://example.com/sub', Format: 'auto', Tags: ['normal'], Enabled: true },
-        { Name: 'fastsub', URL: 'https://fastsub.example/sub', Format: 'auto', Tags: ['normal'], Enabled: true },
+        { Name: 'demo-vless', URL: 'https://example.com/sub', Format: 'auto', Tags: ['normal'], Enabled: true, Expires: '' },
+        { Name: 'fastsub', URL: 'https://fastsub.example/sub', Format: 'auto', Tags: ['normal'], Enabled: true, Expires: '2026-09-01' },
       ],
       Services: [
         { Name: 'youtube', Category: 'streaming', ProbeTarget: 'https://www.youtube.com/generate_204', Domains: ['youtube.com', 'googlevideo.com', 'ytimg.com'], DomainLists: ['ru-blocked'] },
         { Name: 'discord', Category: 'messaging', ProbeTarget: 'https://discord.com/api/v9/gateway', Domains: ['discord.com', 'discord.gg', 'discordapp.com'], DomainLists: [] },
       ],
+      Pools: {
+        vpn_url_test: { Type: 'url_test', Filter: { Caps: ['tcp'], TagsInclude: [], TagsExclude: ['emergency'], CountriesInclude: [], CountriesExclude: ['ru'] }, Warmup: false, Interval: '1m', IdleTimeout: '30m' },
+        vpn_url_test_udp: { Type: 'url_test', Filter: { Caps: ['udp_native'], TagsInclude: [], TagsExclude: [], CountriesInclude: [], CountriesExclude: ['ru'] }, Warmup: true, Interval: '1m', IdleTimeout: '' },
+      },
       Hostlists: [
         { Name: 'ru-blocked', Out: '/var/lib/lotsman/ru-blocked.txt', Sources: ['https://example.com/blocked.txt'], Exclude: [], Domains: [], MinKeepRatio: 0.8 },
         { Name: 'мои', Out: '/var/lib/lotsman/mine.txt', Sources: [], Exclude: [], Domains: ['bank.example', 'work.example'], MinKeepRatio: 0 },

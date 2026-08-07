@@ -118,6 +118,12 @@ type SubStatus struct {
 	FractionUsed    float64 `json:"fractionUsed"`    // -1 when total is unknown
 	DaysUntilExpire float64 `json:"daysUntilExpire"` // -1 when no expiry is set
 	Expired         bool    `json:"expired"`
+	// ExpirySource says where the date came from: "provider" (a
+	// Subscription-Userinfo header) or "manual" (the operator wrote it in the
+	// config). Empty when there is no date at all. Worth showing: in a month
+	// nobody remembers whether a number was reported or typed, and the two carry
+	// very different confidence.
+	ExpirySource string `json:"expirySource,omitempty"`
 }
 
 // Report assembles the rich status a UI renders. Every section reads a signal the
@@ -236,7 +242,22 @@ func (c *Core) subStatuses() []SubStatus {
 				continue
 			}
 			seen[d.Name] = true
-			out = append(out, subStatus(d.Name, info[d.Name], now))
+			st := subStatus(d.Name, info[d.Name], now)
+			// The provider's own word wins when it sent one. Otherwise fall back to
+			// the date the operator wrote down — for a provider that ships no
+			// Subscription-Userinfo header (the owner has one) that is the ONLY
+			// source there is, and leaving it blank meant paying for something whose
+			// expiry the app could not tell you.
+			if st.DaysUntilExpire < 0 {
+				if at, ok := d.ExpiresAt(); ok {
+					st.DaysUntilExpire = at.Sub(now).Hours() / 24
+					st.Expired = !at.After(now)
+					st.ExpirySource = "manual"
+				}
+			} else {
+				st.ExpirySource = "provider"
+			}
+			out = append(out, st)
 		}
 	}
 	// Surface any captured userinfo whose name is no longer in the config.

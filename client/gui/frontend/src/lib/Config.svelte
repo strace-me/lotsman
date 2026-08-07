@@ -6,6 +6,7 @@
   import DnsEdit from './DnsEdit.svelte'
   import EnginesEdit from './EnginesEdit.svelte'
   import HostlistsEdit from './HostlistsEdit.svelte'
+  import PoolsEdit from './PoolsEdit.svelte'
   import StrategiesEdit from './StrategiesEdit.svelte'
 
   export let backend = null
@@ -32,6 +33,7 @@
   const sections = [
     ['subs', 'Подписки'],
     ['services', 'Правила'],
+    ['pools', 'Пулы'],
     ['hostlists', 'Списки'],
     ['dns', 'DNS'],
     ['engines', 'Движки'],
@@ -125,6 +127,8 @@
         <SubsEdit {doc} {touch} />
       {:else if section === 'services'}
         <ServicesEdit {doc} {touch} />
+      {:else if section === 'pools'}
+        <PoolsEdit {doc} {touch} />
       {:else if section === 'hostlists'}
         <HostlistsEdit {doc} {touch} />
       {:else if section === 'dns'}

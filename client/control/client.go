@@ -114,6 +114,9 @@ type Subscription struct {
 	FractionUsed    float64 `json:"fractionUsed"`
 	DaysUntilExpire float64 `json:"daysUntilExpire"`
 	Expired         bool    `json:"expired"`
+	// ExpirySource: "provider" (from the Subscription-Userinfo header) or "manual"
+	// (typed into the config). Empty when no date is known.
+	ExpirySource string `json:"expirySource"`
 }
 
 // Service is one service's current state and the passive eye's ratios.
