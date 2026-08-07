@@ -6,6 +6,29 @@ older sections carry working dates rather than release dates.
 
 ## [Unreleased]
 
+### YouTube ran a third of the recipe it was pinned to
+
+- **`flowseal-alt12-google`'s second profile could never match.** nfqws takes the
+  first profile whose filter fits and stops. That bundle is tcp/443 hostfakesplit,
+  then tcp/80,443 `fake,multisplit seqovl=664`, then udp/443 — and its author
+  scoped the first two to DIFFERENT hostlists, Google domains one way and
+  everything else the other. Our model has one domain list per rule and puts it in
+  every block, so both carried the same domains, the first claimed 443, and the
+  multisplit behind it could only ever see port 80. YouTube does not use port 80.
+- So YouTube ran **hostfakesplit alone**, all day, under the name of a bundle
+  whose point was the multisplit — the same `fake,multisplit seqovl=664` this
+  catalogue's own notes call the one that "fixes it completely", and which x,
+  instagram and gaming-epic were running successfully on the same machine at the
+  same moment. The knowledge base scored the bundle for a third of itself. Found in
+  the argv history nfqws leaves behind on every exit, not in the code.
+- The recipe was transcribed correctly. **It is our model around it that is
+  narrower than its author's** — which is principle 6 one step further, and the
+  same reasoning that already keeps ALT12's `--ipset` profiles out of the
+  catalogue. `zapret.ShadowedBlock` refuses such a recipe and names the block.
+  Port-set exact and `--filter-l7`-aware, so the Discord bundle is untouched;
+  refusing that would have cost the voice call this project spent a day on. **One
+  recipe of seventy is refused, and it is the one that was pinned.**
+
 ### A silent probe of an inactive desync rung was measuring the VPN
 
 - **The recovery direction had never been measured honestly in tun mode.**
