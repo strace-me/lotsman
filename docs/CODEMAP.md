@@ -167,6 +167,17 @@ plus a thin unprivileged UI, since only the tun and the NFQUEUE rules need root.
   auto-failover, a per-network KB that follows a roam, and the unix control
   socket — group-ownable (0660) so an unprivileged UI can drive a root service,
   owner-only 0600 by default.
+- `client/core/sandboxtest.go` — the isolated TEST LANE on the client, and the
+  reason a wrong recipe no longer costs the user a broken service. `testRecipe`
+  composes a candidate for ONE rule, applies it to `pkg/zapret.Sandbox` (own nft
+  table `inet lotsman_probe`, own queue = production+1), pulls real volume through
+  `dataplane.SandboxClient` — fwmark AND `SO_BINDTODEVICE`, because the mark makes
+  the packet the sandbox's while the binding is what lets it escape `auto_route`
+  at all — and tears the lane down. `rotateRecipe` is the canary's second move:
+  the production recipe stopped carrying, so try candidates HERE and call `Enable`
+  only for one that passed. Bounded, cooled down, and re-checks that the rule is
+  still on the rung on both sides of every measurement. [testRecipe, rotateRecipe,
+  sandbox, closeSandbox]
 - `client/core/canary.go` — the desync verdict, in two stages: reach the rung
   (`canaryProbe`), then PULL VOLUME through it (`goodputOK`, via `burstprobe`),
   because TSPU's signature failure establishes fine and freezes tens of KB in.

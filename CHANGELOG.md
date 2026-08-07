@@ -4,7 +4,41 @@ All notable changes to Lotsman. Format loosely follows [Keep a Changelog]. Relea
 are tagged from v6.13 on; everything before that was a build-time string, so the
 older sections carry working dates rather than release dates.
 
-## [Unreleased]
+## [Unreleased] — v7.1
+
+### The canary tests a candidate, and only a pass moves live traffic
+
+The design in the owner's words: *«канарейка пробует, и только если успех, то
+двигается правило с живым трафиком»*. Two gaps stood between here and there, and
+today they compounded into all eleven rules on VPN within an hour.
+
+- **A rule tried exactly ONE desync recipe per session.** A recipe is chosen when
+  a rule ENTERS the rung, and only the apply-time canary ever scores one — probe
+  outcomes are filed against the rung's STATE name, not the recipe. Combine that
+  with `bdd22df` removing the dishonest automatic recovery, and a wrong first
+  guess meant escalate and ride the tunnel forever. "Demoted for the next Enable"
+  was a promise to a caller that had stopped existing.
+- **The test lane existed and was never wired to the client.** `pkg/zapret.Sandbox`
+  measures a candidate against live DPI without touching anyone's traffic: its own
+  nft table and queue, reached only by probes carrying `TuneMark`, which the
+  production table returns untouched. It was built for the router's prospector.
+  `rotateRecipe` now composes the candidate for ONE rule, applies it in the lane,
+  pulls real volume through it, and calls `Enable` only for a candidate that
+  PASSED. Every verdict, pass or fail, is a real measurement of that recipe on
+  this network, so all of them reach the knowledge base.
+- **The probe had to escape the tun, and the mark alone could not do it.**
+  `SandboxClient` carries the fwmark AND `SO_BINDTODEVICE`. The mark makes the
+  packet the sandbox's; the binding is what lets it leave at all, because
+  `auto_route` pulls every destination into the tunnel — an unbound socket would
+  carry the mark through a tunnel no nft rule on this box ever sees, and measure
+  the VPN while wearing the candidate's name. The interface is resolved per DIAL,
+  not captured, because the laptop roams.
+- `NewMultiProberBound` uses the same binding to answer what `bdd22df` could only
+  refuse: an inactive direct rung is measured rather than skipped.
+- Writing the tests found the same defect just fixed in the rung prober —
+  rotation checked "is the rule still on this rung" before measuring but not
+  after, so a rule the brain escalated mid-measurement would still have had a
+  candidate applied. Both sides are checked now.
 
 ### YouTube ran a third of the recipe it was pinned to
 
