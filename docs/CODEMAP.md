@@ -57,7 +57,7 @@ the component split is mechanical (event contracts already separate them).
 
 ### Brain / probe
 - `pkg/brain` — the policy: decide what should be active, emit DesiredStateChanged; touches no network. Asymmetric escalate/recover, settling window, silent recovery probes. [Brain, Smarts (intelligence hooks), escalateLocked, shouldEscalate, Position, Snapshot]
-- `pkg/probing` — active probes on a per-service interval; publish verdicts, record EWMA into KB, rotate silent probes through lower positions when escalated. No policy. [probing.New]
+- `pkg/probing` — active probes on a per-rule interval; publish verdicts, record EWMA into KB, rotate silent probes through lower positions when escalated. No policy. TWO oracles correct the probe, which is one URL over one protocol and was measured wrong in both directions: `SetStallOracle` fails a probe the canary measured as carrying nothing (applied to ANY probe of a desync rung — active-only created an oscillation that hid the failure), `SetActivityOracle` vetoes a failed ACTIVE probe when the rule is visibly moving traffic. The stall verdict outranks the veto. [probing.New, SetStallOracle, SetActivityOracle]
 - `pkg/pathhealth` — escalation-v2 DETECT: probe EVERY chain step in PARALLEL out-of-band (without flipping the live selector) → report which tiers work now, so ACT can jump to best. [Detector, Scan]
 
 ### Intelligence (wired into Brain via Smarts; runtime node/quality intel)
@@ -195,12 +195,16 @@ plus a thin unprivileged UI, since only the tun and the NFQUEUE rules need root.
   subscription URL, or ship the curated `recommended.yaml`; first-run onboarding.
 - `client/desktop` — headless entrypoint (the privileged service).
 - `client/gui` — the desktop window (Wails v2 + Svelte), its own module, linking
-  only `client/control`: dashboard plus configurator sections (services,
-  subscriptions, DNS, engines, strategies, lists). The dashboard carries the
-  per-service on/off switch and a «Выключены» section; «Ноды» reports fetched /
-  per-pool / warm as separate figures, because collapsing them into one is what
-  hid the node-identity defect. `frontend/dist` is a BUILD ARTEFACT and not in
-  git — `npm run build` must precede `wails build`, or the window ships stale.
+  only `client/control`. Tabs: Обзор · Правила · Ноды · Конфигурация · Ещё.
+  **Правила** (`Rules.svelte` + `RuleForm.svelte`) owns rules — a flat list, one
+  line per rule with its ladder, opening on click; «Конфигурация» has no rules
+  section, because editing one thing in two places is what the removed Подписки
+  tab was doing. The dashboard separates «Требуют внимания» (chain exhausted —
+  the operator must act) from «Подбирает» (Lotsman escalating, which is it
+  working). «Ноды» reports fetched / per-pool / warm as separate figures, because
+  collapsing them into one is what hid the node-identity defect. `frontend/dist`
+  is a BUILD ARTEFACT and not in git — `npm run build` must precede
+  `wails build`, or the window ships stale.
 - `client/tray` — the systray companion, a separate unprivileged process and its
   own module: polls `/status`, recolours the sextant by verdict, Open / Stop / Quit.
 - `client/mobile` — the only surface Kotlin touches, bound with gomobile over
