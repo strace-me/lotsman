@@ -215,6 +215,22 @@ func TestCarryingRequiresMovementNotMerelyFlows(t *testing.T) {
 		t.Error("a mostly-frozen rule must not count as carrying")
 	}
 
+	// The defect this floor exists for: a browser thrashing. 1110 KiB looks like
+	// plenty until you divide it by 387 connections and get 2.9 KiB each — which is
+	// the TSPU freeze, not health. Summing them turns the symptom into evidence.
+	c.lastCarried["discord"] = 0
+	set(1110<<10, 387, 0)
+	if _, ok := c.CarryingReason("discord"); ok {
+		t.Error("1110 KiB across 387 flows is 2.9 KiB each — the freeze signature, not traffic")
+	}
+
+	// Same volume, few flows: a real stream.
+	c.lastCarried["discord"] = 0
+	set(1110<<10, 4, 0)
+	if _, ok := c.CarryingReason("discord"); !ok {
+		t.Error("1110 KiB across 4 flows is real use and must count")
+	}
+
 	// A trickle is not use.
 	c.lastCarried["discord"] = 6 << 20
 	set(6<<20+1024, 4, 0)
