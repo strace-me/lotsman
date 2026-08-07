@@ -75,10 +75,14 @@ func CaptureArgs(c zapret.Capture) ([]string, error) {
 
 // Engine owns one winws process.
 type Engine struct {
-	bin     string
-	inst    zapret.Instance
-	workDir string // holds winws.exe and the fake payloads; recipes name them bare
-	log     *slog.Logger
+	bin  string
+	inst zapret.Instance
+	// baseCapture is the spec the engine was built with — the floor the derived
+	// filter is unioned onto, so a recomposition can widen the WinDivert filter
+	// but never narrow it below what the deployment always wants captured.
+	baseCapture zapret.Capture
+	workDir     string // holds winws.exe and the fake payloads; recipes name them bare
+	log         *slog.Logger
 
 	mu       sync.Mutex
 	cmd      *exec.Cmd
@@ -96,7 +100,7 @@ func New(bin string, inst zapret.Instance, workDir string, log *slog.Logger) *En
 	if bin == "" {
 		bin = "winws.exe"
 	}
-	return &Engine{bin: bin, inst: inst, workDir: workDir, log: log}
+	return &Engine{bin: bin, inst: inst, baseCapture: inst.Capture, workDir: workDir, log: log}
 }
 
 // SetSettle overrides how long a launch waits before calling the engine alive.
@@ -119,7 +123,10 @@ func (e *Engine) Apply(ctx context.Context, args []string) (restarted bool, err 
 	if len(args) == 0 {
 		return false, fmt.Errorf("winws: empty strategy (nothing to desync)")
 	}
-	capture, err := CaptureArgs(e.inst.Capture)
+	// The WinDivert filter must carry exactly what the strategy filters on, so it
+	// is DERIVED from the argv rather than held as a second literal — the same
+	// reason as the Linux queue. The instance's own spec is the floor.
+	capture, err := CaptureArgs(e.baseCapture.Union(zapret.CaptureFromArgs(args)))
 	if err != nil {
 		return false, err
 	}
@@ -140,7 +147,14 @@ func (e *Engine) Apply(ctx context.Context, args []string) (restarted bool, err 
 		if len(previous) == 0 {
 			return false, err // nothing was running; there is nothing to keep
 		}
-		if rbErr := e.launchLocked(capture, previous); rbErr != nil {
+		// The rollback needs the PREVIOUS strategy's capture, not the new one:
+		// relaunching old args behind a filter derived from the args that just
+		// failed would restore a process and starve it.
+		prevCapture, cErr := CaptureArgs(e.baseCapture.Union(zapret.CaptureFromArgs(previous)))
+		if cErr != nil {
+			return false, fmt.Errorf("winws: the new strategy failed AND the previous capture no longer builds: %w (%v)", err, cErr)
+		}
+		if rbErr := e.launchLocked(prevCapture, previous); rbErr != nil {
 			return false, fmt.Errorf("winws: the new strategy failed AND the previous one no longer starts: %w (rollback: %v)", err, rbErr)
 		}
 		return false, fmt.Errorf("winws: kept the previous strategy, the new one would not start: %w", err)
