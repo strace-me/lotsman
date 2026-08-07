@@ -29,12 +29,18 @@
   const touch = () => (doc = doc)
   $: dirty = doc && JSON.stringify(doc) !== original
 
-  // Effective order: priority first (lower earlier, negatives ahead of all),
-  // file order only as the tie-break. Showing file order would be a claim about
-  // behaviour that does not hold.
+  // The order the rules are MATCHED in: priority first (lower earlier, negatives
+  // ahead of all), then NAME. Not file order — this was wrong here until the owner
+  // asked what the order was: the config is read into a map, file position does not
+  // survive it, and the generator has always tie-broken by name. A list claiming an
+  // order the engine does not use is worse than an unordered one.
   $: ordered = (doc?.Services || [])
     .map((s, i) => ({ s, i }))
-    .sort((a, b) => (a.s.Priority || 0) - (b.s.Priority || 0) || a.i - b.i)
+    .sort(
+      (a, b) =>
+        (a.s.Priority || 0) - (b.s.Priority || 0) ||
+        String(a.s.Name || '').localeCompare(String(b.s.Name || ''))
+    )
 
   $: live = Object.fromEntries(((report && report.services) || []).map((r) => [r.service, r]))
   $: disabled = new Set(((report && report.disabled) || []))
@@ -121,8 +127,11 @@
 
 <div class="muted rules-hint">
   Сверху вниз — тот порядок, в котором правила <b>реально</b> проверяются: побеждает
-  первое совпавшее, как в файрволе. Решает «приоритет», и лишь при равных — порядок в
-  файле. <span class="dim">{path}</span>
+  первое совпавшее, как в файрволе. Решает «приоритет» (меньше — раньше, отрицательные
+  впереди всех), при равных — имя. «Приоритет» наш, а не sing-box: в его конфиг он не
+  попадает, он лишь задаёт место правила в списке маршрутов. Одна оговорка: правила,
+  совпадающие только по IP, идут после <i>всех</i> доменных, каким бы ни был приоритет.
+  <span class="dim">{path}</span>
 </div>
 
 {#if doc}
@@ -171,10 +180,16 @@
     margin: 0.15rem 0 0.7rem;
     line-height: 1.5;
   }
+  /* The list scrolls, not the tab. overflow-y alone did nothing: with no bound and
+     no shrinkable parent the container simply grew and <main> scrolled instead,
+     which is what the owner saw. flex + min-height:0 makes it the shrinkable child
+     of the column <main> already is. */
   .rules {
     display: flex;
     flex-direction: column;
     gap: 6px;
+    flex: 1 1 auto;
+    min-height: 0;
     overflow-y: auto;
   }
   .rule {

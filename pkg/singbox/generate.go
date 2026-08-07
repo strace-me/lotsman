@@ -708,12 +708,7 @@ func Generate(services []registry.Service, devices []registry.Device, nodes []su
 	// broad catch-alls (ru-blocked web-blocked, Priority>0), so a domain in both
 	// a RU-direct set and a blocked set goes direct, and a specific service
 	// (youtube) wins over the catch-all.
-	sort.Slice(services, func(i, j int) bool {
-		if services[i].Priority != services[j].Priority {
-			return services[i].Priority < services[j].Priority
-		}
-		return services[i].Name < services[j].Name
-	})
+	registry.SortRouteOrder(services)
 	selectorOutbounds := append(append([]string{}, poolTags...), "direct")
 
 	// sniff first (route action, the 1.11+ replacement for deprecated inbound

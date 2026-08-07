@@ -3,7 +3,11 @@
 // phase loads this from YAML.
 package registry
 
-import "github.com/strace-me/lotsman/pkg/strategy"
+import (
+	"sort"
+
+	"github.com/strace-me/lotsman/pkg/strategy"
+)
 
 // Chain states. State is derived from a service's position in its chain.
 const (
@@ -186,4 +190,27 @@ func Builtin() *Registry {
 			},
 		},
 	}}
+}
+
+// SortRouteOrder puts services in the order their route rules are EMITTED, which
+// is the order they are matched in: sing-box evaluates route.rules top to bottom
+// and the first match wins.
+//
+// `priority` is ours, not sing-box's — it appears nowhere in the generated JSON.
+// It exists only to decide a rule's index in that array: lower is emitted earlier
+// and therefore wins, negative for protective/specific rules (ru-direct at -10),
+// positive for broad catch-alls (web-blocked at +10). Equal priorities are broken
+// by NAME, not by position in the file, because the config is read into a map and
+// file order does not survive.
+//
+// One caveat this cannot express: rules are also TIERED, every service's domain
+// match before any service's ip_cidr match, so a rule that matches only by IP is
+// consulted after every domain rule regardless of priority.
+func SortRouteOrder(services []Service) {
+	sort.Slice(services, func(i, j int) bool {
+		if services[i].Priority != services[j].Priority {
+			return services[i].Priority < services[j].Priority
+		}
+		return services[i].Name < services[j].Name
+	})
 }

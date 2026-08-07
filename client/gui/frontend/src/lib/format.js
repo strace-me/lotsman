@@ -46,3 +46,16 @@ export function fmtTime(t) {
   const d = new Date(t)
   return isNaN(d) ? '' : d.toLocaleTimeString('ru-RU', { hour: '2-digit', minute: '2-digit' })
 }
+
+// "проверено N назад". The dashboard shows it on every rule because the recheck
+// button posts onto a channel that DROPS the request when one is already queued —
+// "I clicked and nothing changed" is a real outcome, and a timestamp that visibly
+// resets is the only feedback that comes from the probe rather than from the click.
+export function fmtAgo(ms, now) {
+  if (!ms) return ''
+  const s = Math.max(0, Math.round((now - ms) / 1000))
+  if (s < 3) return 'только что'
+  if (s < 60) return s + ' с назад'
+  const m = Math.round(s / 60)
+  return m < 60 ? m + ' мин назад' : Math.round(m / 60) + ' ч назад'
+}
