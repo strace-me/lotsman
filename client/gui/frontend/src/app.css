@@ -137,6 +137,12 @@ header {
 }
 /* The build identity: present but quiet. It is reference material you go looking
    for, not a status you watch, so it must not compete with the tiles below. */
+/* The window is older than the service it renders. Amber, not red: nothing is
+   broken, but everything on screen may describe a build that is not running. */
+.verdict .build.drift {
+  color: var(--amber);
+  margin-left: 8px;
+}
 .verdict .build {
   font-variant-numeric: tabular-nums;
   font-size: 12px;

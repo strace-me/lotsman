@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 
 	"github.com/strace-me/lotsman/client/control"
+	"github.com/strace-me/lotsman/pkg/version"
 )
 
 // App is the Wails backend. It is a deliberately thin pass-through to the control
@@ -25,6 +26,17 @@ func NewApp(socket string) *App {
 }
 
 func (a *App) startup(ctx context.Context) { a.ctx = ctx }
+
+// OwnVersion is THIS WINDOW's build identity, stamped by scripts/build.sh into
+// pkg/version like every other target.
+//
+// The bar shows the SERVICE's version, because what a reader needs first is which
+// build is answering. But the GUI is the one target build.sh does not build — it
+// needs wails and a webkit toolchain — so it is built by hand, separately, and it
+// drifts. On 2026-08-07 the window on the owner's laptop was two commits older
+// than its service, and the only thing that gave it away was a hint sentence he
+// happened to screenshot. A drift nobody can see is a drift nobody fixes.
+func (a *App) OwnVersion() string { return version.String() }
 
 // Status returns the rich /status the whole UI renders from.
 func (a *App) Status() (control.Report, error) { return a.client.Status(a.ctx) }
