@@ -41,6 +41,9 @@ type Engine struct {
 	// stall reports that this service's CURRENT path is not carrying traffic, and
 	// why, even though a header probe succeeds. nil = disabled.
 	stall func(service string) (reason string, stalled bool)
+	// carrying reports that the service is demonstrably moving real traffic right
+	// now, from PASSIVE observation of the user's own connections. nil = disabled.
+	carrying func(service string) (reason string, ok bool)
 
 	rotation map[string]int // service -> next lower position to silent-probe
 
@@ -61,6 +64,25 @@ type Engine struct {
 //
 // nil = disabled. Call before Run.
 func (e *Engine) SetStallOracle(f func(service string) (reason string, stalled bool)) { e.stall = f }
+
+// SetActivityOracle wires the OTHER half of the same problem. A synthetic probe
+// fetches one URL over one protocol, so it can be wrong in both directions: it
+// says healthy over a path carrying nothing (that is what SetStallOracle fixes),
+// and it says broken over a path the user is visibly using right now.
+//
+// Both were measured on the same machine within a day. youtube passed a 204 fetch
+// while carrying no video; Discord's probe timed out on its gateway URL for
+// minutes while 3.5 MB of voice flowed through the same rule — raw UDP the probe
+// never touches. Escalating on the second would have torn down a working call to
+// chase a failure that existed only in the probe.
+//
+// So a FAILED active probe is vetoed when passive observation of the user's own
+// connections shows the service genuinely moving traffic. Only a probe that failed
+// on its own is vetoed: a failure the stall oracle produced is itself a
+// measurement and outranks this.
+//
+// nil = disabled. Call before Run.
+func (e *Engine) SetActivityOracle(f func(service string) (reason string, ok bool)) { e.carrying = f }
 
 // New builds an Engine. interval is the probe period (short for the demo,
 // per-category minutes in production). obs and fails may be nil.
@@ -137,10 +159,24 @@ func (e *Engine) runProbe(ctx context.Context, service string, position int, kin
 	// hangs). The eye sees it as frozen flows. Override a "healthy" ACTIVE probe to
 	// a failure when the service is throttle-stalled so Brain escalates off the
 	// throttled path; only a foreign egress escapes an IP-keyed throttle.
+	// byMeasurement records that the failure came from the stall oracle rather than
+	// from the fetch. It outranks the activity veto below: a measured "carries
+	// nothing" must not be undone by "some traffic is moving".
+	byMeasurement := false
 	if kind == "active" && v.OK && e.stall != nil {
 		if reason, stalled := e.stall(service); stalled {
-			v.OK = false
-			v.Err = reason
+			v.OK, v.Err, byMeasurement = false, reason, true
+		}
+	}
+	// The mirror case, and the one that cost a working voice call: the probe failed
+	// on its own while the user's OWN traffic shows the service working. One URL
+	// over one protocol is a proxy for the service's health, and when the real
+	// thing is observable the proxy does not get to overrule it.
+	if kind == "active" && !v.OK && !byMeasurement && e.carrying != nil {
+		if reason, ok := e.carrying(service); ok {
+			e.log.Info("probe failed but the service is visibly carrying traffic — not counting it against the rung",
+				"service", service, "probe_err", v.Err, "evidence", reason)
+			v.OK, v.Err = true, ""
 		}
 	}
 

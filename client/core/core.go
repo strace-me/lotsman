@@ -177,8 +177,14 @@ type Core struct {
 
 	metrics    *metrics.Collector // populated in Start; nil until then
 	metricsSrv *http.Server       // non-nil only when MetricsAddr is served
-	obsMu      sync.Mutex         // guards obsSnap between the observe loop and /metrics
-	obsSnap    observe.Snapshot   // last passive-observation snapshot (zero until the first pass)
+	// lastCarried is the previous observation pass's byte total per rule, so the
+	// activity oracle can ask whether traffic MOVED rather than whether a
+	// connection merely exists. A cumulative total cannot answer that.
+	carriedMu   sync.Mutex
+	lastCarried map[string]int64
+
+	obsMu   sync.Mutex       // guards obsSnap between the observe loop and /metrics
+	obsSnap observe.Snapshot // last passive-observation snapshot (zero until the first pass)
 
 	subMu   sync.Mutex                       // guards subInfo between generate() and /status
 	subInfo map[string]subscription.Userinfo // quota/expiry captured at the last fetch (for /status)
@@ -536,6 +542,11 @@ func (c *Core) buildLoop() error {
 	if c.zapExec != nil {
 		eng.SetStallOracle(c.zapExec.StallReason)
 	}
+	// And the other direction: do not count a probe failure against a rule the
+	// operator is visibly using right now. Discord's gateway URL timed out for
+	// minutes while a voice call ran through the same rule; escalating on that
+	// would have torn the call down to chase a failure the probe invented.
+	eng.SetActivityOracle(c.CarryingReason)
 	c.eng = eng
 
 	runners := []func(context.Context){c.brain.Run, ap.Run, eng.Run, c.superviseBox}
