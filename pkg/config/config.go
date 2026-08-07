@@ -187,10 +187,16 @@ type serviceYAML struct {
 	// one reports the size of the endpoint and blames the strategy for it.
 	// Empty = fall back to probe_target, and the canary refuses to judge when that
 	// turns out to have nothing to give.
-	VolumeTarget   string          `yaml:"volume_target"`
-	RuleSets       []string        `yaml:"rule_sets"`
-	Domains        []string        `yaml:"domains"`
-	DomainLists    []string        `yaml:"domain_lists"`    // names of hostlists: whose domains are merged into Domains (declare a pack once, attach it to any service)
+	VolumeTarget string   `yaml:"volume_target"`
+	RuleSets     []string `yaml:"rule_sets"`
+	Domains      []string `yaml:"domains"`
+	DomainLists  []string `yaml:"domain_lists"` // names of hostlists: whose domains are merged into Domains (declare a pack once, attach it to any service)
+	// ExcludeLists names hostlists whose domains are merged into ExcludeDomains —
+	// the same declare-once-attach-anywhere move, for the OTHER direction. Upstream
+	// strategy bundles ship a global exclude list (Flowseal's is 112 domains: CDNs
+	// and endpoints that work direct and BREAK under desync), and pasting that into
+	// every rule inline is how it stops being maintained.
+	ExcludeLists   []string        `yaml:"exclude_lists"`
 	ExcludeDomains []string        `yaml:"exclude_domains"` // raw-pass through nfqws desync (composer --hostlist-exclude; LOT-36 CDNs)
 	SpreadClients  []string        `yaml:"spread_clients"`  // LAN client CIDRs spread across this service's VPN nodes (LOT-23)
 	IPs            []string        `yaml:"ips"`
@@ -539,6 +545,10 @@ func buildRegistry(svcs []serviceYAML, cats map[string]registry.Category, hostli
 		if err != nil {
 			return nil, err
 		}
+		excludes, err := mergeExcludeLists(s, lists)
+		if err != nil {
+			return nil, err
+		}
 		// Group-level lever (LOT-23): inherit profile/sticky from the category when the
 		// service does not set its own (profile unset = "", sticky unset = nil pointer).
 		cat := cats[s.Category]
@@ -569,7 +579,7 @@ func buildRegistry(svcs []serviceYAML, cats map[string]registry.Category, hostli
 			VolumeTarget:   s.VolumeTarget,
 			RuleSets:       s.RuleSets,
 			Domains:        domains,
-			ExcludeDomains: s.ExcludeDomains,
+			ExcludeDomains: excludes,
 			SpreadClients:  s.SpreadClients,
 			IPs:            ips,
 			Sticky:         sticky,
@@ -606,6 +616,49 @@ func normalizeIPs(service string, ips []string) ([]string, error) {
 // merged. Generous for real use (a curated RU blocklist is a few thousand), low enough
 // to catch someone attaching a million-entry dump that would break the engines.
 const maxServiceDomains = 50000
+
+// mergeExcludeLists returns the service's own exclude_domains plus those of every
+// hostlist it names in exclude_lists.
+//
+// These become nfqws --hostlist-exclude: domains that pass through the desync RAW.
+// It is the mirror of domain_lists and exists for the same reason — an upstream
+// bundle's exclude list is 112 domains of CDNs that work direct and break under
+// desync, and a list that has to be pasted inline into every rule is a list that
+// stops being maintained the week after it is written.
+//
+// A missing pack file is not fatal, exactly as for domain_lists: it is a cache the
+// rebuild job owns. But an unknown NAME is, because a typo would silently desync
+// the very endpoints the operator was trying to spare.
+func mergeExcludeLists(s serviceYAML, lists map[string]Hostlist) ([]string, error) {
+	if len(s.ExcludeLists) == 0 {
+		return s.ExcludeDomains, nil
+	}
+	out := append([]string(nil), s.ExcludeDomains...)
+	seen := make(map[string]bool, len(out))
+	for _, d := range out {
+		seen[strings.ToLower(d)] = true
+	}
+	for _, name := range s.ExcludeLists {
+		hl, ok := lists[name]
+		if !ok {
+			return nil, fmt.Errorf("config: service %q: exclude_lists names %q, which is not a declared hostlist", s.Name, name)
+		}
+		domains, _ := aggregate.ParseList([]byte(strings.Join(hl.Domains, "\n")))
+		if data, err := os.ReadFile(hl.Out); err == nil {
+			fetched, _ := aggregate.ParseList(data)
+			domains = append(domains, fetched...)
+		}
+		for _, d := range domains {
+			d = strings.TrimPrefix(d, "*.")
+			if d == "" || seen[d] {
+				continue
+			}
+			seen[d] = true
+			out = append(out, d)
+		}
+	}
+	return out, nil
+}
 
 // mergeDomainLists returns the service's own domains plus those of every hostlist it
 // names in domain_lists — so a pack of domains is declared once (with its sources and
