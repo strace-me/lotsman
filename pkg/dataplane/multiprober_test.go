@@ -5,6 +5,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"sync"
 	"testing"
 	"time"
 )
@@ -135,5 +136,39 @@ func TestSTUNRejectsGarbageResponse(t *testing.T) {
 	m := newProber(t, map[string]ServiceProbe{"g": {Type: ProbeSTUN, Target: pc.LocalAddr().String()}})
 	if v := m.Probe(context.Background(), "g", 0); v.OK {
 		t.Error("expected failure on garbage (non-STUN) response")
+	}
+}
+
+// A probe must present the censor with the thing the censor blocks. TSPU lets the
+// TCP handshake finish and swallows the TLS ClientHello, so a probe that reuses a
+// connection opened minutes ago is testing nothing at all: measured on the
+// ThinkPad as fails=0 over a YouTube that would not load, while curl — a fresh
+// connection every time — timed out three times out of three.
+func TestProbesDoNotReuseConnections(t *testing.T) {
+	var mu sync.Mutex
+	conns := map[net.Conn]bool{}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	srv.Config.ConnState = func(c net.Conn, s http.ConnState) {
+		if s == http.StateNew {
+			mu.Lock()
+			conns[c] = true
+			mu.Unlock()
+		}
+	}
+	defer srv.Close()
+
+	p := NewHTTPProber(map[string]string{"youtube": srv.URL})
+	for i := 0; i < 3; i++ {
+		if v := p.Probe(context.Background(), "youtube", 0); !v.OK {
+			t.Fatalf("probe %d failed: %s", i, v.Err)
+		}
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	if len(conns) != 3 {
+		t.Errorf("3 probes opened %d connections, want 3 — a pooled probe measures a path that was open in the past, not the one in force now", len(conns))
 	}
 }
