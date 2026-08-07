@@ -6,6 +6,25 @@ older sections carry working dates rather than release dates.
 
 ## [Unreleased]
 
+### The probe reused its connections, so it never met the block
+
+- **This is why YouTube read healthy while it was dead.** Establishing a
+  connection is what TSPU blocks — TCP completes and the TLS ClientHello is
+  swallowed — so a probe riding a pooled connection presents it with nothing to
+  block. With a 10s probe interval against Go's 90s idle timeout, one successful
+  handshake kept the pooled connection alive indefinitely: `fails=0`,
+  `stalledRatio=0.04`, verdict `partial 10/1/0`, 204 in ~57ms, while the owner's
+  curl timed out three times out of three and the browser would not load the
+  site. Nothing downstream could have corrected it; the chain was reacting
+  honestly to a probe that measured a connection the censor had already allowed.
+- `NewMultiProberProxy` had carried `DisableKeepAlives` since its own incident (a
+  pooled connection keeps the outbound it was opened with, so a dead VPN node
+  reported healthy long after the brain escalated away). **The requirement was
+  documented in one of the two constructors and implemented in one of them** —
+  and the direct path, which is what a tun-mode client and the router daemon both
+  use, kept Go's shared pooling transport. The test counts connections at the
+  server and sees 1 of 3 without the fix.
+
 ### The throughput canary had never run in steady state
 
 - **It only ever fired on a transition.** `judge()` is called from `Enable` —
