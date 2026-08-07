@@ -3,6 +3,7 @@
   import Sextant from './lib/Sextant.svelte'
   import Dashboard from './lib/Dashboard.svelte'
   import Nodes from './lib/Nodes.svelte'
+  import Rules from './lib/Rules.svelte'
   import Advanced from './lib/Advanced.svelte'
   import Config from './lib/Config.svelte'
   import { mock } from './lib/mock.js'
@@ -130,6 +131,7 @@
   // concrete exits; pools are pools.
   const tabs = [
     ['dashboard', 'Обзор'],
+    ['rules', 'Правила'],
     ['nodes', 'Ноды'],
     ['config', 'Конфигурация'],
     ['advanced', 'Ещё'],
@@ -184,6 +186,8 @@
     {/if}
     {#if tab === 'config'}
       <Config {backend} drifted={report && report.domain_lists_drifted} />
+    {:else if tab === 'rules'}
+      <Rules {backend} {report} />
     {:else if report}
       {#if tab === 'dashboard'}
         <Dashboard {report} {events} onRecheck={recheck} onToggle={setEnabled} />
