@@ -2,7 +2,10 @@ package core
 
 import (
 	"context"
+	"io"
 	"log/slog"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 
@@ -20,7 +23,12 @@ func execWithCanary(probeOK bool, rec *recorded) *zapretExec {
 	return &zapretExec{
 		// Still on the rung, so a verdict is legitimate.
 		active: func() []registry.Service { return []registry.Service{{Name: "youtube"}, {Name: "discord"}} },
-		canary: func(context.Context, string) bool { return probeOK },
+		canary: func(context.Context, string) (bool, string) {
+			if probeOK {
+				return true, ""
+			}
+			return false, "the path connects but carries nothing"
+		},
 		record: func(service, recipe string, ok bool) {
 			rec.service, rec.recipe, rec.ok = service, recipe, ok
 			rec.calls++
@@ -137,12 +145,12 @@ func TestStallReasonOnlyWhileOnTheDesyncRung(t *testing.T) {
 		t.Error("no verdict yet must not stall the probe")
 	}
 
-	z.noteCarrying("youtube", false)
+	z.noteCarrying("youtube", false, "the path connects but carries nothing")
 	reason, stalled := z.StallReason("youtube")
 	if !stalled {
 		t.Fatal("a canary that measured no goodput must fail the probe so the brain escalates")
 	}
-	if !strings.Contains(reason, "goodput") {
+	if !strings.Contains(reason, "carries nothing") {
 		t.Errorf("the reason must say what was observed, got %q", reason)
 	}
 
@@ -157,13 +165,13 @@ func TestStallReasonOnlyWhileOnTheDesyncRung(t *testing.T) {
 	}
 
 	onRung = false
-	z.noteCarrying("youtube", false)
+	z.noteCarrying("youtube", false, "the path connects but carries nothing")
 	if _, stalled := z.StallReason("youtube"); stalled {
 		t.Error("the verdict must not follow the service off the desync rung")
 	}
 
 	onRung = true
-	z.noteCarrying("youtube", true)
+	z.noteCarrying("youtube", true, "")
 	if _, stalled := z.StallReason("youtube"); stalled {
 		t.Error("a recipe that carries again must clear the verdict")
 	}
@@ -241,5 +249,58 @@ func TestCarryingRequiresMovementNotMerelyFlows(t *testing.T) {
 	// Nothing observed at all.
 	if _, ok := c.CarryingReason("nosuch"); ok {
 		t.Error("an unobserved rule cannot be carrying")
+	}
+}
+
+// A verdict may only be filed by a measurement that HAPPENED. The distinction did
+// not exist while the canary ran once, at apply time — declining and passing both
+// returned a bare true, and nothing downstream could tell them apart. It matters
+// the moment anything runs periodically: a sweep that could not measure would
+// otherwise clear a real verdict taken minutes earlier, and the escalation that
+// verdict had earned would disappear with no line saying so.
+func TestGoodputSeparatesDecliningFromPassing(t *testing.T) {
+	body := strings.Repeat("x", 256<<10)
+	full := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		io.WriteString(w, body)
+	}))
+	defer full.Close()
+	// A 204 with no body — youtube's real probe target, and the endpoint that once
+	// taught the knowledge base that every recipe for it scored zero.
+	empty := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer empty.Close()
+	dead := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
+	deadURL := dead.URL
+	dead.Close()
+
+	c := &Core{log: slog.New(slog.DiscardHandler)}
+	c.opts.CanaryGoodputBytes = 64 << 10
+
+	c.opts.CanaryGoodputKBps = 0
+	if ok, _, measured := c.goodputOK(context.Background(), registry.Service{Name: "youtube", VolumeTarget: full.URL}); !ok || measured {
+		t.Error("with the check disabled nothing was measured, and it must not claim otherwise")
+	}
+
+	c.opts.CanaryGoodputKBps = 8
+	if ok, _, measured := c.goodputOK(context.Background(), registry.Service{Name: "youtube"}); !ok || measured {
+		t.Error("a rule with no volume target measures nothing")
+	}
+	if ok, _, measured := c.goodputOK(context.Background(), registry.Service{Name: "youtube", ProbeTarget: empty.URL}); !ok || measured {
+		t.Error("an endpoint with less to give than we ask for describes the URL, not the path")
+	}
+	if ok, _, measured := c.goodputOK(context.Background(), registry.Service{Name: "youtube", VolumeTarget: full.URL}); !ok || !measured {
+		t.Error("256 KiB off a local server is a real measurement and a passing one")
+	}
+
+	// Nothing delivered at all. The old single sentence called this "connects but
+	// carries nothing", which is precisely what it did not do — and it is the shape
+	// of the failure the owner hit: youtube stalling at the TLS handshake.
+	ok, why, measured := c.goodputOK(context.Background(), registry.Service{Name: "youtube", VolumeTarget: deadURL})
+	if ok || !measured {
+		t.Fatalf("a refused fetch is a measurement and a failing one, got ok=%v measured=%v", ok, measured)
+	}
+	if !strings.Contains(why, "did not complete") {
+		t.Errorf("the reason must say the fetch never completed, got %q", why)
 	}
 }

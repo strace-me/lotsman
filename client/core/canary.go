@@ -3,6 +3,7 @@ package core
 import (
 	"context"
 	"fmt"
+	"sort"
 	"strings"
 	"time"
 
@@ -53,9 +54,9 @@ func (z *zapretExec) judge(ctx context.Context, service string, chosen map[strin
 			"service", service, "recipe", recipe)
 		return
 	}
-	ok := z.canary(ctx, service)
+	ok, why := z.canary(ctx, service)
 	z.record(service, recipe, ok)
-	z.noteCarrying(service, ok)
+	z.noteCarrying(service, ok, why)
 	if ok {
 		z.log.Info("desync canary: strategy works", "service", service, "recipe", recipe)
 		return
@@ -76,13 +77,20 @@ func (z *zapretExec) judge(ctx context.Context, service string, chosen map[strin
 // Observed on the ThinkPad: youtube sat on a recipe the canary scored at 0 KB/s
 // ninety consecutive times while every probe returned ok in ~57ms, so the service
 // never escalated and the demotion changed nothing.
-func (z *zapretExec) noteCarrying(service string, carrying bool) {
+func (z *zapretExec) noteCarrying(service string, carrying bool, why string) {
 	z.carryMu.Lock()
 	defer z.carryMu.Unlock()
 	if z.notCarrying == nil {
-		z.notCarrying = map[string]bool{}
+		z.notCarrying = map[string]string{}
 	}
-	z.notCarrying[service] = !carrying
+	if carrying {
+		delete(z.notCarrying, service)
+		return
+	}
+	if why == "" {
+		why = "the desync canary failed for this recipe"
+	}
+	z.notCarrying[service] = why
 }
 
 // StallReason reports that the desync rung this service sits on is up but not
@@ -106,11 +114,12 @@ func (z *zapretExec) StallReason(service string) (string, bool) {
 	}
 	z.carryMu.Lock()
 	defer z.carryMu.Unlock()
-	if !z.notCarrying[service] {
+	why, pending := z.notCarrying[service]
+	if !pending {
 		return "", false
 	}
 	delete(z.notCarrying, service)
-	return "desync canary measured no goodput on this recipe: the path connects but carries nothing", true
+	return "desync canary: " + why, true
 }
 
 // stillOnRung reports whether the service is STILL on a zapret rung.
@@ -129,10 +138,14 @@ func (z *zapretExec) stillOnRung(service string) bool {
 // canaryProbe reports whether the service is reachable right now, probing the
 // rung it currently sits on. It reuses the prober the autonomy loop already
 // drives, so a canary verdict and a routine verdict mean the same thing.
-func (c *Core) canaryProbe(ctx context.Context, service string) bool {
+// It returns the reason alongside the verdict so whatever files it says what was
+// actually observed. The two stages fail for different reasons and want different
+// next moves, and the single sentence this used to hand the brain — "connects but
+// carries nothing" — was simply untrue of the first one.
+func (c *Core) canaryProbe(ctx context.Context, service string) (bool, string) {
 	svc, ok := c.reg.Services[service]
 	if !ok || c.prober == nil {
-		return false
+		return false, "no prober for this service"
 	}
 	pos := 0
 	for _, step := range svc.Chain {
@@ -141,10 +154,11 @@ func (c *Core) canaryProbe(ctx context.Context, service string) bool {
 			break
 		}
 	}
-	if !c.prober.Probe(ctx, service, pos).OK {
-		return false
+	if v := c.prober.Probe(ctx, service, pos); !v.OK {
+		return false, "the recipe did not answer the probe at all: " + v.Err
 	}
-	return c.goodputOK(ctx, svc)
+	ok, why, _ := c.goodputOK(ctx, svc)
+	return ok, why
 }
 
 // goodputOK is the canary's second stage: does the recipe let real VOLUME
@@ -160,10 +174,17 @@ func (c *Core) canaryProbe(ctx context.Context, service string) bool {
 //
 // Disabled (CanaryGoodputKBps <= 0) it is a no-op and the canary means exactly
 // what it meant before.
-func (c *Core) goodputOK(ctx context.Context, svc registry.Service) bool {
+//
+// measured separates "I pulled bytes and this is the answer" from every way of
+// declining to pull them — disabled, no target, a live call, an endpoint smaller
+// than the ask. Both used to return the same bare true, which is fine for a
+// one-shot at apply time and wrong for anything periodic: a sweep that could not
+// measure would otherwise clear a real verdict taken minutes earlier, and the
+// escalation it was about to cause would vanish without a line saying so.
+func (c *Core) goodputOK(ctx context.Context, svc registry.Service) (ok bool, why string, measured bool) {
 	min := c.opts.CanaryGoodputKBps
 	if min <= 0 {
-		return true
+		return true, "", false
 	}
 	// A dedicated bulk URL when the operator gave one; the probe target otherwise,
 	// with the short-endpoint guard below to stop it producing a fake verdict.
@@ -172,7 +193,7 @@ func (c *Core) goodputOK(ctx context.Context, svc registry.Service) bool {
 		target = svc.ProbeTarget
 	}
 	if target == "" || !strings.HasPrefix(target, "http") {
-		return true // nothing to pull volume from; the shallow verdict stands
+		return true, "", false // nothing to pull volume from; the shallow verdict stands
 	}
 	// Not while someone is playing. A burst probe pulls real bytes down the very
 	// uplink it is measuring, so running it mid-session both spoils the session
@@ -180,12 +201,12 @@ func (c *Core) goodputOK(ctx context.Context, svc registry.Service) bool {
 	// skipping costs the household's game.
 	if dataplane.RealtimeActive(ctx, c.clash) {
 		c.log.Info("canary: live UDP session, not pulling volume", "service", svc.Name)
-		return true
+		return true, "", false
 	}
 	q := burstprobe.Probe(ctx, dataplane.BurstClient(c.opts.ProbeProxy, 15*time.Second),
 		[]string{target}, c.opts.CanaryGoodputBytes, 1)
 	if q.Samples == 0 {
-		return true // the measurement did not happen; do not invent a verdict
+		return true, "", false // the measurement did not happen; do not invent a verdict
 	}
 	// The endpoint ran out before we had pulled enough to judge. Then the goodput
 	// figure describes how small the URL is, not how bad the path is, and blaming
@@ -200,25 +221,116 @@ func (c *Core) goodputOK(ctx context.Context, svc registry.Service) bool {
 	if q.Short {
 		c.log.Warn("canary: cannot judge volume, the probe target has less to give than we ask for — set a volume_target for this service",
 			"service", svc.Name, "target", target, "bytes", q.Bytes, "want_bytes", c.opts.CanaryGoodputBytes)
-		return true
+		return true, "", false
 	}
-	ok := q.GoodputKBps >= min
-	if !ok {
-		// Say which of the two happened. The fetch either failed outright — nothing
-		// was delivered and nothing timed itself — or it connected and crawled, and
-		// those want different next moves from whoever reads the log. The old line
-		// asserted "connects" over both, which was untrue exactly when the fetch had
-		// not connected at all: the same claim-about-the-unobserved this whole
-		// function exists to stop making.
-		if q.Bytes == 0 && q.Loss >= 1 {
-			c.log.Info("canary: the volume fetch did not complete at all — no bytes, no response",
-				"service", svc.Name, "target", target, "min_kbps", min)
-		} else {
-			c.log.Info("canary: recipe connects but does not carry volume",
-				"service", svc.Name, "goodput_kbps", q.GoodputKBps, "min_kbps", min)
+	if q.GoodputKBps >= min {
+		return true, "", true
+	}
+	// Say which of the two happened. The fetch either failed outright — nothing
+	// was delivered and nothing timed itself — or it connected and crawled, and
+	// those want different next moves from whoever reads the log. The old line
+	// asserted "connects" over both, which was untrue exactly when the fetch had
+	// not connected at all: the same claim-about-the-unobserved this whole
+	// function exists to stop making. The same sentence is handed back as the
+	// reason, so the log and the brain's escalation cite one observation.
+	if q.Bytes == 0 && q.Loss >= 1 {
+		c.log.Info("canary: the volume fetch did not complete at all — no bytes, no response",
+			"service", svc.Name, "target", target, "min_kbps", min)
+		return false, "the volume fetch did not complete at all — no bytes, no response from " + target, true
+	}
+	c.log.Info("canary: recipe connects but does not carry volume",
+		"service", svc.Name, "goodput_kbps", q.GoodputKBps, "min_kbps", min)
+	return false, fmt.Sprintf("the path connects but carries nothing: %.0f KiB/s against a floor of %.0f", q.GoodputKBps, min), true
+}
+
+// volumeSweepInterval is how often a rule sitting on a desync rung is re-measured
+// for volume. Slower than the probe (which is cheap and every Interval) because
+// this one pulls real bytes down the operator's own uplink.
+const volumeSweepInterval = 5 * time.Minute
+
+// volumeLoop re-measures goodput for the rules currently on a desync rung.
+//
+// The gap it closes: judge() — the only thing that had ever pulled volume — runs
+// from Enable, i.e. once, three seconds after a service ENTERS the rung. Reconcile
+// deliberately takes no verdict. So in steady state, which is nearly all of the
+// time, nothing measured volume at all, StallReason had nothing to report, and the
+// probing engine read that silence as "not stalled". Measured on the ThinkPad on
+// 2026-08-07: YouTube would not load in the browser for hours, the owner's own curl
+// timed out three times out of three, and the journal held not one canary line —
+// not because the branches were wrong (a handshake timeout lands squarely in "did
+// not complete at all") but because the code that emits them was never called.
+//
+// A verdict is filed only when the measurement actually HAPPENED. A sweep that
+// declined — a live call, an endpoint too small, the check disabled — must not
+// clear a pending verdict from a real one, or the escalation it earned disappears.
+func (c *Core) volumeLoop(ctx context.Context) {
+	t := time.NewTicker(volumeSweepInterval)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+			c.sweepVolume(ctx)
 		}
 	}
-	return ok
+}
+
+// announceVolumeSweep says at startup which rules the sweep can actually judge.
+//
+// Without this the feature is invisible when it is inert, and inert is its normal
+// state on a fresh config: `client/scaffold/recommended.yaml` ships no
+// volume_target at all, so a reader sees a canary wired to the brain and concludes
+// the volume dimension is live when nothing will ever measure it.
+func (c *Core) announceVolumeSweep() {
+	if c.opts.CanaryGoodputKBps <= 0 {
+		c.log.Info("volume sweep off: -canary-goodput-kbps is 0, so nothing re-measures whether a desync recipe still carries traffic")
+		return
+	}
+	var with, without []string
+	for _, svc := range c.reg.Services {
+		if !hasZapretRung(svc) {
+			continue
+		}
+		if svc.VolumeTarget != "" {
+			with = append(with, svc.Name)
+		} else {
+			without = append(without, svc.Name)
+		}
+	}
+	sort.Strings(with)
+	sort.Strings(without)
+	c.log.Info("volume sweep armed", "every", volumeSweepInterval,
+		"judged", with, "no_volume_target", without)
+}
+
+func hasZapretRung(svc registry.Service) bool {
+	for _, step := range svc.Chain {
+		if step.StrategyClass == strategy.ClassZapret {
+			return true
+		}
+	}
+	return false
+}
+
+// sweepVolume measures one pass. It only considers rules with an explicit
+// volume_target: without one goodputOK falls back to the probe target, and probe
+// targets are chosen to be TINY — that fallback is what taught the knowledge base
+// that every recipe for youtube scored zero, by timing a 204 with no body.
+func (c *Core) sweepVolume(ctx context.Context) {
+	if c.zapExec == nil {
+		return
+	}
+	for _, svc := range c.zapretServices() {
+		if svc.VolumeTarget == "" {
+			continue
+		}
+		ok, why, measured := c.goodputOK(ctx, svc)
+		if !measured {
+			continue
+		}
+		c.zapExec.noteCarrying(svc.Name, ok, why)
+	}
 }
 
 // carryingFloorBytes is how much a rule must have MOVED since the previous

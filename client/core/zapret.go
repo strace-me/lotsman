@@ -62,13 +62,18 @@ type zapretExec struct {
 	// life is the client's own lifetime. The verdict must not ride the applier's
 	// per-call context (cancelled the moment Enable returns) nor escape
 	// cancellation entirely — it has to die when the data plane does.
-	life   func() context.Context
-	canary func(ctx context.Context, service string) bool
-	// notCarrying is the canary's standing verdict per service, read by the probing
-	// engine through StallReason. Guarded separately from the executor's own lock:
-	// the probe engine asks on its goroutine while a judge writes on another.
+	life func() context.Context
+	// canary returns the verdict and WHY it failed, in the words of the stage that
+	// observed it. The reason used to be composed by the reader instead, which made
+	// it assert "the path connects but carries nothing" over a canary that had
+	// failed at the shallow probe — i.e. over a path that never connected at all.
+	canary func(ctx context.Context, service string) (ok bool, why string)
+	// notCarrying is the canary's standing verdict per service — the reason string,
+	// present only while a verdict is pending — read by the probing engine through
+	// StallReason. Guarded separately from the executor's own lock: the probe engine
+	// asks on its goroutine while a judge writes on another.
 	carryMu     sync.Mutex
-	notCarrying map[string]bool
+	notCarrying map[string]string
 	// pinned is the brain's resolved strategy per service — a chain step's
 	// strategy_id. Guarded by z.mu, which Enable and the recompose both hold.
 	pinned map[string]string

@@ -5,10 +5,16 @@
 # escalation chain (zapret -> VPN -> emergency) come from the builtin categories.
 # Community PRs extend this set.
 
+# probe_target answers "does this path respond"; it is deliberately tiny, so it
+# cannot see the failure that matters here — TSPU lets a flow establish and then
+# freezes it a few tens of KB in. volume_target is the second question, "does the
+# path CARRY", and only rules that have one are re-measured for throughput. Point
+# it at something the service really serves in bulk.
 services:
   - name: youtube
     category: streaming
     probe_target: https://www.youtube.com/generate_204
+    volume_target: https://www.youtube.com/
     domains: [youtube.com, googlevideo.com, ytimg.com, ggpht.com, youtu.be]
   - name: discord
     category: messaging
