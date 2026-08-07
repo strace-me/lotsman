@@ -568,6 +568,8 @@ func (c *Core) buildLoop() error {
 	}
 	if c.zapExec != nil {
 		runners = append(runners, c.desyncReconcileLoop)
+		c.announceVolumeSweep()
+		runners = append(runners, c.volumeLoop)
 	}
 	if c.opts.KBDir != "" {
 		runners = append(runners, c.roamLoop)
