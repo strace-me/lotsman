@@ -12,9 +12,13 @@
 #   GOOS=linux GOARCH=arm64 scripts/build.sh   # the R5S
 #   scripts/build.sh lotsmand           # one target
 #
-# The GUI is NOT built here: it needs wails plus a webkit toolchain, and lives
-# behind client/gui/shell.nix. Build it there with the same -ldflags, printed at
-# the end.
+# The GUI is built here TOO when the toolchain is present. It used to be left to
+# a printed command a human was expected to remember, and the predictable happened:
+# on 2026-08-07 the window on the daily driver was two commits behind its own
+# service, invisibly, because the frontend had not been rebuilt. Two artefacts
+# built by two different procedures drift, and the one nobody automates is the one
+# that drifts. Without wails on PATH it says so and skips, which is a state you can
+# see rather than an instruction you can forget.
 set -euo pipefail
 
 cd "$(dirname "$0")/.."
@@ -53,6 +57,21 @@ mkdir -p "$OUT"
 echo "lotsman $VERSION"
 
 targets=${*:-all}
+# build_gui runs BOTH steps, in order. `wails build` embeds frontend/dist, which
+# is a build artefact and not in git, so skipping `npm run build` ships whatever
+# dist happened to be lying there — a window that looks like the code did not land.
+build_gui() {
+  if ! command -v wails >/dev/null 2>&1; then
+    echo "  lotsman-gui      SKIPPED: no wails on PATH (enter client/gui/shell.nix), would have been:"
+    echo "                   npm --prefix client/gui/frontend run build && wails build -tags webkit2_41 -ldflags \"$LDFLAGS\""
+    return
+  fi
+  echo "  lotsman-gui      npm run build + wails build"
+  ( cd client/gui/frontend && npm run build >/dev/null ) || { echo "gui: frontend build failed" >&2; exit 1; }
+  ( cd client/gui && wails build -tags webkit2_41 -ldflags "$LDFLAGS" ) || { echo "gui: wails build failed" >&2; exit 1; }
+  cp client/gui/build/bin/lotsman-gui "$OUT/" 2>/dev/null || true
+}
+
 for t in $targets; do
   case "$t" in
     all)
@@ -63,19 +82,23 @@ for t in $targets; do
       # must never link) and only cross-compiles cleanly for the host.
       if [ "$goos" = "$hostos" ] && [ "$goarch" = "$hostarch" ]; then
         build lotsman-tray . client/tray 1
+        # The GUI belongs in `all` for one reason: it is the artefact the operator
+        # READS the version off, and leaving it out of the default build is exactly
+        # how it came to be older than the service it renders.
+        build_gui
       else
         echo "  lotsman-tray     skipped (host-only: it links a desktop UI toolkit)"
+        echo "  lotsman-gui      skipped (host-only: wails links a webkit toolchain)"
       fi
       ;;
     lotsmand)       build lotsmand ./cmd/lotsmand ;;
     lotsmanctl)     build lotsmanctl ./cmd/lotsmanctl ;;
     client)         build lotsman-client ./client/desktop ;;
     tray)           build lotsman-tray . client/tray 1 ;;
+    gui)            build_gui ;;
     *) echo "unknown target: $t" >&2; exit 2 ;;
   esac
 done
 
 echo
 echo "built into $OUT/ at $VERSION"
-echo "for the GUI, inside client/gui/shell.nix:"
-echo "  wails build -tags webkit2_41 -ldflags \"$LDFLAGS\""

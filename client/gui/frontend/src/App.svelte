@@ -10,6 +10,16 @@
 
   let report = null
   let events = []
+  // This window's OWN build, asked once. The bar shows the SERVICE's version
+  // because that is what a reader needs first, but the GUI is the one target
+  // scripts/build.sh does not build — it needs wails and a webkit toolchain — so
+  // it is built by hand and drifts. On 2026-08-07 the window was two commits
+  // behind its service and the only tell was a stale hint sentence in a
+  // screenshot. Now the window says so itself.
+  let ownVersion = ''
+  $: serviceVersion = (report && report.version) || ''
+  $: stale =
+    ownVersion && serviceVersion && ownVersion.split(' ')[0] !== serviceVersion.split(' ')[0]
   let error = ''
   let tab = 'dashboard'
   let timer
@@ -123,6 +133,12 @@
     window.addEventListener('keydown', onZoomKey)
     window.addEventListener('wheel', onZoomWheel, { passive: false })
     load()
+    if (backend && backend.OwnVersion) {
+      backend
+        .OwnVersion()
+        .then((v) => (ownVersion = v || ''))
+        .catch(() => {})
+    }
     timer = setInterval(load, 2000)
   })
   onDestroy(() => {
@@ -173,6 +189,15 @@
              and the bar is not where you read a build date. Full string on hover. -->
         <span class="build" title="версия службы, отвечающей этому окну: {report.version || 'неизвестна'}"
           >{(report.version || '—').split(' ')[0]}</span>
+        {#if stale}
+          <!-- Only when they DISAGREE. Printing both always would make the ordinary
+               case look like a fault, which is how a real one stops being noticed. -->
+          <span
+            class="build drift"
+            title="окно собрано отдельно от службы и отстало: GUI {ownVersion}, служба {serviceVersion}. Пересобери GUI: npm run build, затем wails build."
+            >окно {ownVersion.split(' ')[0]}</span
+          >
+        {/if}
       {:else if error}
         сервис недоступен
       {:else}
