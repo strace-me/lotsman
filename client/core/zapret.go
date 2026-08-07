@@ -72,8 +72,11 @@ type zapretExec struct {
 	// pinned is the brain's resolved strategy per service — a chain step's
 	// strategy_id. Guarded by z.mu, which Enable and the recompose both hold.
 	pinned map[string]string
-	record func(service, recipe string, ok bool)
-	log    *slog.Logger
+	// warnedPins remembers which unusable pin was already reported per service, so
+	// a standing condition is announced once instead of on every recompose.
+	warnedPins map[string]string
+	record     func(service, recipe string, ok bool)
+	log        *slog.Logger
 
 	// mu serialises the whole-config recomposition. Enable (a service entering the
 	// rung) and Reconcile (the periodic sweep that stops the engine when the rung
@@ -198,9 +201,35 @@ func (z *zapretExec) composeAndApplyLocked(ctx context.Context) (*zaptune.Plan, 
 		return nil, nil
 	}
 	plan := zaptune.ComposePinned(active, z.recipes, z.pick, z.resolve, z.hostlists, z.pinned)
+	// Once per state change, not once per reconcile. The condition is static — a
+	// knowledge-base entry naming a recipe this host does not have does not fix
+	// itself — and the strategy is recomposed every few seconds, so repeating it
+	// produced 124 warnings in two minutes and buried everything else in the
+	// journal. A log that drowns the log is not a log.
+	if z.warnedPins == nil {
+		z.warnedPins = map[string]string{}
+	}
 	for _, p := range plan.PinsIgnored {
+		if z.warnedPins[p.Service] == p.Want {
+			continue
+		}
+		z.warnedPins[p.Service] = p.Want
 		z.log.Warn("zapret: the pinned strategy is not usable for this service, picking instead — check the id and that the recipe renders here",
 			"service", p.Service, "pinned", p.Want)
+	}
+	// Forget services whose pin is now honoured, so a recurrence is reported again
+	// rather than silently swallowed by a stale memo.
+	for svc := range z.warnedPins {
+		still := false
+		for _, p := range plan.PinsIgnored {
+			if p.Service == svc {
+				still = true
+				break
+			}
+		}
+		if !still {
+			delete(z.warnedPins, svc)
+		}
 	}
 	if !plan.Covered {
 		// Composing a PARTIAL strategy is worse than composing none: a service whose
