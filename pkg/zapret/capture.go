@@ -1,6 +1,7 @@
 package zapret
 
 import (
+	"fmt"
 	"sort"
 	"strconv"
 	"strings"
@@ -166,4 +167,77 @@ func uncovered(have, want []string) []string {
 		}
 	}
 	return out
+}
+
+// ShadowedBlock reports the first profile in a multi-block recipe whose filter an
+// EARLIER profile already claims, so nfqws — which matches profiles first to last
+// and stops — can never reach it.
+//
+// This is not a hypothetical. `flowseal-alt12-google` is three blocks: tcp/443
+// hostfakesplit, then tcp/80,443 fake+multisplit with seqovl=664, then udp/443.
+// Its author scoped those first two to DIFFERENT hostlists — Google domains one
+// way, everything else the other — and the per-service model has one domain list
+// per rule, which it substitutes into every block. Both blocks therefore carry the
+// same domains, the first claims 443, and the second can only ever see port 80.
+// YouTube does not use port 80. So the rule ran hostfakesplit alone all day under
+// the name of a bundle whose whole point was the multisplit behind it, and the
+// knowledge base scored the bundle for what one third of it did.
+//
+// A recipe that cannot do what its author wrote must be refused rather than
+// quietly reduced — the same reasoning that already keeps ALT12's --ipset profiles
+// out of the catalogue.
+//
+// A profile narrowed by --filter-l7 is not shadowed by one without it (or with a
+// different set): the ports overlap but the traffic does not.
+func ShadowedBlock(blocks [][]string) (index int, reason string, shadowed bool) {
+	var claimed Capture
+	var claimedL7 []string
+	for i, b := range blocks {
+		want := CaptureFromArgs(b)
+		l7 := filterL7(b)
+		if i > 0 && sameL7(l7, claimedL7) {
+			if reach := claimed.Uncovered(want); reach.PortCount() < want.PortCount() {
+				return i, fmt.Sprintf("profile %d filters %s but earlier profiles already claim %s, and nfqws stops at the first match",
+					i+1, describe(want), describe(claimed)), true
+			}
+		}
+		claimed = claimed.Union(want)
+		claimedL7 = l7
+	}
+	return 0, "", false
+}
+
+func filterL7(args []string) []string {
+	for _, a := range args {
+		if v, ok := strings.CutPrefix(a, "--filter-l7="); ok {
+			return splitPorts(v) // same comma-separated shape
+		}
+	}
+	return nil
+}
+
+func sameL7(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
+}
+
+func describe(c Capture) string {
+	var bits []string
+	if len(c.TCP) > 0 {
+		bits = append(bits, "tcp/"+strings.Join(c.TCP, ","))
+	}
+	if len(c.UDP) > 0 {
+		bits = append(bits, "udp/"+strings.Join(c.UDP, ","))
+	}
+	if len(bits) == 0 {
+		return "nothing"
+	}
+	return strings.Join(bits, " ")
 }
