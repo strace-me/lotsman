@@ -198,13 +198,11 @@ func (c *Core) goodputOK(ctx context.Context, svc registry.Service) (ok bool, wh
 	}
 	// A dedicated bulk URL when the operator gave one; the probe target otherwise,
 	// with the short-endpoint guard below to stop it producing a fake verdict.
-	target := svc.VolumeTarget
-	if target == "" {
-		target = svc.ProbeTarget
-	}
-	if target == "" || !strings.HasPrefix(target, "http") {
+	targets := volumeTargets(svc)
+	if len(targets) == 0 {
 		return true, "", false // nothing to pull volume from; the shallow verdict stands
 	}
+	target := strings.Join(targets, ", ")
 	// Not while someone is playing. A burst probe pulls real bytes down the very
 	// uplink it is measuring, so running it mid-session both spoils the session
 	// and mismeasures the path. Skipping costs one uncredited recipe; not
@@ -214,7 +212,7 @@ func (c *Core) goodputOK(ctx context.Context, svc registry.Service) (ok bool, wh
 		return true, "", false
 	}
 	q := burstprobe.Probe(ctx, dataplane.BurstClient(c.opts.ProbeProxy, 15*time.Second),
-		[]string{target}, c.opts.CanaryGoodputBytes, 1)
+		targets, c.opts.CanaryGoodputBytes, 1)
 	if q.Samples == 0 {
 		return true, "", false // the measurement did not happen; do not invent a verdict
 	}
@@ -417,4 +415,31 @@ func (c *Core) CarryingReason(service string) (string, bool) {
 	}
 	return fmt.Sprintf("%d KiB moved across %d live flows since the last pass (%d KiB each)",
 		moved>>10, m.Flows, (moved/int64(m.Flows))>>10), true
+}
+
+// volumeTargets is every bulk URL a rule declares, in one place so the canary,
+// the sweep and the sandbox all judge a rule against the same set.
+//
+// Falling back to the PROBE target when no volume target is declared is
+// deliberate but nearly always useless: probe targets are chosen to be tiny, and
+// timing a 204 measures how small the URL is. The Short guard downstream catches
+// that and refuses to form an opinion — which is the honest outcome, and the
+// reason a rule without a volume_target simply cannot be judged for throughput.
+func volumeTargets(svc registry.Service) []string {
+	var out []string
+	seen := map[string]bool{}
+	add := func(u string) {
+		if strings.HasPrefix(u, "http") && !seen[u] {
+			seen[u] = true
+			out = append(out, u)
+		}
+	}
+	add(svc.VolumeTarget)
+	for _, u := range svc.VolumeTargets {
+		add(u)
+	}
+	if len(out) == 0 {
+		add(svc.ProbeTarget)
+	}
+	return out
 }

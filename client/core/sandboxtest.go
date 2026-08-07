@@ -68,7 +68,7 @@ func (c *Core) testRecipe(ctx context.Context, svc registry.Service, recipeID st
 	if client == nil {
 		return false, false, "this platform cannot bind a probe to the interface, so a candidate cannot be measured without imposing it"
 	}
-	target := svc.VolumeTarget
+	targets := volumeTargets(svc)
 
 	// Compose the candidate for THIS rule alone, pinned to the recipe under test.
 	// One service, so the argv is exactly the profiles that rule would get — not a
@@ -106,7 +106,7 @@ func (c *Core) testRecipe(ctx context.Context, svc registry.Service, recipeID st
 	// is a path that establishes and then freezes, and a header-only fetch scores
 	// that as a win.
 	want := c.opts.CanaryGoodputBytes
-	q := burstprobe.Probe(ctx, client, []string{target}, want, 1)
+	q := burstprobe.Probe(ctx, client, targets, want, 1)
 	switch {
 	case q.Samples == 0:
 		return false, false, "the candidate measurement did not happen"
@@ -250,7 +250,7 @@ func (c *Core) gateEnable(ctx context.Context, service string) {
 // URL is, which is exactly how the knowledge base once learned that every recipe
 // scored zero.
 func (c *Core) canJudge(svc registry.Service) bool {
-	return strings.HasPrefix(svc.VolumeTarget, "http")
+	return strings.HasPrefix(svc.VolumeTarget, "http") || len(svc.VolumeTargets) > 0
 }
 
 // claimRotation enforces the per-rule cooldown. Each test costs an engine start

@@ -50,9 +50,18 @@ type Service struct {
 	// A probe target is deliberately small, so it cannot measure throughput: the
 	// figure it produces describes the endpoint, not the path.
 	VolumeTarget string
-	RuleSets     []string // sing-box rule-set tags (big curated .srs lists)
-	Domains      []string // inline domain_suffix matches (custom/small lists)
-	IPs          []string // inline ip_cidr matches (canonical CIDR; voice/geoip)
+	// VolumeTargets are ADDITIONAL bulk URLs measured alongside VolumeTarget. The
+	// probe reports the WORST endpoint, so a path that serves one host and stalls
+	// on another is judged by the one that stalls.
+	//
+	// One endpoint is one SNI, and one SNI was measured to be not enough: through
+	// the same nfqws profile at the same moment, www.youtube.com timed out at the
+	// TLS handshake while i.ytimg.com pulled 108 KB. A single-target canary cannot
+	// see that, and a rule is not healthy because one of its hosts is.
+	VolumeTargets []string
+	RuleSets      []string // sing-box rule-set tags (big curated .srs lists)
+	Domains       []string // inline domain_suffix matches (custom/small lists)
+	IPs           []string // inline ip_cidr matches (canonical CIDR; voice/geoip)
 	// ExcludeDomains pass RAW through this service's nfqws desync profile (composer
 	// emits --hostlist-exclude-domains): CDNs/endpoints that work without desync but
 	// break under it (e.g. Epic download/EasyAntiCheat — LOT-36). Routing is
