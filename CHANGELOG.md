@@ -6,6 +6,96 @@ older sections carry working dates rather than release dates.
 
 ## [Unreleased]
 
+### The probe told the truth and the app buried it — twice, both mine
+
+- **The canary's verdict reached the active probe but not the silent one.** For a
+  rule with two desync rungs the same path therefore read broken when probed
+  actively and healthy when probed silently: active fails at rung 1, the silent
+  probe of rung 0 passes, the brain recovers to 0, active fails at 0, escalates
+  to 1… Every transition resets the failure counter, so `fails` never left 0, the
+  rule never reached BROKEN, and the verdict stayed **green over a service
+  carrying nothing**. Measured while the owner could not load YouTube: 54
+  "carries nothing" failures in six minutes, `stalledRatio` 0.92, verdict 11/11.
+  The verdict is about the rule's DESYNC, so it now applies to any probe of a
+  desync rung. After the fix the same box reported an honest `partial 7/4/0`.
+- **The activity veto counted bytes in aggregate.** Its own evidence line gave it
+  away: `1110 KiB moved across 387 live flows` — 2.9 KiB per connection, which is
+  not a service working but a browser thrashing, opening connection after
+  connection and getting a few kilobytes out of each before the freeze kills it.
+  The floor waved that through and suppressed a probe failure that was telling
+  the truth: the false green the veto exists to prevent, produced by the veto.
+  The floor is now asked per CONNECTION too, at 24 KiB — above the ~16 KiB point
+  where the freeze bites.
+- Both are the same lesson at different scales: **an aggregate hides the
+  pathology it is made of, and a signal applied to one path but not its
+  neighbour invents a disagreement the system will oscillate between.**
+
+### Believing the traffic over the probe
+
+- A synthetic probe fetches one URL over one protocol and was measured wrong in
+  BOTH directions within a day: YouTube passed a 204 while carrying no video,
+  Discord's gateway timed out for minutes while 3.5 MB of voice flowed through
+  the same rule. `SetActivityOracle` vetoes a FAILED active probe when passive
+  observation of the operator's own connections shows the rule genuinely moving
+  traffic — narrowly: movement since the last pass, not merely live flows; not
+  while most flows are frozen; never overruling a verdict the stall oracle
+  produced, since that one is itself a measurement.
+
+### The knowledge base could recommend what this machine cannot run
+
+- Four rules had the brain asking for `alt12` — the ROUTER's script name, not a
+  recipe in this catalog — while nfqws ran its own pick. Self-sustaining: the
+  brain resolves the id, the prober records outcomes under it, the KB's
+  confidence grows, the brain resolves it again, and nothing in that loop ever
+  tries to render it. The client now narrows the KB's advice to ids it can build;
+  an empty recipe set (no desync rung here) filters nothing.
+- The warning about an unhonoured pin is announced once per state change rather
+  than on every recompose. It was firing 124 times in two minutes, and on a box
+  whose journal ring holds about six minutes that does not merely annoy — it
+  destroys the evidence for everything else.
+
+### Rules get their own tab, and the app stops calling them services
+
+- «Правила» is a flat list — one line per rule with its name, its ladder
+  (`zapret → zapret → vpn`), what it matches and what it is doing right now —
+  opening on click. Everything a rule carries is real but rarely edited, and
+  showing it all at once was unreadable at eleven rules.
+- The chain left the raw-YAML hatch with it: reorderable steps, pool names
+  offered from the config, and a note that a step whose class has no executor
+  here is silently dropped at startup — which the EMERGENCY rung was for months.
+- **Naming.** A "service" meant both the three PROCESSES Lotsman runs and the
+  rules it steers, in the same document; the dashboard said «Сервисы: 9
+  работают» about rules, when there are three services and all were running. The
+  UI now says правила / сервисы / ноды / пулы. The config key stays `services:`:
+  renaming it breaks every config and backup on both machines and wants its own
+  decision.
+- Rule order is shown as the EFFECTIVE order — priority first, file order only as
+  the tie-break — because that is what decides matching. Showing file order, as
+  first requested, would have been a claim about behaviour that does not hold.
+- (The tab landed inside the probing-fix commit rather than its own; an emergency
+  `git add -A` swept it in.)
+
+### Pools, expiry, and a fleet you could not see
+
+- `control.Fleet` did not decode `nodes`. The service had emitted the full list
+  for a while, so «Ноды» rendered a single number against the real backend while
+  looking complete against the mock — 53 exits the owner pays for, invisible.
+- Pools had no editor at all: the one place deciding WHICH exits a rule may use
+  was reachable only through the YAML hatch. Renaming a pool now follows every
+  rule that references it, deleting names what will break first, and each pool
+  says whether anything references it — one that nothing points at changes
+  nothing, and there was no other way to notice.
+- Subscriptions gained `expires:` for providers that send no
+  `Subscription-Userinfo` header, and `/status` says which of the two a date came
+  from. In a month nobody remembers whether a number was reported or typed.
+- Strategies display the upstream's own name: `flowseal-…-664-max (ALT12)`.
+  `preset` is set only where KNOWN — three ALT12 recipes by construction, plus
+  one verified byte-for-byte against ALT12's general block — never guessed.
+- The page no longer scrolls as one; each panel scrolls in its own frame. The
+  read-only Подписки tab is gone: three places to see them, one to change them,
+  and the middle one did neither.
+
+
 ### Discord voice, and the three ways we were guaranteeing it could not work
 
 - Voice media is raw UDP to whichever cloud Discord parked the voice server on
