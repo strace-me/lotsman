@@ -90,9 +90,15 @@ func (z *zapretExec) noteCarrying(service string, carrying bool) {
 // Scoped to services CURRENTLY on a desync rung, deliberately. The verdict is
 // about a recipe; once the brain has escalated, the service is on a tunnel this
 // canary never measured, and continuing to fail its probe would walk it off a path
-// nobody has any evidence against. That is the same
-// verdict-about-something-unmeasured this project keeps finding, and it would be
-// self-inflicted.
+// nobody has any evidence against.
+//
+// The verdict is CONSUMED, not held. Left standing it failed every subsequent
+// probe until the next canary happened to pass, so the probe stopped being a
+// second opinion and became an echo: the three consecutive failures escalation
+// asks for could all originate in ONE canary verdict. Measured on the ThinkPad —
+// 151 probe failures in twenty minutes carried this reason, driving 37
+// escalations. One canary verdict now fails one probe, so three failures mean
+// three canaries actually said so.
 func (z *zapretExec) StallReason(service string) (string, bool) {
 	if !z.stillOnRung(service) {
 		return "", false
@@ -102,6 +108,7 @@ func (z *zapretExec) StallReason(service string) (string, bool) {
 	if !z.notCarrying[service] {
 		return "", false
 	}
+	delete(z.notCarrying, service)
 	return "desync canary measured no goodput on this recipe: the path connects but carries nothing", true
 }
 

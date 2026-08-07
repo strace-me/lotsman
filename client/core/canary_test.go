@@ -148,7 +148,15 @@ func TestStallReasonOnlyWhileOnTheDesyncRung(t *testing.T) {
 	// Once the brain HAS escalated, the service rides a tunnel this canary never
 	// measured. Continuing to fail its probe would walk it off a path there is no
 	// evidence against — the same unmeasured-verdict family, self-inflicted.
+	// Consumed, not held: a standing verdict failed every later probe until the
+	// next canary passed, so three "consecutive failures" could all come from one
+	// canary. The probe has to stay a second opinion, not an echo.
+	if _, stalled := z.StallReason("youtube"); stalled {
+		t.Error("the verdict must be consumed by the first probe that reads it")
+	}
+
 	onRung = false
+	z.noteCarrying("youtube", false)
 	if _, stalled := z.StallReason("youtube"); stalled {
 		t.Error("the verdict must not follow the service off the desync rung")
 	}
