@@ -167,6 +167,18 @@ plus a thin unprivileged UI, since only the tun and the NFQUEUE rules need root.
   auto-failover, a per-network KB that follows a roam, and the unix control
   socket — group-ownable (0660) so an unprivileged UI can drive a root service,
   owner-only 0600 by default.
+- `client/core/canary.go` — the desync verdict, in two stages: reach the rung
+  (`canaryProbe`), then PULL VOLUME through it (`goodputOK`, via `burstprobe`),
+  because TSPU's signature failure establishes fine and freezes tens of KB in.
+  Two callers, and the split matters: `judge` runs once from `Enable`, while
+  `volumeLoop` re-measures every 5m — the apply-time one alone left steady state
+  unmeasured for the life of a rung. `goodputOK` returns `measured` so a sweep
+  that DECLINED (no target, live call, endpoint too small) cannot clear a verdict
+  a real measurement filed. Only rules with an explicit `volume_target` are
+  swept; the probe-target fallback is what once scored a 204 at 0 KiB/s and
+  demoted every recipe. `CarryingReason` is the opposite oracle — passive proof
+  the operator is USING the rule, floored per connection as well as in
+  aggregate. [judge, volumeLoop, goodputOK, StallReason, CarryingReason]
 - `client/control` — dependency-light client for that socket; the window and the
   tray talk to the service ONLY through this, so an unprivileged UI never links
   the engine.

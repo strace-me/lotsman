@@ -6,6 +6,34 @@ older sections carry working dates rather than release dates.
 
 ## [Unreleased]
 
+### The throughput canary had never run in steady state
+
+- **It only ever fired on a transition.** `judge()` is called from `Enable` —
+  three seconds after a rule ENTERS a desync rung — and `Reconcile` deliberately
+  takes no verdict, so nothing measured volume while a rule sat still. Which is
+  nearly always. `StallReason` therefore had nothing to report, and the probing
+  engine read that silence as "not stalled". Caught the way everything here gets
+  caught: YouTube would not load for hours on the owner's laptop, curl timed out
+  three times out of three, and the journal held **not one canary line**. The
+  branches were fine — a refused fetch lands squarely in "did not complete at
+  all", and there is now a test proving it — the caller simply did not exist.
+  A sweep now re-measures every 5 minutes.
+- **`goodputOK` could not say whether it had measured anything.** Disabled, no
+  target, a live voice call, an endpoint smaller than the ask — all returned the
+  same bare `true` as a genuine pass. Harmless for a one-shot; wrong for anything
+  periodic, where a sweep that declined would clear a real verdict taken minutes
+  earlier and take its escalation with it. It now reports `measured`, and only a
+  measurement that happened files a verdict.
+- **The canary's reason was composed by the reader, not the observer.** Every
+  failure was announced to the brain as "the path connects but carries nothing",
+  including one where the shallow probe never connected — untrue of precisely the
+  failure in front of us, where YouTube stalls at the TLS handshake. The stage
+  that observed it now supplies the sentence. Principle 1, third instance in the
+  same file.
+- The shipped scaffold had **no `volume_target` on any rule**, so on a fresh
+  install this whole dimension was inert while reading as wired. youtube has one
+  now, and startup logs which rules the sweep can judge and which it cannot.
+
 ### The probe told the truth and the app buried it — twice, both mine
 
 - **The canary's verdict reached the active probe but not the silent one.** For a
