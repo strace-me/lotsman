@@ -46,9 +46,9 @@ func TestRotationMovesProductionOnlyOntoAPassingCandidate(t *testing.T) {
 	c := rotCore(t, &applied)
 
 	var tried []string
-	c.testCandidate = func(_ context.Context, _ registry.Service, id string) (bool, string) {
+	c.testCandidate = func(_ context.Context, _ registry.Service, id string) (bool, bool, string) {
 		tried = append(tried, id)
-		return id == "charlie", "measured"
+		return id == "charlie", true, "measured"
 	}
 
 	c.rotateRecipe(context.Background(), "youtube", "loser")
@@ -76,8 +76,8 @@ func TestRotationMovesProductionOnlyOntoAPassingCandidate(t *testing.T) {
 func TestRotationLeavesProductionAloneWhenNothingPasses(t *testing.T) {
 	var applied []string
 	c := rotCore(t, &applied)
-	c.testCandidate = func(context.Context, registry.Service, string) (bool, string) {
-		return false, "carried nothing"
+	c.testCandidate = func(context.Context, registry.Service, string) (bool, bool, string) {
+		return false, true, "carried nothing"
 	}
 
 	c.rotateRecipe(context.Background(), "youtube", "loser")
@@ -105,9 +105,9 @@ func TestRotationHonoursItsCooldown(t *testing.T) {
 	var applied []string
 	c := rotCore(t, &applied)
 	calls := 0
-	c.testCandidate = func(context.Context, registry.Service, string) (bool, string) {
+	c.testCandidate = func(context.Context, registry.Service, string) (bool, bool, string) {
 		calls++
-		return false, "no"
+		return false, true, "no"
 	}
 
 	c.rotateRecipe(context.Background(), "youtube", "loser")
@@ -131,14 +131,57 @@ func TestRotationStopsWhenTheRuleLeavesTheRung(t *testing.T) {
 		}
 		return nil
 	}
-	c.testCandidate = func(context.Context, registry.Service, string) (bool, string) {
+	c.testCandidate = func(context.Context, registry.Service, string) (bool, bool, string) {
 		onRung = false // the brain escalated while we were measuring
-		return true, "would have passed"
+		return true, true, "would have passed"
 	}
 
 	c.rotateRecipe(context.Background(), "youtube", "loser")
 
 	if len(applied) != 0 {
 		t.Fatalf("applied %v to a rung the rule had already left", applied)
+	}
+}
+
+// The gate in front of a FIRST application must fail OPEN. A sandbox that is
+// merely broken — not built, wrong platform, nothing to fetch — would otherwise
+// pin every rule to the tunnel forever and call it caution, which is a far worse
+// failure than the one the gate prevents. Build-ahead code that has never met a
+// kernel makes this the likely path, not the exotic one.
+func TestGateAppliesUnverifiedWhenTheLaneCannotMeasure(t *testing.T) {
+	var applied []string
+	c := rotCore(t, &applied)
+	c.testCandidate = func(context.Context, registry.Service, string) (bool, bool, string) {
+		return false, false, "no sandbox on this host"
+	}
+
+	c.gateEnable(context.Background(), "youtube")
+
+	if len(applied) != 1 {
+		t.Fatalf("applied %v, want exactly one recipe: an unmeasurable lane must not leave the rule unrouted", applied)
+	}
+	// ...and it must NOT teach the knowledge base. "Could not ask" is not a verdict
+	// about the recipe, and recording it would demote a strategy for the sandbox's
+	// own breakage.
+	for _, r := range c.zapExec.recipes {
+		if c.kb.Stats("youtube", r.ID).Seen {
+			t.Errorf("recorded an outcome for %q though nothing was measured", r.ID)
+		}
+	}
+}
+
+// And when the lane DOES work, the first application is gated like any other: an
+// unproven recipe never reaches the rule's traffic.
+func TestGateAppliesOnlyAProvenRecipe(t *testing.T) {
+	var applied []string
+	c := rotCore(t, &applied)
+	c.testCandidate = func(_ context.Context, _ registry.Service, id string) (bool, bool, string) {
+		return id == "bravo", true, "measured"
+	}
+
+	c.gateEnable(context.Background(), "youtube")
+
+	if len(applied) != 1 || applied[0] != "bravo" {
+		t.Fatalf("applied %v, want [bravo] — the only candidate that passed", applied)
 	}
 }
