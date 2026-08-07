@@ -126,6 +126,11 @@
   </div>
 </div>
 
+{#if !backend}
+  <!-- The mock config is not this machine'"'"'s config, and the two are otherwise
+       indistinguishable on screen — the path below is the only tell. -->
+  <div class="banner amber">Демо-конфигурация, не файл этой машины.</div>
+{/if}
 {#if message}
   <div class="banner" class:red={messageKind === 'err'}>{message}</div>
 {/if}

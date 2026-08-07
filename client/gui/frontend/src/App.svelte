@@ -16,8 +16,15 @@
 
   // Wails injects window.go.main.App at runtime. In a plain `vite dev` browser it
   // is absent, so fall back to mock data — the skeleton still renders + designs.
+  //
+  // And it SAYS SO. Without the banner below this window renders invented rules,
+  // invented nodes and an invented config as though it had read them off the
+  // machine: mock youtube carries three domains where the real one carries seven,
+  // and nothing on screen distinguished the two. A UI asserting a state it never
+  // observed is the same defect the daemon keeps being audited for.
   const backend =
     (typeof window !== 'undefined' && window.go && window.go.main && window.go.main.App) || null
+  const demo = !backend
 
   async function load() {
     try {
@@ -181,6 +188,12 @@
   </nav>
 
   <main>
+    {#if demo}
+      <div class="banner amber">
+        Демо-данные. Это окно не подключено к службе, всё ниже — выдумка для отладки
+        вёрстки, а не состояние машины.
+      </div>
+    {/if}
     {#if error && !report && tab !== 'config'}
       <div class="banner red">Сервис недоступен — {error}</div>
     {/if}
