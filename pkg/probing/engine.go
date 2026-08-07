@@ -155,6 +155,16 @@ func (e *Engine) probeService(ctx context.Context, service string) {
 func (e *Engine) runProbe(ctx context.Context, service string, position int, kind string) {
 	v := e.prober.Probe(ctx, service, position)
 
+	// The prober could not reach the rung it was asked about, so it has nothing to
+	// say about it. Recording either outcome would be a verdict about something the
+	// measurement did not touch — the failure this project keeps finding — and
+	// publishing one would move the brain on it. Say so and stop.
+	if v.Unmeasured {
+		e.log.Info("probe skipped: the rung could not be measured from here",
+			"service", service, "kind", kind, "position", position, "why", v.Err)
+		return
+	}
+
 	// LOT-43: the prober is a header-only reachability check — blind to the TSPU
 	// IP-throttle freeze (a connection establishes, moves a few KB, then silently
 	// hangs). The eye sees it as frozen flows. Override a "healthy" ACTIVE probe to

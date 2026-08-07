@@ -256,3 +256,51 @@ func TestStallOracleAlsoFailsASilentProbeOfADesyncRung(t *testing.T) {
 		}
 	}
 }
+
+// unmeasuredProber answers every silent probe of a lower rung with "I could not
+// reach that rung", which is what the tun-mode RungProber now does instead of
+// letting the packet follow the route rule to the active VPN node.
+type unmeasuredProber struct{ active events.ProductionVerdict }
+
+func (p *unmeasuredProber) Probe(_ context.Context, service string, position int) events.ProductionVerdict {
+	if position == 2 {
+		v := p.active
+		v.Service, v.Position = service, position
+		return v
+	}
+	return events.ProductionVerdict{Service: service, Position: position, Unmeasured: true, Err: "tun would route this through the VPN"}
+}
+
+// An unmeasured rung must count as NOTHING: no EWMA sample, no verdict on the
+// bus, no recovery progress. Recording either outcome is a claim about a path
+// the probe never touched — and the optimistic direction is what dragged YouTube
+// back onto a desync rung that did not work.
+func TestUnmeasuredProbeIsNeitherSuccessNorFailure(t *testing.T) {
+	bus := events.NewBus()
+	prober := &unmeasuredProber{active: events.ProductionVerdict{OK: true, RTTms: 30}}
+	k := kb.New()
+	e := New(bus, prober, fixedPositioner(2), oneServiceReg(), k, nil, nil, 5*time.Millisecond, discardLog())
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go e.Run(ctx)
+
+	deadline := time.After(time.Second)
+	for seen := 0; seen < 3; {
+		select {
+		case v := <-bus.Verdicts:
+			if v.Position != 2 {
+				t.Fatalf("an unmeasured rung reached the brain: %+v", v)
+			}
+			seen++
+		case <-deadline:
+			t.Fatal("no verdicts published")
+		}
+	}
+
+	for _, pos := range []int{0, 1} {
+		if s := k.Stats("youtube", e.strategyKey("youtube", pos)); s.Seen {
+			t.Errorf("position %d was never measured, but the KB learned from it", pos)
+		}
+	}
+}

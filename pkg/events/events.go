@@ -27,6 +27,16 @@ type ProductionVerdict struct {
 	OK       bool
 	RTTms    int
 	Err      string
+	// Unmeasured means the probe COULD NOT reach the rung it was asked about, so
+	// neither OK nor its opposite is a claim about that rung. A reader must count
+	// it as nothing at all: not a success, not a failure, not an EWMA sample.
+	//
+	// It exists because the alternative is a lie in one direction or the other. In
+	// tun mode a silent probe of an inactive desync rung follows the service's
+	// route rule to whatever the selector points at — the VPN — so `OK` credited
+	// the desync with the tunnel's health and `!OK` would blame it for a path it
+	// never touched. Both poison the knowledge base; only silence is true.
+	Unmeasured bool
 }
 
 // DesiredStateChanged is Brain's decision about what should be active for a
