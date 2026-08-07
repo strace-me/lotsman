@@ -179,8 +179,29 @@ type Core struct {
 	// probed is when each rule was last actually probed (unix ms), written by
 	// ObserveProbe — the engine's own callback — so the UI's "recheck" feedback
 	// comes from the probe having run, not from the request having been sent.
-	probedMu   sync.Mutex
-	probed     map[string]int64
+	probedMu sync.Mutex
+	probed   map[string]int64
+
+	// The isolated test lane: a second nft table and queue reachable only by probe
+	// traffic carrying TuneMark, where a candidate desync recipe is measured before
+	// any real traffic is moved onto it. sbInitMu guards the pointer; sbMu
+	// serialises USE, because the lane holds one candidate at a time and two rules
+	// testing at once would each measure the other's strategy.
+	sbInitMu sync.Mutex
+	sb       *zapret.Sandbox
+	sbMu     sync.Mutex
+	// rotAt is when each rule last ran a rotation pass, so a rule that keeps
+	// failing does not spend the machine on engine starts.
+	rotMu sync.Mutex
+	rotAt map[string]time.Time
+	// testCandidate is the sandbox measurement, injectable so the rotation policy
+	// — which recipe is tried, in what order, and that production only ever moves
+	// onto one that PASSED — is testable without a kernel. nil uses testRecipe.
+	testCandidate func(ctx context.Context, svc registry.Service, recipeID string) (bool, string)
+	// applyForTest stands in for zapretExec.Enable so the rotation policy can be
+	// exercised without nft and a live engine. nil uses Enable.
+	applyForTest func(ctx context.Context, service, recipe string) error
+
 	metricsSrv *http.Server // non-nil only when MetricsAddr is served
 	// lastCarried is the previous observation pass's byte total per rule, so the
 	// activity oracle can ask whether traffic MOVED rather than whether a
@@ -541,8 +562,30 @@ func (c *Core) buildLoop() error {
 		}
 	}
 	rp := dataplane.NewRungProber(mp, c.clash, c.reg, "", 0)
-	if directMP != nil {
+	switch {
+	case directMP != nil:
+		// Proxy mode: "direct" really is direct, because nothing captured it.
 		rp.SetDirectProber(directMP)
+	default:
+		// Tun mode. A plain dial is captured by our own tun and routed by the
+		// service's rule — into the VPN node the rule sits on — so an inactive
+		// desync rung was credited with the tunnel's health and rules recovered onto
+		// paths nobody had measured. bdd22df made that refuse rather than lie; this
+		// makes it ANSWER, by binding the probe socket to the physical interface so
+		// it leaves outside auto_route and still meets nfqws on the way out.
+		if bound := dataplane.NewMultiProberBound(specs, c.wanIface); bound != nil {
+			for name, svc := range c.reg.Services {
+				for _, step := range svc.Chain {
+					if step.ProbeType != "" {
+						bound.OverrideRung(name, step.Position, dataplane.ServiceProbe{Type: step.ProbeType, Target: step.ProbeTarget})
+					}
+				}
+			}
+			rp.SetDirectProber(bound)
+			c.log.Info("direct-rung probe armed: bound to the physical interface, so an inactive desync rung is measured instead of refused")
+		} else {
+			c.log.Warn("no direct-rung probe on this platform: a service that escalates to VPN will not return to the desync rung on its own")
+		}
 	}
 	c.prober = rp
 	eng := probing.New(c.bus, rp, c.brain, c.reg, c.kb, c, faillog.Nop{}, c.opts.Interval, c.log)
@@ -946,6 +989,11 @@ func (c *Core) Stop() error {
 		cancel()
 	}
 	c.wg.Wait()
+	// Before the production engine, and unconditionally: a leftover sandbox table
+	// keeps diverting marked packets to a queue with nobody on it, and an orphaned
+	// candidate engine holds that queue against the next run. Either way the next
+	// measurement would describe the wreckage rather than the strategy.
+	c.closeSandbox(context.Background())
 	if c.metricsSrv != nil {
 		c.metricsSrv.Close()
 	}
@@ -1657,6 +1705,7 @@ func (c *Core) newZapretExec(ctx context.Context) *zapretExec {
 		hostlists: c.opts.HostlistDir,
 		canary:    c.canaryProbe,
 		record:    func(service, recipe string, ok bool) { c.kb.RecordOutcome(service, recipe, ok, 0) },
+		rotate:    c.rotateRecipe,
 		active:    c.zapretServices,
 		resolve:   rulesets.NewResolver(c.opts.SingboxBin, c.opts.RuleSetDir, c.log).Resolve,
 		log:       c.log,

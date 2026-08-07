@@ -61,11 +61,21 @@ func (z *zapretExec) judge(ctx context.Context, service string, chosen map[strin
 		z.log.Info("desync canary: strategy works", "service", service, "recipe", recipe)
 		return
 	}
-	// A losing strategy is demoted rather than retried: the next Enable re-composes
-	// and the picker, now seeing a worse score for this recipe, reaches for the
-	// next candidate.
 	z.log.Warn("desync canary: strategy did not restore the service, demoting it",
 		"service", service, "recipe", recipe)
+	// Demotion alone was never enough, and once automatic recovery from VPN was
+	// removed as dishonest it became nothing at all: a demoted score only matters
+	// the next time the rule ENTERS the rung, and a rule that fails here escalates
+	// away and does not come back. So the rule tried exactly one recipe per
+	// session — guess wrong, ride the tunnel forever. Measured on the owner's
+	// laptop as all eleven rules on VPN within an hour.
+	//
+	// Try the next candidates in the SANDBOX instead, and move the rule's live
+	// traffic only onto one that passed. Testing before switching is the whole
+	// point: the operator should never be the one who finds out a recipe is wrong.
+	if z.rotate != nil {
+		z.rotate(ctx, service, recipe)
+	}
 }
 
 // noteCarrying records the canary's verdict where the probe engine can consult it.

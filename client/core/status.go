@@ -186,6 +186,20 @@ func verdict(running bool, services []NodeStatus) Verdict {
 	return v
 }
 
+// wanIface is the egress interface as of RIGHT NOW, under roamMu.
+//
+// A function, not a value, because the bound prober binds its socket per dial and
+// the laptop roams: an interface captured when the prober was built would keep
+// binding to the network it booted on, which is the snapshot hole that made a
+// reconcile re-assert a previous network's tun excludes. Empty when the network
+// could not be fingerprinted — the caller must treat that as "cannot measure",
+// not as "no binding needed".
+func (c *Core) wanIface() string {
+	c.roamMu.Lock()
+	defer c.roamMu.Unlock()
+	return c.currentNet.IFace
+}
+
 // networkInfo returns the live network fingerprint under roamMu, since roamLoop
 // rewrites these fields from another goroutine.
 func (c *Core) networkInfo() NetworkInfo {
