@@ -232,3 +232,53 @@ func TestInactiveDirectRungIsUnmeasuredWithoutADirectProber(t *testing.T) {
 		t.Error("the direct prober must be the one consulted")
 	}
 }
+
+// flipBase flips the selector WHILE the probe is in flight, which is what an
+// escalation does: the rung looked live when the check ran, and the reply comes
+// back after the route has moved to the VPN pool.
+type flipBase struct {
+	flip    func()
+	verdict events.ProductionVerdict
+}
+
+func (f *flipBase) Probe(context.Context, string, int) events.ProductionVerdict {
+	f.flip()
+	return f.verdict
+}
+
+// Measured on the ThinkPad to the second: the active probe of rung 1 failed for
+// the third time, the brain applied rung 2, and the silent probe of rung 0 that
+// had already been dispatched returned ok in 117ms — where a real desync probe was
+// timing out at 5000. One invented success per escalation, credited to the desync
+// recipe in the KB. Checking only at dispatch cannot see this; the route has to be
+// re-read after the answer arrives.
+func TestRouteChangingUnderTheProbeIsUnmeasured(t *testing.T) {
+	now := "direct"
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		json.NewEncoder(w).Encode(map[string]any{"type": "Selector", "now": now})
+	}))
+	defer srv.Close()
+
+	base := &flipBase{
+		flip:    func() { now = "vpn_pool" }, // the escalation lands mid-probe
+		verdict: events.ProductionVerdict{OK: true, RTTms: 117},
+	}
+	p := NewRungProber(base, NewClashClient(srv.URL, ""), rungReg(), "", 0)
+
+	got := p.Probe(context.Background(), "web", 1)
+	if !got.Unmeasured {
+		t.Fatalf("a probe whose route moved under it must be unmeasured, got %+v", got)
+	}
+	if got.OK {
+		t.Error("it must not count as a success: that is the one this leaks per escalation")
+	}
+
+	// Steady state: the route held still, so the verdict stands. (Reset first —
+	// the flip above left the selector on the VPN pool, where refusing rung 1 is
+	// the correct answer for a different reason.)
+	now = "direct"
+	base.flip = func() {}
+	if got := p.Probe(context.Background(), "web", 1); got.Unmeasured || !got.OK {
+		t.Errorf("an unchanged route must let the verdict through, got %+v", got)
+	}
+}
