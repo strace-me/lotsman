@@ -4,7 +4,7 @@ description: "Curated zapret/nfqws DPI-desync strategy recipes for Lotsman. One 
 sources:
   - "Zapret-Manager 9.6 (zapret 72.20260307)"
   - "Flowseal/zapret-discord-youtube 1.9.9a"
-  - "router 192.168.1.1 /opt/zapret-lotsman (Flowseal 1.9.9a ported to nfqws)"
+  - "Flowseal 1.9.9a (ported to nfqws, deployed on the owner's router)"
 recipes:
   - id: "zms-dv1"
     provenance: "Zapret-Manager 9.6 (zapret 72.20260307) | also: Flowseal/zapret-discord-youtube 1.9.9a (flowseal-discord-tcp-multisplit-652)"
@@ -889,7 +889,7 @@ recipes:
       - "--dpi-desync=syndata,multidisorder"
     notes: "syndata + multidisorder (ipv4)"
   - id: "router-discord-tcp-fake-multisplit"
-    provenance: "router 192.168.1.1 /opt/zapret-lotsman (Flowseal 1.9.9a ported to nfqws)"
+    provenance: "Flowseal 1.9.9a (ported to nfqws, deployed on the owner's router)"
     target_class: "discord_tcp"
     protocol: "tcp"
     techniques: ["fake", "multisplit", "seqovl", "fooling:ts", "repeats:8", "fake-tls"]
@@ -905,7 +905,7 @@ recipes:
       - "--dpi-desync-fake-tls=tls_clienthello_www_google_com.bin"
     notes: "DEPLOYED discord.media block (active.sh / alt11.sh)"
   - id: "router-google-hostfakesplit"
-    provenance: "router 192.168.1.1 /opt/zapret-lotsman (Flowseal 1.9.9a ported to nfqws)"
+    provenance: "Flowseal 1.9.9a (ported to nfqws, deployed on the owner's router)"
     target_class: "youtube"
     protocol: "tcp"
     techniques: ["hostfakesplit", "fooling:ts", "ip-id-zero"]
@@ -918,7 +918,7 @@ recipes:
       - "--dpi-desync-hostfakesplit-mod=host=www.google.com"
     notes: "DEPLOYED google block, ALT12 active.sh (alt11 uses fake,multisplit instead)"
   - id: "router-discord-quic-stun-dbank"
-    provenance: "router 192.168.1.1 /opt/zapret-lotsman (Flowseal 1.9.9a ported to nfqws)"
+    provenance: "Flowseal 1.9.9a (ported to nfqws, deployed on the owner's router)"
     target_class: "quic"
     protocol: "udp"
     techniques: ["fake", "repeats:3", "l7-filter"]
@@ -932,7 +932,7 @@ recipes:
       - "--dpi-desync-repeats=3"
     notes: "DEPLOYED discord voice block, active.sh (stun.bin + dbankcloud, repeats=3)"
   - id: "router-quic-google-r11"
-    provenance: "router 192.168.1.1 /opt/zapret-lotsman (Flowseal 1.9.9a ported to nfqws)"
+    provenance: "Flowseal 1.9.9a (ported to nfqws, deployed on the owner's router)"
     target_class: "quic"
     protocol: "udp"
     techniques: ["fake", "repeats:11", "fake-quic"]

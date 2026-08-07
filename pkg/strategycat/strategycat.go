@@ -11,6 +11,7 @@ package strategycat
 import (
 	_ "embed"
 	"fmt"
+	"strings"
 
 	"gopkg.in/yaml.v3"
 )
@@ -144,4 +145,72 @@ func ByProtocol(p Protocol) []Recipe {
 		}
 	}
 	return out
+}
+
+// Origin is the name a human uses for where this recipe came from: the upstream
+// bundle's own preset when the catalogue records one ("ALT12"), and otherwise the
+// vendor and version compacted out of its provenance ("Flowseal 1.9.9a").
+//
+// It exists because the ID is OURS. `flowseal-general-multisplit-568-4pda`
+// describes the technique to us and answers nothing an operator asks, which is
+// "which of the strategies I know is this?". Only four of seventy recipes carry a
+// preset, so a display keyed on preset alone shows the bare id for the other
+// sixty-six — measured by the owner looking at gaming-battlenet and asking why
+// the app would not tell him the name.
+func (r Recipe) Origin() string {
+	if r.Preset != "" {
+		return r.Preset
+	}
+	p := r.Provenance
+	// Everything after "(" or "|" is a parenthetical or an alternative source, not
+	// the name. Dropping it also keeps a few older entries from putting a LAN
+	// address on screen — those provenances need rewriting before any public
+	// release regardless.
+	if i := strings.IndexAny(p, "(|"); i >= 0 {
+		p = p[:i]
+	}
+	p = strings.TrimSpace(p)
+	if p == "" {
+		return ""
+	}
+	fields := strings.Fields(p)
+	// "Flowseal/zapret-discord-youtube 1.9.9a" -> vendor is the part before the
+	// slash; the repository name is noise once the vendor is named.
+	if i := strings.Index(fields[0], "/"); i > 0 {
+		fields[0] = fields[0][:i]
+	}
+	if len(fields) > 2 {
+		fields = fields[:2]
+	}
+	// Belt and braces over the data fix: a provenance that named a machine rather
+	// than a vendor would otherwise put a LAN address or a filesystem path on the
+	// dashboard, and this catalogue is headed for a public release. Four entries
+	// did exactly that until they were rewritten; the guard stays so the next one
+	// is caught by a test instead of by a screenshot.
+	for _, f := range fields {
+		if strings.Contains(f, "/") || looksLikeAddress(f) {
+			return ""
+		}
+	}
+	return strings.Join(fields, " ")
+}
+
+// looksLikeAddress reports a bare dotted-quad. Deliberately crude: it only has to
+// recognise the shape someone types when they mean "the box in my hallway".
+func looksLikeAddress(s string) bool {
+	parts := strings.Split(s, ".")
+	if len(parts) != 4 {
+		return false
+	}
+	for _, p := range parts {
+		if p == "" {
+			return false
+		}
+		for _, r := range p {
+			if r < '0' || r > '9' {
+				return false
+			}
+		}
+	}
+	return true
 }

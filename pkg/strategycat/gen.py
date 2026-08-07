@@ -10,7 +10,7 @@
 #        Strategies_For_Youtube.md-> Yv01..Yv27      (each ``` block, one --new block)
 #   2. Flowseal (Flowseal/zapret-discord-youtube @ 1.9.9a): fetch the `general*.bat` files.
 #        winws args; join lines on `^`, split on `--new`. Each segment = one block.
-#   3. Router (root@192.168.1.1): /opt/zapret-lotsman/{active.sh,alt11.sh} - the REAL deployed
+#   3. The owner's router: /opt/zapret-lotsman/{active.sh,alt11.sh} - the REAL deployed
 #        nfqws blocks (Flowseal ALT11 / ALT12 ported to Linux nfqws). split on `--new`.
 #
 # Normalization applied to every block before dedup:
@@ -35,7 +35,9 @@ def add(id, cls, proto, prov, args, notes=""):
 
 ZMS_VER = "Zapret-Manager 9.6 (zapret 72.20260307)"
 FS_VER = "Flowseal/zapret-discord-youtube 1.9.9a"
-RT_VER = "router 192.168.1.1 /opt/zapret-lotsman (Flowseal 1.9.9a ported to nfqws)"
+# No machine names or addresses in provenance: it is rendered on the dashboard
+# and this catalogue is headed for a public release.
+RT_VER = "Flowseal 1.9.9a (ported to nfqws, deployed on the owner's router)"
 
 # ---------- zms Dv1..Dv17 : discord.media TCP ----------
 DV = {

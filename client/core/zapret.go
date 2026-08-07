@@ -116,10 +116,15 @@ func (z *zapretExec) chosenRecipe(service string) string {
 	return z.chosen[service]
 }
 
-// chosenPreset returns the upstream's own name for the bundle the running recipe
-// came from ("ALT12"), or "" when the catalog does not record one. Operators
-// reason in those names, so an id shown without it is a translation they have to
-// do in their head every time.
+// chosenPreset returns the name a human uses for where the running recipe came
+// from — the upstream bundle's own preset ("ALT12") when the catalogue records
+// one, and the vendor and version out of its provenance ("Flowseal 1.9.9a")
+// otherwise. Operators reason in those names, so an id shown without one is a
+// translation they have to do in their head every time.
+//
+// It used to return Preset alone, and only four of seventy recipes carry a
+// preset: everything else displayed as a bare id, which is OUR name for the
+// technique and answers nothing anyone asks.
 func (z *zapretExec) chosenPreset(service string) string {
 	id := z.chosenRecipe(service)
 	if id == "" {
@@ -127,7 +132,7 @@ func (z *zapretExec) chosenPreset(service string) string {
 	}
 	for _, r := range z.recipes {
 		if r.ID == id {
-			return r.Preset
+			return r.Origin()
 		}
 	}
 	return ""
