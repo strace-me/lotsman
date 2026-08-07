@@ -97,7 +97,43 @@ func (r *RungProber) Probe(ctx context.Context, service string, position int) ev
 			Err: "cannot probe an inactive direct rung in tun mode: the tun would route this through the active VPN node and credit the desync with its health",
 		}
 	}
-	return r.base.Probe(ctx, service, position)
+	// The rung looked live when we ASKED. Whether it still was when the answer came
+	// back is a different question, and during an escalation the two straddle the
+	// flip: the check runs, the selector moves to the VPN pool, and the reply that
+	// arrives afterwards travelled through the tunnel.
+	//
+	// Measured on the ThinkPad the day this was deployed, to the second — the active
+	// probe of rung 1 failed for the third time, the brain applied rung 2, and the
+	// silent probe of rung 0 that had already been dispatched came back ok in 117 ms
+	// where a real desync probe was timing out at 5000. One fabricated success per
+	// escalation, every time, and RecordOutcome credited it to the desync recipe.
+	//
+	// So ask again afterwards. A verdict about a path is only about that path if the
+	// path did not change underneath it. `judge` learned the same lesson earlier and
+	// calls stillOnRung for the same reason.
+	before, known := r.selectorNow(ctx, service)
+	v := r.base.Probe(ctx, service, position)
+	if after, stillKnown := r.selectorNow(ctx, service); known && stillKnown && after != before {
+		return events.ProductionVerdict{
+			Service: service, Position: position, Unmeasured: true,
+			Err: "the route changed while the probe was in flight (" + before + " → " + after + "), so the answer is not about this rung",
+		}
+	}
+	return v
+}
+
+// selectorNow reports which rung the service's selector points at, and whether
+// that could be determined at all. Unknown is NOT the same as unchanged: a reader
+// that cannot see the selector must not conclude the route held still.
+func (r *RungProber) selectorNow(ctx context.Context, service string) (string, bool) {
+	if r.clash == nil {
+		return "", false
+	}
+	info, err := r.clash.Proxy(ctx, registry.SelectorTag(service))
+	if err != nil {
+		return "", false
+	}
+	return info.Now, true
 }
 
 // inactiveDirectRouted reports whether position is a non-VPN (direct-routed) rung
