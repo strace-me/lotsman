@@ -16,11 +16,11 @@ func TestPresetModeAppliesTheBundleVerbatim(t *testing.T) {
 	var applied []string
 	c := rotCore(t, &applied)
 	want := []string{"--filter-tcp=443", "--hostlist=/opt/zapret/list-google.txt", "--dpi-desync=hostfakesplit"}
-	c.zapExec.preset = &config.ZapretPreset{Name: "ALT12", Args: want}
+	c.zapExec.presets = []config.ZapretPreset{{Name: "ALT12", Args: want}}
 
 	got := c.rankedCandidates("youtube", "", 3)
 	if len(got) != 1 || got[0] != "ALT12" {
-		t.Fatalf("one bundle serves every rule; there is nothing to rank: %v", got)
+		t.Fatalf("the declared bundles are the candidates: %v", got)
 	}
 }
 
@@ -43,5 +43,31 @@ func TestAnEmptyPresetIsRefusedRatherThanIgnored(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "no arguments") {
 		t.Errorf("the refusal must name the cause, got %v", err)
+	}
+}
+
+// The owner's ask, made mechanical: twenty-one Flowseal strategies become
+// twenty-one candidates, and the prober tries them WHOLE instead of trying
+// fragments of one. Bounded per pass like any other candidate list, because a
+// lift costs an nft table and an engine start.
+func TestEveryDeclaredPresetIsACandidate(t *testing.T) {
+	var applied []string
+	c := rotCore(t, &applied)
+	for _, n := range []string{"ALT", "ALT2", "ALT12", "EXP", "SIMPLE FAKE"} {
+		c.zapExec.presets = append(c.zapExec.presets,
+			config.ZapretPreset{Name: n, Args: []string{"--filter-tcp=443", "--dpi-desync=fake"}})
+	}
+	got := c.rankedCandidates("youtube", "", 3)
+	if len(got) != 3 {
+		t.Fatalf("a pass is bounded to three lifts, got %d: %v", len(got), got)
+	}
+	all := c.rankedCandidates("youtube", "", 99)
+	if len(all) != 5 {
+		t.Errorf("every declared bundle must be reachable across passes, got %v", all)
+	}
+	// And the one just tried is excluded, so a rotation moves ON rather than
+	// re-measuring the bundle that just failed.
+	if next := c.rankedCandidates("youtube", "ALT12", 99); len(next) != 4 {
+		t.Errorf("the failed bundle was offered again: %v", next)
 	}
 }

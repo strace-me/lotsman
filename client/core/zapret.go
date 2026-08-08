@@ -54,9 +54,10 @@ type zapretExec struct {
 	recipes []strategycat.Recipe
 	pick    zaptune.Picker // ranks candidate recipes (KB-learned, catalog order as tiebreak)
 	files   string         // zapret payload dir, for resolving .bin references
-	// preset runs an upstream bundle verbatim instead of composing per rule
-	// (nil = compose). See config.ZapretPreset for what the mode costs.
-	preset    *config.ZapretPreset
+	// presets are upstream bundles run verbatim instead of composing per rule
+	// (empty = compose). Several means the lane tries them WHOLE and only one that
+	// carried moves live traffic. See config.ZapretPreset for what the mode costs.
+	presets   []config.ZapretPreset
 	hostlists string                    // dir for per-service hostlist files ("" = inline the domains)
 	active    func() []registry.Service // services CURRENTLY on a zapret rung
 	resolve   zaptune.Resolver
@@ -241,21 +242,55 @@ func (z *zapretExec) applyNow(ctx context.Context, service, recipe string) error
 // still derived from the argv, as it is for a composed strategy, so a preset that
 // filters ports we do not normally capture is captured anyway.
 func (z *zapretExec) applyPresetLocked(ctx context.Context, active []registry.Service) (*zaptune.Plan, error) {
-	full := absolutizePayloads(z.preset.Args, z.files)
+	preset := z.presetFor(active)
+	full := absolutizePayloads(preset.Args, z.files)
 	restarted, err := z.engine.Apply(ctx, full)
 	if err != nil {
 		return nil, err
 	}
 	chosen := make(map[string]string, len(active))
 	for _, svc := range active {
-		chosen[svc.Name] = z.preset.Name
+		chosen[svc.Name] = preset.Name
 	}
 	z.setChosen(chosen)
 	if restarted {
 		z.log.Info("zapret: preset applied verbatim, nothing composed",
-			"preset", z.preset.Name, "services", len(active), "args", len(z.preset.Args))
+			"preset", preset.Name, "services", len(active), "args", len(preset.Args),
+			"of", len(z.presets))
 	}
 	return &zaptune.Plan{Covered: true, Args: full, Chosen: chosen}, nil
+}
+
+// presetFor picks which bundle runs. One bundle serves every rule, so a pin from
+// ANY rule on the rung decides it — the lane proves a preset for one service and
+// the whole machine moves onto it, which is what "run it whole" means.
+//
+// Falls back to the first declared preset, which is also the only sane cold start:
+// with nothing proven yet, catalogue order is the operator's own ordering of the
+// files.
+func (z *zapretExec) presetFor(active []registry.Service) config.ZapretPreset {
+	for _, svc := range active {
+		want := z.pinned[svc.Name]
+		if want == "" {
+			continue
+		}
+		for _, p := range z.presets {
+			if p.Name == want {
+				return p
+			}
+		}
+	}
+	return z.presets[0]
+}
+
+// presetByName returns a declared bundle by its upstream name.
+func (z *zapretExec) presetByName(name string) (config.ZapretPreset, bool) {
+	for _, p := range z.presets {
+		if p.Name == name {
+			return p, true
+		}
+	}
+	return config.ZapretPreset{}, false
 }
 
 // pinFor reports the strategy currently pinned for a service, if any.
@@ -300,7 +335,7 @@ func (z *zapretExec) composeAndApplyLocked(ctx context.Context) (*zaptune.Plan, 
 	// rule is a different strategy wearing the same name, and ALT12 is refused as
 	// self-shadowing precisely because our per-rule rendering gives two profiles the
 	// same hostlist where its author gave them different ones.
-	if z.preset != nil {
+	if len(z.presets) > 0 {
 		return z.applyPresetLocked(ctx, active)
 	}
 	plan := zaptune.ComposePinned(active, z.recipes, z.pick, z.resolve, z.hostlists, z.pinned)

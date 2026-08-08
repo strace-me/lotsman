@@ -1730,7 +1730,7 @@ func (c *Core) newZapretExec(ctx context.Context) *zapretExec {
 		pick:      zaptune.KBPicker(c.recipeScore),
 		files:     c.opts.ZapretFiles,
 		hostlists: c.opts.HostlistDir,
-		preset:    c.conf.ZapretPreset,
+		presets:   c.conf.ZapretPresets,
 		// The lifetime an async verdict rides. It has a field because it must NOT be
 		// the applier's per-call context — and it was never assigned, so every canary
 		// and every sandbox test has been riding whatever context happened to reach

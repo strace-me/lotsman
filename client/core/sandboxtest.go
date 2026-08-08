@@ -86,7 +86,11 @@ func (c *Core) testRecipe(ctx context.Context, svc registry.Service, recipeID st
 	// Composing here instead would test a per-rule rendering of a whole-machine
 	// preset — a different strategy under the same name, which is the failure the
 	// mode exists to avoid.
-	if p := c.zapExec.preset; p != nil {
+	if len(c.zapExec.presets) > 0 {
+		p, ok := c.zapExec.presetByName(recipeID)
+		if !ok {
+			return false, false, "no preset by that name is declared: " + recipeID
+		}
 		return c.measureArm(ctx, svc, sb, client, h3, p.Name, absolutizePayloads(p.Args, c.opts.ZapretFiles))
 	}
 	// Compose the candidate for THIS rule alone, pinned to the recipe under test.
@@ -513,8 +517,21 @@ func (c *Core) rankedCandidates(service, exclude string, n int) []string {
 	// One bundle serves every rule, so there is exactly one thing to try and
 	// nothing to rank. Offering the catalogue here would let the lane crown a
 	// per-rule recipe that production, running the preset, is never going to apply.
-	if p := c.zapExec.preset; p != nil {
-		return []string{p.Name}
+	if len(c.zapExec.presets) > 0 {
+		// The bundles ARE the candidates, ranked by what has carried before, exactly as
+		// recipes are. This is the owner's ask made mechanical: the prober tries whole
+		// strategies instead of fragments of one.
+		var names []string
+		for _, p := range c.zapExec.presets {
+			if p.Name != exclude {
+				names = append(names, p.Name)
+			}
+		}
+		sortByScore(names, func(id string) float64 { return c.recipeScore(service, id) })
+		if len(names) > n {
+			names = names[:n]
+		}
+		return names
 	}
 	var out []string
 	// Only recipes the COMPOSER will honour for this rule. Offering anything else
