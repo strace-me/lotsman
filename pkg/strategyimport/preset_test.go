@@ -1,0 +1,103 @@
+package strategyimport
+
+import (
+	"strings"
+	"testing"
+)
+
+// Structurally faithful ALT12: `^` continuations, `set` assignments whose values
+// keep %~dp0, quoted %LISTS%/%BIN% paths inside the argument, the WinDivert
+// capture, an empty user list, and a game profile whose ports only exist once
+// service.bat has run.
+const batSample = `@echo off
+set "BIN=%~dp0bin\"
+set "LISTS=%~dp0lists\"
+start "zapret: %~n0" /min "%BIN%winws.exe" --wf-tcp=80,443,%GameFilterTCP% --wf-udp=443,%GameFilterUDP% ^
+--filter-tcp=443 --hostlist="%LISTS%list-google.txt" --dpi-desync=hostfakesplit --dpi-desync-hostfakesplit-mod=host=www.google.com --new ^
+--filter-tcp=80,443 --hostlist="%LISTS%list-general.txt" --hostlist="%LISTS%list-general-user.txt" --hostlist-exclude="%LISTS%list-exclude.txt" --dpi-desync=fake,multisplit --dpi-desync-fake-tls="%BIN%tls_clienthello_max_ru.bin" --new ^
+--filter-tcp=%GameFilterTCP% --ipset="%LISTS%ipset-all.txt" --dpi-desync=fake
+`
+
+func presetSource() Source {
+	return Source{Name: "Flowseal 1.10.0, general (ALT12).bat", Kind: KindBat, Body: []byte(batSample)}
+}
+
+// The whole reason preset mode exists: each profile keeps ITS OWN list. Collapsed
+// onto one — which is what a per-rule rendering does — the second profile can
+// never match and the recipe is refused as self-shadowing.
+func TestAsPresetKeepsThePerProfileLists(t *testing.T) {
+	p, err := AsPreset("ALT12", presetSource(), PresetOptions{ListsDir: "/lists"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := strings.Join(p.Args, " ")
+	for _, want := range []string{
+		"--hostlist=/lists/list-google.txt",
+		"--hostlist=/lists/list-general.txt",
+		"--hostlist-exclude=/lists/list-exclude.txt",
+		// Payloads resolve against the zapret files dir, as they do for a composed
+		// strategy, so they arrive bare.
+		"--dpi-desync-fake-tls=tls_clienthello_max_ru.bin",
+		// And no desync argument is ever interpreted.
+		"--dpi-desync-hostfakesplit-mod=host=www.google.com",
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("missing %q in:\n%s", want, got)
+		}
+	}
+	if n := strings.Count(got, "--new"); n != 1 {
+		t.Errorf("want one --new between the two kept profiles, got %d:\n%s", n, got)
+	}
+	if p.Lists == nil || len(p.Payloads) == 0 {
+		t.Errorf("the file must declare what it needs on disk: lists=%v payloads=%v", p.Lists, p.Payloads)
+	}
+}
+
+// Three things cannot mean anything here, and each must be dropped LOUDLY — a
+// silent drop yields a preset that is not the preset, which is the failure this
+// mode exists to end.
+func TestAsPresetRecordsEverythingItChanged(t *testing.T) {
+	p, err := AsPreset("ALT12", presetSource(), PresetOptions{ListsDir: "/lists"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := strings.Join(p.Args, " ")
+	if strings.Contains(got, "--wf-") {
+		t.Error("the WinDivert capture survived; ours is derived from --filter-* into nft")
+	}
+	if strings.Contains(got, "-user.txt") {
+		t.Error("an empty upstream user list survived — nfqws exits on a missing hostlist")
+	}
+	if strings.ContainsAny(got, `%"`) {
+		t.Errorf("an unresolved variable or stray quote reached the argv:\n%s", got)
+	}
+	// The game profile is filtered only by a runtime variable, so it is dropped
+	// WHOLE — kept unfiltered it would claim every packet the queue hands it.
+	if strings.Contains(got, "ipset-all.txt") {
+		t.Error("the game profile was kept without its filter")
+	}
+	joined := strings.Join(p.Dropped, " ")
+	for _, want := range []string{"--wf-*", "-user.txt", "%GameFilter"} {
+		if !strings.Contains(joined, want) {
+			t.Errorf("%q missing from the record: %v", want, p.Dropped)
+		}
+	}
+	// And the record reaches the file, where the person reading the argv will see
+	// it, rather than staying in a commit message.
+	if !strings.Contains(RenderPreset(p, "test"), "CHANGED FROM UPSTREAM") {
+		t.Error("the rendered file does not say what was changed")
+	}
+}
+
+func TestPresetName(t *testing.T) {
+	for in, want := range map[string]string{
+		"general (ALT12).bat":         "ALT12",
+		"general (FAKE TLS AUTO).bat": "FAKE TLS AUTO",
+		"general.bat":                 "general",
+		"/tmp/x/general (SIMPLE).bat": "SIMPLE",
+	} {
+		if got := PresetName(in); got != want {
+			t.Errorf("PresetName(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
