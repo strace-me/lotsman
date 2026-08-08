@@ -29,11 +29,16 @@ const laneVerdictTTL = 3 * time.Minute
 // the recipe, and the only thing that could measure WITH the recipe was wired
 // only to rotation.
 //
-// Answers are cached for laneVerdictTTL because a lift costs an nft table and an
-// engine start, while the probe tick is every ten seconds. Between measurements
-// it reports Unmeasured rather than repeating itself: five consecutive successes
-// are what recovery asks for, and five echoes of one measurement are not five
-// measurements — the same mistake the canary's standing verdict once made.
+// A measurement is reported ONCE, to whoever asked for it. For the rest of
+// laneVerdictTTL the answer is Unmeasured, because a lift costs an nft table and
+// an engine start while the probe tick is every ten seconds, and the brain wants
+// five CONSECUTIVE successes before it moves a rule back. Five reads of one
+// three-minute-old measurement are one measurement, and reporting them as five
+// destroys exactly the stability the threshold exists to require — the standing
+// verdict that principle 12 is named after. The honest cost is that recovery from
+// the tunnel to a desync rung now needs five separate lane passes, so it takes
+// tens of minutes rather than a minute. It is a background self-heal with no
+// alerting; slow and true beats prompt and invented.
 type laneProber struct {
 	core *Core
 	// fallback answers for rungs the lane cannot speak about — a direct/LOCKED
@@ -46,10 +51,14 @@ type laneProber struct {
 }
 
 type laneVerdict struct {
-	at   time.Time
-	ok   bool
-	why  string
-	seen bool
+	at time.Time
+	ok bool
+	// measured distinguishes "the lane ran and this is the answer" from "the lane
+	// could not ask" — a rule with no volume_target, a candidate that would not
+	// compose, a torn-down loop. Only the first is a verdict about the rung.
+	measured bool
+	why      string
+	seen     bool
 }
 
 func newLaneProber(c *Core, fallback dataplane.Prober) *laneProber {
@@ -69,9 +78,14 @@ func (l *laneProber) Probe(ctx context.Context, service string, position int) ev
 	}
 
 	if cached, fresh := l.fresh(service); fresh {
-		v.OK = cached.ok
-		if !cached.ok {
-			v.Err = "the lane could not prove a recipe for this rung: " + cached.why
+		// The measurement behind this has already been reported once. Repeating it
+		// would count one lift as many.
+		v.Unmeasured = true
+		ago := time.Since(cached.at).Truncate(time.Second).String()
+		if cached.measured {
+			v.Err = "the lane measured this rule " + ago + " ago and will not report the same measurement twice"
+		} else {
+			v.Err = "the lane failed to measure this rule " + ago + " ago and is not retrying yet"
 		}
 		return v
 	}
@@ -84,8 +98,8 @@ func (l *laneProber) Probe(ctx context.Context, service string, position int) ev
 		return v
 	}
 
-	cand, proven := l.core.provenCandidateFor(ctx, svc, "", false, false)
-	res := laneVerdict{at: time.Now(), seen: true, ok: cand != "" && proven}
+	cand, proven, measured := l.core.provenCandidateFor(ctx, svc, "", false, false)
+	res := laneVerdict{at: time.Now(), seen: true, measured: measured, ok: cand != "" && proven}
 	if !res.ok {
 		res.why = "no candidate carried the volume"
 	}
@@ -93,6 +107,15 @@ func (l *laneProber) Probe(ctx context.Context, service string, position int) ev
 	l.cache[service] = res
 	l.mu.Unlock()
 
+	// The lane never put anything in front of the censor — no volume_target to
+	// judge by, nothing that would compose, a loop torn down mid-pass. That is a
+	// statement about US, and answering the brain with it would reset a recovery
+	// counter on evidence that does not exist.
+	if !measured {
+		v.Unmeasured = true
+		v.Err = "the lane could not measure this rung at all (see the per-candidate reasons above)"
+		return v
+	}
 	if res.ok {
 		l.core.log.Info("lane proved a desync recipe for a rule that is not on it — recovery can proceed",
 			"service", service, "position", position, "candidate", cand)

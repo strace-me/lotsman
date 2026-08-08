@@ -33,11 +33,18 @@ type Launcher func(ctx context.Context, bin, dir string, argv []string) (stop fu
 // Apply has the signature desynctune.TuneService wants, so the tuner drives this
 // directly.
 type Sandbox struct {
-	Opts     IsolateOptions
-	Bin      string // engine binary
-	Dir      string // working dir, so bare payload filenames resolve
-	Run      Runner
-	Launch   Launcher
+	Opts   IsolateOptions
+	Bin    string // engine binary
+	Dir    string // working dir, so bare payload filenames resolve
+	Run    Runner
+	Launch Launcher
+	// WAN re-resolves the egress interface each time the table is installed. The
+	// table matches `oifname`, and a laptop that roams changes it — leaving a
+	// sandbox that queues nothing, so every candidate reads "carried nothing at
+	// all" and the recipes get blamed for the lane being pointed at a dead
+	// interface. Production's engine was fixed the same way; the lane kept the
+	// value it read at first lift. Optional: nil keeps Opts.WAN.
+	WAN      func() string
 	Log      *slog.Logger
 	ProdQNum int // production's queue; the sandbox refuses to share it
 
@@ -115,6 +122,15 @@ func (s *Sandbox) Close(ctx context.Context) error {
 }
 
 func (s *Sandbox) installLocked(ctx context.Context) error {
+	// Re-read the egress interface HERE, where the rule that names it is rendered,
+	// rather than trusting whatever was true when this Sandbox was built.
+	if s.WAN != nil {
+		if wan := s.WAN(); wan != "" && wan != s.Opts.WAN {
+			s.log().Info("desync sandbox: egress interface changed, re-scoping the lane",
+				"was", s.Opts.WAN, "now", wan)
+			s.Opts.WAN = wan
+		}
+	}
 	// A table from a killed run would otherwise stack with this one.
 	_ = s.Run.Run(ctx, "nft", "delete", "table", s.Opts.Table)
 	f, err := os.CreateTemp("", "lotsman-sandbox-*.nft")

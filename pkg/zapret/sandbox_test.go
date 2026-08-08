@@ -5,6 +5,7 @@ import (
 	"errors"
 	"io"
 	"log/slog"
+	"os"
 	"strings"
 	"testing"
 )
@@ -173,5 +174,78 @@ func TestBaselineIsNoEngineNotAnError(t *testing.T) {
 	// the previous candidate and describes it instead.
 	if err := s.Apply(ctx, nil); err != nil {
 		t.Fatal(err)
+	}
+}
+
+// nftReader is a runner that keeps what was actually rendered into the table,
+// because the rule this test is about — `oifname` — exists only in the file and
+// never in the command line.
+type nftReader struct {
+	recRunner
+	files []string
+}
+
+func (n *nftReader) Run(ctx context.Context, name string, args ...string) error {
+	if name == "nft" && len(args) == 2 && args[0] == "-f" {
+		if b, err := os.ReadFile(args[1]); err == nil {
+			n.files = append(n.files, string(b))
+		}
+	}
+	return n.recRunner.Run(ctx, name, args...)
+}
+
+// The lane's table matches `oifname`, and a laptop roams. Read once at
+// construction, the sandbox keeps queueing on an interface that stopped being
+// the egress — nothing is diverted, every candidate reads "carried nothing at
+// all", and the recipes take the blame for the lane pointing at a dead
+// interface. Production's engine was fixed for exactly this (principle 16); the
+// lane had the same hole one layer down.
+func TestSandboxRescopesToTheCurrentEgressInterface(t *testing.T) {
+	n := &nftReader{}
+	s := sandboxFor(t, &n.recRunner, func(context.Context, string, string, []string) (func(), error) {
+		return func() {}, nil
+	})
+	s.Run = n
+	wan := "wlan0"
+	s.WAN = func() string { return wan }
+	ctx := context.Background()
+
+	if err := s.Apply(ctx, []string{"--dpi-desync=fake"}); err != nil {
+		t.Fatal(err)
+	}
+	if len(n.files) != 1 || !strings.Contains(n.files[0], `oifname "wlan0"`) {
+		t.Fatalf("the first lift did not scope to the live interface: %v", n.files)
+	}
+
+	// The machine roams, and the lane comes up again for the next candidate.
+	if err := s.Close(ctx); err != nil {
+		t.Fatal(err)
+	}
+	wan = "enp0s31f6"
+	if err := s.Apply(ctx, []string{"--dpi-desync=fake"}); err != nil {
+		t.Fatal(err)
+	}
+	if len(n.files) != 2 {
+		t.Fatalf("the table was not reinstalled after a teardown: %d installs", len(n.files))
+	}
+	if !strings.Contains(n.files[1], `oifname "enp0s31f6"`) {
+		t.Errorf("the lane kept the interface it was built with:\n%s", n.files[1])
+	}
+}
+
+// A resolver that cannot answer must not blank the rule: `oifname ""` matches
+// nothing, which is the same silent no-desync failure with a different cause.
+func TestSandboxKeepsItsInterfaceWhenTheResolverIsBlank(t *testing.T) {
+	n := &nftReader{}
+	s := sandboxFor(t, &n.recRunner, func(context.Context, string, string, []string) (func(), error) {
+		return func() {}, nil
+	})
+	s.Run = n
+	s.WAN = func() string { return "" }
+	if err := s.Apply(context.Background(), []string{"--dpi-desync=fake"}); err != nil {
+		t.Fatal(err)
+	}
+	if len(n.files) != 1 || !strings.Contains(n.files[0], `oifname "eth0"`) {
+		t.Fatalf("a blank resolver replaced a good interface: %v", n.files)
 	}
 }

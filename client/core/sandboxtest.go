@@ -184,6 +184,9 @@ func (c *Core) sandbox() (*zapret.Sandbox, error) {
 		},
 		Bin: c.opts.NfqwsBin, Dir: c.opts.ZapretFiles,
 		Run: executor.ExecRunner{}, Launch: zapret.ExecLauncher(0),
+		// Not the value read on the line above: this Sandbox outlives a roam, and
+		// the table names the interface every time it is installed.
+		WAN:      c.wanIface,
 		ProdQNum: prod, Log: c.log,
 	}
 	return c.sb, nil
@@ -302,29 +305,41 @@ func (c *Core) claimRotation(service string) bool {
 // could not measure at all yields the top candidate marked unverified rather than
 // nothing at all.
 func (c *Core) provenCandidate(ctx context.Context, svc registry.Service, exclude string, failOpen bool) (string, bool) {
-	return c.provenCandidateFor(ctx, svc, exclude, failOpen, true)
+	cand, verified, _ := c.provenCandidateFor(ctx, svc, exclude, failOpen, true)
+	return cand, verified
 }
 
-// provenCandidateFor is provenCandidate with the rung check made optional.
+// provenCandidateFor is provenCandidate with the rung check made optional, and
+// with the pass's own honesty reported back: measured says whether ANY candidate
+// was actually put in front of the censor.
+//
+// The third return value is not decoration. Without it "no candidate passed" and
+// "the lane never asked" are the same value, and a caller deciding a rule's fate
+// on it manufactures a failure out of its own inability to measure — principle 2,
+// and it was live on the owner's laptop: discord has no volume_target, so all
+// three of its candidates refused before the lane even lifted, and the recovery
+// probe reported that as a hard NO every ten seconds. A failed silent probe
+// RESETS the brain's recovery counter, so the rule the owner wants on desync was
+// being held on the tunnel by a measurement that never happened.
 //
 // steering means "we intend to change what this rule is running", and then the
 // rule must still be on the rung we are steering. Recovery is the other case: the
 // rule is deliberately somewhere else and we are asking whether it COULD come
 // back, so requiring it to be here already would refuse the only question worth
 // asking.
-func (c *Core) provenCandidateFor(ctx context.Context, svc registry.Service, exclude string, failOpen, steering bool) (string, bool) {
+func (c *Core) provenCandidateFor(ctx context.Context, svc registry.Service, exclude string, failOpen, steering bool) (cand string, verified, measured bool) {
 	test := c.testCandidate
 	if test == nil {
 		test = c.testRecipe
 	}
 	cands := c.rankedCandidates(svc.Name, exclude, sandboxCandidates)
 	if len(cands) == 0 {
-		return "", false
+		return "", false, false
 	}
 	anyMeasured := false
 	for _, cand := range cands {
 		if steering && !c.zapExec.stillOnRung(svc.Name) {
-			return "", false // the brain moved it; the rung is not ours to steer
+			return "", false, anyMeasured // the brain moved it; the rung is not ours to steer
 		}
 		ok, measured, why := test(ctx, svc, cand)
 		anyMeasured = anyMeasured || measured
@@ -340,14 +355,14 @@ func (c *Core) provenCandidateFor(ctx context.Context, svc registry.Service, exc
 		if steering && !c.zapExec.stillOnRung(svc.Name) {
 			c.log.Info("rule left the desync rung mid-measurement, not applying the candidate",
 				"service", svc.Name, "candidate", cand)
-			return "", false
+			return "", false, anyMeasured
 		}
 		if ok {
 			// measured=true on the WINNING line too. A reader counting measured=true to
 			// find real measurements got zero, because only refusals carried the field.
 			c.log.Info("candidate PASSED in the sandbox",
 				"service", svc.Name, "candidate", cand, "measured", true, "evidence", why)
-			return cand, true
+			return cand, true, true
 		}
 		c.log.Info("candidate rejected in the sandbox, real traffic untouched",
 			"service", svc.Name, "candidate", cand, "measured", measured, "why", why)
@@ -359,9 +374,9 @@ func (c *Core) provenCandidateFor(ctx context.Context, svc registry.Service, exc
 	if failOpen && !anyMeasured {
 		c.log.Warn("the test lane could not measure anything for this rule; applying the top candidate unverified rather than leaving the rule unrouted",
 			"service", svc.Name, "candidate", cands[0])
-		return cands[0], false
+		return cands[0], false, false
 	}
-	return "", false
+	return "", false, anyMeasured
 }
 
 // applyCandidate is the only place a recipe becomes the thing in service.

@@ -67,12 +67,56 @@ func TestLaneProberDoesNotEchoItselfIntoARecovery(t *testing.T) {
 	if first.OK || first.Unmeasured {
 		t.Fatalf("a measured failure must be a failure, got %+v", first)
 	}
-	// Cached: same answer, no second lift.
-	if second := l.Probe(context.Background(), "youtube", 0); second.OK {
-		t.Error("a cached failure must not turn into a success")
+	// Cached: no second lift, and no second verdict either.
+	if second := l.Probe(context.Background(), "youtube", 0); second.OK || !second.Unmeasured {
+		t.Errorf("a cached answer must be reported as Unmeasured, got %+v", second)
 	}
 	if calls == 0 {
 		t.Fatal("the lane was never asked")
+	}
+}
+
+// The same rule in the other direction: a PASS must be reported once and then
+// stop counting. The brain recovers on five CONSECUTIVE successes, so a cached
+// yes replayed every ten seconds turns one lift into a recovery — which is the
+// standing verdict the whole probe was built to stop repeating.
+func TestLaneProberReportsAPassOnlyOnce(t *testing.T) {
+	c, fb := laneCore(t)
+	c.testCandidate = func(_ context.Context, _ registry.Service, id string) (bool, bool, string) {
+		return id == "bravo", true, "measured"
+	}
+	l := newLaneProber(c, fb)
+
+	if first := l.Probe(context.Background(), "youtube", 0); !first.OK {
+		t.Fatalf("the lane proved a candidate, want a success, got %+v", first)
+	}
+	second := l.Probe(context.Background(), "youtube", 0)
+	if second.OK {
+		t.Errorf("one measurement must not be reported as two successes, got %+v", second)
+	}
+	if !second.Unmeasured {
+		t.Errorf("a replayed answer is not a verdict; want Unmeasured, got %+v", second)
+	}
+}
+
+// Discord, live on the owner's laptop: no volume_target, so every candidate
+// refused before the lane even lifted — and the probe reported that as a hard NO
+// every ten seconds. A failed silent probe RESETS the brain's recovery counter,
+// so the rule he wants on desync was pinned to the tunnel by a measurement that
+// never happened. Principle 2, from the inside.
+func TestLaneProberWillNotFailARungItCouldNotMeasure(t *testing.T) {
+	c, fb := laneCore(t)
+	c.testCandidate = func(context.Context, registry.Service, string) (bool, bool, string) {
+		return false, false, "rule has no volume_target, so the lane has nothing to judge a candidate by"
+	}
+	l := newLaneProber(c, fb)
+
+	v := l.Probe(context.Background(), "youtube", 0)
+	if v.OK {
+		t.Fatalf("nothing was measured; a success would be invented, got %+v", v)
+	}
+	if !v.Unmeasured {
+		t.Fatalf("a lane that never asked must say so, not fail the rung: %+v", v)
 	}
 }
 
