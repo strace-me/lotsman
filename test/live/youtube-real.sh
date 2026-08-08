@@ -103,13 +103,69 @@ else
   row "и чего это стоит" "дольше старт, чаще ребуферинг; наша проба по TCP этого не увидит вовсе"
 fi
 
-say "F. контроль: заблокированное БЕЗ десинка"
-# Если эти отвечают так же бодро, как ютуб, значит десинк ни при чём и путь
-# просто не фильтруется — вывод «рецепт работает» был бы ложным.
-for u in https://www.instagram.com/ https://x.com/; do
-  printf '  %-28s ' "$(printf '%s' "$u" | sed -E 's#https://([^/]+)/.*#\1#')"
-  "${CURL[@]}" -o /dev/null -w 'код %{http_code}  %{size_download} байт  %{time_total}s  %{errormsg}\n' "$u" || echo ОТКАЗ
+say "F. соседи: другие заблокированные, и НА ЧЁМ они сидят"
+# Раньше эта секция была подписана «БЕЗ десинка» и это было неправдой: и
+# instagram, и x на боевой машине сидят на десинк-ступенях, так что контролем в
+# задуманном смысле она никогда не была. Хуже — она приглашала прочитать «у них
+# тоже хорошо, значит путь не фильтруется», хотя у них просто СВОЙ рецепт.
+#
+# Поэтому теперь она не притворяется контролем. Она печатает, на какой ступени и
+# на каком рецепте сидит каждый сосед, и результат читается рядом с этим. Разные
+# рецепты, разные исходы — это про рецепты; одинаково хорошо у всех, включая
+# заведомо заблокированное, — вот тогда путь не фильтруется.
+rung_of() {
+  curl -s --max-time 4 --unix-socket /run/lotsman/control.sock http://localhost/status 2>/dev/null |
+    python3 -c "
+import json,sys
+try: d=json.load(sys.stdin)
+except Exception: sys.exit()
+for s in d.get('services',[]):
+    if s.get('service')=='$1':
+        print('rung%s %s %s' % (s.get('rung'), s.get('rungClass'), s.get('strategy') or ''))
+" 2>/dev/null
+}
+for pair in "instagram https://www.instagram.com/" "x https://x.com/"; do
+  set -- $pair
+  printf '  %-10s %-34s ' "$1" "$(rung_of "$1")"
+  # --speed-limit: заморозка по объёму выглядит как «отдал крохи и встал», и без
+  # обрыва по простою она пряталась бы за общим таймаутом ещё полминуты.
+  "${CURL[@]}" --speed-limit 1024 --speed-time 10 -o /dev/null \
+    -w 'код %{http_code}  %{size_download} байт  %{time_total}s\n' "$2" \
+    || echo "ОБОРВАЛОСЬ — отдало крохи и встало (сигнатура заморозки)"
 done
+
+say "G. одна сеть, РАЗНЫЕ КЛИЕНТЫ — тот же URL, то же мгновение"
+# Смещения сплита позиционные, значит рецепт настроен под определённую ФОРМУ
+# TLS-приветствия. Измерено на чистой сети: curl отдал 1.33 МБ, python-urllib
+# 1.28 МБ, а requests/urllib3 внутри yt-dlp повис на 45 с три раза из трёх — на
+# одном и том же URL в одну и ту же минуту. «Рецепт работает» — утверждение про
+# КЛИЕНТА, а не только про сеть, и все наши пробы говорят на одном Go-шном
+# диалекте, то есть меряют одну форму из многих.
+U="https://www.youtube.com/watch?v=$VIDEO"
+printf '  %-24s ' "curl:"
+"${CURL[@]}" -o /dev/null -w 'код %{http_code}  %{size_download} байт  %{time_total}s\n' "$U" || echo ОТКАЗ
+printf '  %-24s ' "python urllib:"
+python3 - "$U" <<'PY' 2>/dev/null || echo "ОТКАЗ или таймаут"
+import sys,time,urllib.request
+t=time.time()
+try:
+    n=len(urllib.request.urlopen(sys.argv[1],timeout=25).read())
+    print("байт %d  %.2fs" % (n, time.time()-t))
+except Exception as e:
+    print("ОТКАЗ: %s" % type(e).__name__)
+PY
+printf '  %-24s ' "python requests:"
+python3 - "$U" <<'PY' 2>/dev/null || echo "нет requests — пропущено"
+import sys,time
+try: import requests
+except ImportError: raise SystemExit(1)
+t=time.time()
+try:
+    r=requests.get(sys.argv[1],timeout=25)
+    print("байт %d  %.2fs" % (len(r.content), time.time()-t))
+except Exception as e:
+    print("ОТКАЗ: %s" % type(e).__name__)
+PY
 
 cat <<'EOF'
 
@@ -127,7 +183,12 @@ cat <<'EOF'
       и запишет рецепт как здоровый.
   D хорошо весь, а в браузере рвётся         → дело не в транспорте, а в отличии
       нашего TLS-приветствия от браузерного.
-  F отвечает так же бодро, как ютуб         → путь не фильтруется вообще,
+  F: соседи на СВОИХ рецептах, исходы разные → это про рецепты, не про сеть.
+  F: все, включая заблокированное, отвечают  → путь не фильтруется вообще,
       и никакой вывод про рецепт из этого запуска не следует.
+  G: клиенты расходятся                      → рецепт защищает НЕ ВСЕХ. Смещения
+      сплита позиционные, форма приветствия у клиентов разная, и зелёная проба
+      удостоверяет только Go-шную форму. Измерено: curl и urllib проходят,
+      requests/urllib3 висит 45 с на том же URL в ту же минуту.
 ────────────────────────────────────────────────────────────
 EOF

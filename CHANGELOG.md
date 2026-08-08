@@ -6,6 +6,40 @@ older sections carry working dates rather than release dates.
 
 ## [Unreleased] — v7.1
 
+### A laptop that boots before Wi-Fi lost its desync for the whole session
+
+- Found the first time the ThinkPad cold-booted away from home. The service
+  started before the laptop associated, there was no default route, `DetectWAN`
+  failed, and `dropUnsupportedRungs` then cut BOTH desync rungs out of every rule
+  — eleven rules on VPN, nfqws never started, the sandbox never lifted, and a
+  fully green verdict throughout. One restart with the network up fixed it. On a
+  laptop this is not an edge case; it is what happens every time it boots
+  somewhere new.
+- The same capture was wrong in the other direction and that half was live: the
+  interface was baked in when the engine was BUILT, so a roam left an nft rule
+  matching `oifname` of an interface that was no longer the egress. Nothing
+  queued, nothing desynced, and `flags bypass` passed it through untouched so
+  nothing complained.
+- The interface is now resolved when the queue is INSTALLED, every time, and a
+  change reinstalls the table. A missing route at startup decides nothing. An
+  operator's `-wan` still wins.
+
+### The recipe protects some clients and not others
+
+- Measured on a clean network, same URL, same minute, rule on
+  `flowseal-general-fake-multisplit-664-max`: curl 1.33 MB, python urllib
+  1.28 MB, `curl_cffi` impersonating Chrome instant — and requests/urllib3
+  **timed out at 45s, three times out of three**. Split offsets are positional,
+  so a recipe is tuned to a shape of ClientHello, and every probe here speaks
+  Go's. A green verdict certifies one dialect out of many.
+- `test/live/youtube-real.sh` grew a section that measures three clients against
+  one URL, so the divergence is visible rather than inferred.
+- Its "control" section was a lie and is fixed: it claimed to test blocked hosts
+  WITHOUT desync while instagram and x were both sitting on desync rungs, which
+  invited exactly the wrong reading. It now prints each neighbour's rung and
+  recipe beside its result.
+
+
 ### The canary tests a candidate, and only a pass moves live traffic
 
 The design in the owner's words: *«канарейка пробует, и только если успех, то
