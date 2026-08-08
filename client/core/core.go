@@ -194,6 +194,15 @@ type Core struct {
 	// failing does not spend the machine on engine starts.
 	rotMu sync.Mutex
 	rotAt map[string]time.Time
+	// baseAt caches the lane's no-desync CONTROL arm per rule. Without a control a
+	// verdict cannot distinguish "every recipe lost" from "nothing we sent reached
+	// the traffic", and twenty-two identical refusals for youtube were read as the
+	// first with no way to check.
+	baseMu sync.Mutex
+	baseAt map[string]baselineArm
+	// testBaselineFn is the control arm, injectable for the same reason
+	// testCandidate is: the policy around it is testable without a kernel.
+	testBaselineFn func(context.Context, registry.Service) (bool, bool, string)
 	// testCandidate is the sandbox measurement, injectable so the rotation policy
 	// — which recipe is tried, in what order, and that production only ever moves
 	// onto one that PASSED — is testable without a kernel. nil uses testRecipe.

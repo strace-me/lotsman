@@ -3,6 +3,7 @@ package core
 import (
 	"context"
 	"fmt"
+	"net/http"
 	"runtime"
 	"strings"
 	"time"
@@ -98,6 +99,59 @@ func (c *Core) testRecipe(ctx context.Context, svc registry.Service, recipeID st
 		return false, false, "hostlist: " + err.Error()
 	}
 
+	argv := absolutizePayloads(plan.Args, c.opts.ZapretFiles)
+	// The FULL argv, not the summary the lane logs for readability. Production
+	// records its own argv on every exit; without the same record here the two
+	// cannot be diffed, and the first time they disagreed the only available
+	// comparison was against a log line that omits hostlists by design — which read
+	// as "the candidate has no hostlist" and sent an hour after the wrong cause.
+	c.log.Info("sandbox candidate argv", "service", svc.Name, "candidate", recipeID,
+		"argv", strings.Join(argv, " "))
+	return c.measureArm(ctx, svc, sb, client, h3, argv)
+}
+
+// testBaseline measures the same path through the same lane with NO desync on the
+// queue — the control arm.
+//
+// Without it a lane verdict is uninterpretable in exactly the case that matters.
+// Twenty-two candidates for youtube came back with the identical sentence, "did
+// not complete at all — no bytes, no response", and from outside that has two
+// completely different causes: the censor kills the handshake no matter what we
+// send, or our profile never touched the traffic and the probe went out bare. The
+// owning session read the first and said honestly that it could not tell them
+// apart. Neither could the instrument.
+//
+// The sandbox has always supported this — an empty argv leaves the table up and
+// nothing on the queue, so `flags bypass` passes the marked probe through
+// untouched — and nothing ever asked it for one. A candidate that scores exactly
+// what the baseline scores changed nothing; a baseline that PASSES says the path
+// was never broken here and the rule wants no recipe at all.
+func (c *Core) testBaseline(ctx context.Context, svc registry.Service) (ok, measured bool, why string) {
+	if !c.canJudge(svc) {
+		return false, false, "rule has no volume_target, so the lane has nothing to judge a baseline by"
+	}
+	if err := ctx.Err(); err != nil {
+		return false, false, "the loop was torn down before the baseline could be measured: " + err.Error()
+	}
+	sb, err := c.sandbox()
+	if err != nil {
+		return false, false, "no sandbox: " + err.Error()
+	}
+	client := dataplane.SandboxClient(zapret.TuneMark, c.wanIface, sandboxProbeTimeout)
+	if client == nil {
+		return false, false, "this platform cannot bind a probe to the interface"
+	}
+	h3 := dataplane.SandboxH3Client(zapret.TuneMark, c.wanIface, sandboxProbeTimeout)
+	return c.measureArm(ctx, svc, sb, client, h3, nil)
+}
+
+// measureArm lifts the lane with argv (nil = the no-desync baseline), pulls the
+// rule's volume through it and tears it down. The one place a lane measurement
+// happens, so the candidate and its control are measured by identical machinery —
+// a control that differed from the thing it controls would answer a question
+// nobody asked.
+func (c *Core) measureArm(ctx context.Context, svc registry.Service, sb *zapret.Sandbox,
+	client, h3 *http.Client, argv []string) (ok, measured bool, why string) {
 	c.sbMu.Lock()
 	defer c.sbMu.Unlock()
 	defer func() {
@@ -111,14 +165,6 @@ func (c *Core) testRecipe(ctx context.Context, svc registry.Service, recipeID st
 	// cannot hold the lane's lock forever.
 	setup, cancelSetup := context.WithTimeout(context.WithoutCancel(ctx), sandboxProbeTimeout)
 	defer cancelSetup()
-	argv := absolutizePayloads(plan.Args, c.opts.ZapretFiles)
-	// The FULL argv, not the summary the lane logs for readability. Production
-	// records its own argv on every exit; without the same record here the two
-	// cannot be diffed, and the first time they disagreed the only available
-	// comparison was against a log line that omits hostlists by design — which read
-	// as "the candidate has no hostlist" and sent an hour after the wrong cause.
-	c.log.Info("sandbox candidate argv", "service", svc.Name, "candidate", recipeID,
-		"argv", strings.Join(argv, " "))
 	if err := sb.Apply(setup, argv); err != nil {
 		// nfqws validates its inputs after dropping privileges, so a refusal here is
 		// a real verdict ABOUT THIS RECIPE — it cannot run on this host — even though
@@ -128,10 +174,10 @@ func (c *Core) testRecipe(ctx context.Context, svc registry.Service, recipeID st
 
 	// Pull real volume, not a status line: the failure this whole seam exists for
 	// is a path that establishes and then freezes, and a header-only fetch scores
-	// that as a win.
-	// The same judgement the live canary uses, over the same transports — a lane
-	// that scored a candidate by different rules than the canary that later judges
-	// it in production would hand the rule between two graders who disagree.
+	// that as a win. The same judgement the live canary uses, over the same
+	// transports — a lane that scored a candidate by different rules than the canary
+	// that later judges it in production would hand the rule between two graders who
+	// disagree.
 	ok, why, measured, detail := c.measureVolume(ctx, svc, client, h3)
 	if len(detail) > 0 {
 		why = strings.Join(detail, "; ")
@@ -325,6 +371,11 @@ func (c *Core) provenCandidateFor(ctx context.Context, svc registry.Service, exc
 	if len(cands) == 0 {
 		return "", false, false
 	}
+	// The control arm, once per pass. What it costs is one extra lift; what it buys
+	// is the difference between "every recipe lost" and "nothing we did reached the
+	// traffic", which are indistinguishable from the verdict alone and were being
+	// read as the first.
+	base := c.baseline(ctx, svc)
 	anyMeasured := false
 	for _, cand := range cands {
 		if steering && !c.zapExec.stillOnRung(svc.Name) {
@@ -354,18 +405,64 @@ func (c *Core) provenCandidateFor(ctx context.Context, svc registry.Service, exc
 			return cand, true, true
 		}
 		c.log.Info("candidate rejected in the sandbox, real traffic untouched",
-			"service", svc.Name, "candidate", cand, "measured", measured, "why", why)
+			"service", svc.Name, "candidate", cand, "measured", measured, "why", why,
+			"vs_no_desync", base)
 	}
 	// Falling open is decided over the WHOLE pass, not on the first candidate that
 	// could not be measured. Deciding per-candidate meant one unmeasurable recipe
 	// short-circuited the rest and got applied unverified, so a lane that worked
 	// perfectly well for the second candidate was never asked.
+	// Every candidate lost. Whether that is a statement about the recipes or about
+	// the lane is exactly what the control answers, and it must be said out loud
+	// rather than left for a reader to infer from two log lines an hour apart.
+	if anyMeasured {
+		c.log.Info("no candidate beat the control in the lane",
+			"service", svc.Name, "tried", len(cands), "no_desync", base)
+	}
 	if failOpen && !anyMeasured {
 		c.log.Warn("the test lane could not measure anything for this rule; applying the top candidate unverified rather than leaving the rule unrouted",
 			"service", svc.Name, "candidate", cands[0])
 		return cands[0], false, false
 	}
 	return "", false, anyMeasured
+}
+
+// baseline measures the rule's path through the lane with nothing on the queue and
+// renders it as one short phrase for the log.
+//
+// Cached for the same window as a lane verdict, because the control does not need
+// re-taking between the three candidates of one pass and a lift is not free.
+func (c *Core) baseline(ctx context.Context, svc registry.Service) string {
+	c.baseMu.Lock()
+	if c.baseAt == nil {
+		c.baseAt = map[string]baselineArm{}
+	}
+	if b, seen := c.baseAt[svc.Name]; seen && time.Since(b.at) < sandboxCooldown {
+		c.baseMu.Unlock()
+		return b.why
+	}
+	c.baseMu.Unlock()
+
+	test := c.testBaselineFn
+	if test == nil {
+		test = c.testBaseline
+	}
+	ok, measured, why := test(ctx, svc)
+	switch {
+	case !measured:
+		why = "not measured: " + why
+	case ok:
+		// The path carries with NO desync at all. Then the rule is not blocked here and
+		// no recipe is what it needs — and a candidate "passing" would be taking credit
+		// for a path that was never broken.
+		why = "CARRIES WITHOUT DESYNC — " + why
+		c.log.Warn("the lane carried this rule's volume with no desync on the queue at all",
+			"service", svc.Name, "evidence", why)
+	}
+	c.baseMu.Lock()
+	c.baseAt[svc.Name] = baselineArm{at: time.Now(), why: why}
+	c.baseMu.Unlock()
+	return why
 }
 
 // applyCandidate is the only place a recipe becomes the thing in service.
@@ -445,4 +542,10 @@ func sortByScore(ids []string, score func(string) float64) {
 			ids[j], ids[j-1] = ids[j-1], ids[j]
 		}
 	}
+}
+
+// baselineArm is one control measurement and when it was taken.
+type baselineArm struct {
+	at  time.Time
+	why string
 }
