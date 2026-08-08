@@ -189,6 +189,7 @@ type serviceYAML struct {
 	// turns out to have nothing to give.
 	VolumeTarget  string   `yaml:"volume_target"`
 	VolumeTargets []string `yaml:"volume_targets"` // measured alongside volume_target; the worst endpoint decides
+	VolumeBytes   int      `yaml:"volume_bytes"`   // how much to pull from them; 0 = the global -canary-goodput-bytes
 	RuleSets      []string `yaml:"rule_sets"`
 	Domains       []string `yaml:"domains"`
 	DomainLists   []string `yaml:"domain_lists"` // names of hostlists: whose domains are merged into Domains (declare a pack once, attach it to any service)
@@ -579,6 +580,7 @@ func buildRegistry(svcs []serviceYAML, cats map[string]registry.Category, hostli
 			ProbeTarget:    s.ProbeTarget,
 			VolumeTarget:   s.VolumeTarget,
 			VolumeTargets:  s.VolumeTargets,
+			VolumeBytes:    s.VolumeBytes,
 			RuleSets:       s.RuleSets,
 			Domains:        domains,
 			ExcludeDomains: excludes,

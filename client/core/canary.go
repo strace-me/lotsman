@@ -212,7 +212,7 @@ func (c *Core) goodputOK(ctx context.Context, svc registry.Service) (ok bool, wh
 		return true, "", false
 	}
 	q := burstprobe.Probe(ctx, dataplane.BurstClient(c.opts.ProbeProxy, 15*time.Second),
-		targets, c.opts.CanaryGoodputBytes, 1)
+		targets, c.volumeBytes(svc), 1)
 	if q.Samples == 0 {
 		return true, "", false // the measurement did not happen; do not invent a verdict
 	}
@@ -442,4 +442,18 @@ func volumeTargets(svc registry.Service) []string {
 		add(svc.ProbeTarget)
 	}
 	return out
+}
+
+// volumeBytes is how much this rule asks for, its own figure when it has one.
+//
+// A rule whose endpoint is smaller than the ask cannot be judged at all: the read
+// reaches end-of-body, the reading is marked Short, and the canary refuses to form
+// an opinion — correctly, because the number would describe the URL. The way out
+// is not a bigger URL but a smaller ask. It only has to clear the ~16 KiB where
+// the freeze bites.
+func (c *Core) volumeBytes(svc registry.Service) int64 {
+	if svc.VolumeBytes > 0 {
+		return int64(svc.VolumeBytes)
+	}
+	return c.opts.CanaryGoodputBytes
 }

@@ -119,8 +119,7 @@ func (c *Core) testRecipe(ctx context.Context, svc registry.Service, recipeID st
 	// Pull real volume, not a status line: the failure this whole seam exists for
 	// is a path that establishes and then freezes, and a header-only fetch scores
 	// that as a win.
-	want := c.opts.CanaryGoodputBytes
-	q := burstprobe.Probe(ctx, client, targets, want, 1)
+	q := burstprobe.Probe(ctx, client, targets, c.volumeBytes(svc), 1)
 	switch {
 	case q.Samples == 0:
 		return false, false, "the candidate measurement did not happen"
@@ -128,7 +127,7 @@ func (c *Core) testRecipe(ctx context.Context, svc registry.Service, recipeID st
 		// The endpoint ran out before we had pulled enough. That describes the URL,
 		// not the path, so it cannot condemn the candidate — but it cannot crown it
 		// either, and crowning it would move live traffic onto an unmeasured recipe.
-		return false, false, "target too small to judge a candidate — set a volume_target for this rule"
+		return false, false, "target smaller than the ask — set volume_bytes for this rule, or a bigger volume_target"
 	case q.Bytes == 0 && q.Loss >= 1:
 		return false, true, "candidate carried nothing at all"
 	case q.GoodputKBps < c.opts.CanaryGoodputKBps:

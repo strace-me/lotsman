@@ -59,9 +59,20 @@ type Service struct {
 	// TLS handshake while i.ytimg.com pulled 108 KB. A single-target canary cannot
 	// see that, and a rule is not healthy because one of its hosts is.
 	VolumeTargets []string
-	RuleSets      []string // sing-box rule-set tags (big curated .srs lists)
-	Domains       []string // inline domain_suffix matches (custom/small lists)
-	IPs           []string // inline ip_cidr matches (canonical CIDR; voice/geoip)
+	// VolumeBytes is how much to pull from those targets, overriding the global
+	// -canary-goodput-bytes for THIS rule. 0 = the global.
+	//
+	// It exists because the global ask is 64 KiB and some endpoints are simply
+	// smaller: x.com serves about 34 KiB, so the canary reached end-of-body, marked
+	// the reading Short and refused to judge — leaving the rule unjudgeable and its
+	// gate permanently open. The ask does not need to be 64 KiB to be useful; it
+	// needs to be past the ~16 KiB where the TSPU volume freeze bites. Measured on
+	// that very rule: x.com delivered 16401 bytes and then hung for 45 seconds, so a
+	// 24 KiB ask sees the freeze plainly while still fitting inside the endpoint.
+	VolumeBytes int
+	RuleSets    []string // sing-box rule-set tags (big curated .srs lists)
+	Domains     []string // inline domain_suffix matches (custom/small lists)
+	IPs         []string // inline ip_cidr matches (canonical CIDR; voice/geoip)
 	// ExcludeDomains pass RAW through this service's nfqws desync profile (composer
 	// emits --hostlist-exclude-domains): CDNs/endpoints that work without desync but
 	// break under it (e.g. Epic download/EasyAntiCheat — LOT-36). Routing is
