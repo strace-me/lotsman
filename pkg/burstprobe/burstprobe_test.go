@@ -85,7 +85,7 @@ func TestProbeWorstCaseAcrossEndpoints(t *testing.T) {
 // scores as low goodput, not just loss).
 func TestReadNReturnsPartialOnStall(t *testing.T) {
 	srv := server(t, 1<<20, 16<<10, 2*time.Second)
-	n, _, ended := readN(context.Background(), client(300*time.Millisecond), srv.URL, 512<<10)
+	n, _, ended, _ := readN(context.Background(), client(300*time.Millisecond), srv.URL, 512<<10)
 	if n <= 0 || n > 64<<10 {
 		t.Fatalf("partial read on stall = %d bytes, want a partial chunk (~16KB)", n)
 	}

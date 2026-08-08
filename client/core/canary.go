@@ -254,8 +254,15 @@ func (c *Core) measureVolume(ctx context.Context, svc registry.Service, tcp, h3 
 		if len(g.eps) == 0 {
 			continue
 		}
-		q := burstprobe.ProbeEndpoints(ctx, g.eps, ask, volumeAttempts)
+		q, said := burstprobe.ProbeEndpointsSaying(ctx, g.eps, ask, volumeAttempts)
 		ok, why, measured := volumeVerdict(q, ask, floor)
+		// The transport's own sentence, carried into the verdict. "Nothing was
+		// delivered" is where a SYN that got no answer and a swallowed ClientHello meet,
+		// and which of the two it is decides whether a desync recipe is even the right
+		// kind of tool for this rule.
+		if !ok && measured && said != "" {
+			why += " (" + said + ")"
+		}
 		anyOK = anyOK || ok
 		anyMeasured = anyMeasured || measured
 		switch {

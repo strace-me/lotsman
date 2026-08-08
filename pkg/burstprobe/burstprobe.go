@@ -58,6 +58,22 @@ type Endpoint struct {
 // half does not is judged by the half that fails — which is the point: the user
 // watching a video is on the failing half.
 func ProbeEndpoints(ctx context.Context, eps []Endpoint, target int64, attempts int) quality.Quality {
+	q, _ := ProbeEndpointsSaying(ctx, eps, target, attempts)
+	return q
+}
+
+// ProbeEndpointsSaying is ProbeEndpoints that also hands back the transport's own
+// first complaint.
+//
+// "Nothing was delivered" is where two completely different failures meet, and
+// telling them apart decides whether a desync recipe is even the right kind of
+// tool: `dial tcp …: i/o timeout` is a SYN that never got an answer, and nothing
+// nfqws can do to a ClientHello matters, because there will be no ClientHello.
+// `TLS handshake timeout` on a connection that established is the censor
+// swallowing the hello, which is exactly what a recipe rewrites. The instrument
+// held that sentence and threw it away, and both readings were then argued from
+// a byte count of zero.
+func ProbeEndpointsSaying(ctx context.Context, eps []Endpoint, target int64, attempts int) (quality.Quality, string) {
 	if target <= 0 {
 		target = DefaultTargetBytes
 	}
@@ -65,6 +81,7 @@ func ProbeEndpoints(ctx context.Context, eps []Endpoint, target int64, attempts 
 		attempts = DefaultAttempts
 	}
 	qs := make([]quality.Quality, 0, len(eps))
+	said := ""
 	for _, ep := range eps {
 		u, client := ep.URL, ep.Client
 		var rtts []float64
@@ -76,7 +93,10 @@ func ProbeEndpoints(ctx context.Context, eps []Endpoint, target int64, attempts 
 		// two apart — a stalled path does NOT reach end-of-body, it runs out of time.
 		short := true
 		for i := 0; i < attempts; i++ {
-			n, dur, ended := readN(ctx, client, u, target)
+			n, dur, ended, err := readN(ctx, client, u, target)
+			if err != nil && said == "" {
+				said = err.Error()
+			}
 			if !ended || n >= target {
 				short = false
 			}
@@ -101,7 +121,7 @@ func ProbeEndpoints(ctx context.Context, eps []Endpoint, target int64, attempts 
 		}
 		qs = append(qs, q)
 	}
-	return quality.Worst(qs...)
+	return quality.Worst(qs...), said
 }
 
 // readN GETs url and reads up to target bytes, returning the byte count and the
@@ -111,17 +131,20 @@ func ProbeEndpoints(ctx context.Context, eps []Endpoint, target int64, attempts 
 // ended reports that the body finished on its own (EOF) rather than being cut
 // short by the deadline — the difference between "this file is small" and "this
 // path stalled", which a byte count alone cannot express.
-func readN(ctx context.Context, client *http.Client, url string, target int64) (n int64, took time.Duration, ended bool) {
+func readN(ctx context.Context, client *http.Client, url string, target int64) (n int64, took time.Duration, ended bool, failed error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
-		return 0, 0, false
+		return 0, 0, false, err
 	}
 	start := time.Now()
 	resp, err := client.Do(req)
 	if err != nil {
-		return 0, time.Since(start), false
+		return 0, time.Since(start), false, err
 	}
 	defer resp.Body.Close()
 	n, err = io.CopyN(io.Discard, resp.Body, target)
-	return n, time.Since(start), errors.Is(err, io.EOF)
+	if errors.Is(err, io.EOF) {
+		return n, time.Since(start), true, nil
+	}
+	return n, time.Since(start), false, err
 }

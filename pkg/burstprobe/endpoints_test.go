@@ -2,6 +2,7 @@ package burstprobe
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -50,3 +51,28 @@ func (h headerRT) RoundTrip(r *http.Request) (*http.Response, error) {
 	r.Header.Set("X-Which", h.which)
 	return h.base.RoundTrip(r)
 }
+
+// Zero bytes is where two different failures meet. A SYN nobody answered means a
+// desync recipe cannot help — there will be no ClientHello for it to rewrite —
+// while a hello swallowed on an established connection is exactly what a recipe
+// is for. The probe held that sentence and dropped it, and both readings were
+// then argued from a byte count of zero.
+func TestTheProbeCarriesTheTransportsOwnComplaint(t *testing.T) {
+	dead := &http.Client{Transport: errRT{}}
+	q, said := ProbeEndpointsSaying(context.Background(),
+		[]Endpoint{{URL: "https://example.invalid/", Client: dead}}, 1024, 2)
+	if q.Bytes != 0 {
+		t.Fatalf("nothing was delivered, got %d bytes", q.Bytes)
+	}
+	if !strings.Contains(said, "dial tcp") {
+		t.Errorf("the reason the fetch failed was dropped, got %q", said)
+	}
+}
+
+type errRT struct{}
+
+func (errRT) RoundTrip(*http.Request) (*http.Response, error) {
+	return nil, errFakeDial
+}
+
+var errFakeDial = errors.New("dial tcp 142.251.157.4:443: i/o timeout")
