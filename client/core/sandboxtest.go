@@ -227,7 +227,13 @@ func (c *Core) sandbox() (*zapret.Sandbox, error) {
 			Prio: -200,
 		},
 		Bin: c.opts.NfqwsBin, Dir: c.opts.ZapretFiles,
-		Run: executor.ExecRunner{}, Launch: zapret.ExecLauncher(0),
+		Run: executor.ExecRunner{},
+		// Hear the engine even when it lives. A candidate that starts, complains
+		// about an argument this build does not know and runs without it is measured
+		// as the full recipe and scored under its name.
+		Launch: zapret.ExecLauncherSaying(0, func(said string) {
+			c.log.Warn("the desync engine said something while starting a candidate", "said", said)
+		}),
 		// Not the value read on the line above: this Sandbox outlives a roam, and
 		// the table names the interface every time it is installed.
 		WAN:      c.wanIface,

@@ -42,3 +42,36 @@ func TestLauncherWaitsForTheEngineToSurvive(t *testing.T) {
 	}
 	stop()
 }
+
+// An engine that starts, complains and keeps running is the case between the two
+// the launcher already handled, and it is the one that produces a measurement of
+// a strategy the binary never applied. Its words were captured and thrown away
+// unless it died.
+func TestASurvivingEngineIsStillHeard(t *testing.T) {
+	var heard string
+	l := ExecLauncherSaying(80*time.Millisecond, func(said string) { heard = said })
+	stop, err := l(context.Background(), "/bin/sh",
+		"", []string{"-c", "echo 'unknown option --dpi-desync-nonsense, ignored' >&2; sleep 5"})
+	if err != nil {
+		t.Fatalf("the engine survived; the launcher must report a start: %v", err)
+	}
+	defer stop()
+	if !strings.Contains(heard, "unknown option") {
+		t.Errorf("the engine's complaint was dropped, got %q", heard)
+	}
+}
+
+// And a quiet engine stays quiet — a sink that fires on every start would train
+// the reader to skip the line that matters.
+func TestASilentEngineSaysNothing(t *testing.T) {
+	fired := false
+	l := ExecLauncherSaying(80*time.Millisecond, func(string) { fired = true })
+	stop, err := l(context.Background(), "/bin/sh", "", []string{"-c", "sleep 5"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer stop()
+	if fired {
+		t.Error("a silent start produced a warning")
+	}
+}
