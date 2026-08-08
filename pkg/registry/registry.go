@@ -66,9 +66,15 @@ type Service struct {
 	// smaller: x.com serves about 34 KiB, so the canary reached end-of-body, marked
 	// the reading Short and refused to judge — leaving the rule unjudgeable and its
 	// gate permanently open. The ask does not need to be 64 KiB to be useful; it
-	// needs to be past the ~16 KiB where the TSPU volume freeze bites. Measured on
-	// that very rule: x.com delivered 16401 bytes and then hung for 45 seconds, so a
-	// 24 KiB ask sees the freeze plainly while still fitting inside the endpoint.
+	// needs to be past the ~16 KiB where the TSPU volume freeze bites.
+	//
+	// But set it as CLOSE TO THE HEALTHY SIZE as fits, not merely past the freeze.
+	// Measured the hard way on this very rule: healthy x.com is 34412 bytes, the
+	// live fetch froze at 16401, and an ask of 24576 let a candidate PASS at
+	// 49 KiB/s — proving that 24 KiB flows while the user needs 34, with the freeze
+	// living in the 9836 bytes nobody measured. The service stayed dead and the
+	// verdict was green. A candidate is only as proven as the volume it was asked
+	// for.
 	VolumeBytes int
 	// VolumeFloorKBps overrides the throughput a candidate must sustain for THIS
 	// rule. 0 derives it from the ask (see Core.volumeFloor).

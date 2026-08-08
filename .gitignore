@@ -52,3 +52,8 @@ skills-lock.json
 /desktop
 /desktop.exe
 /lotsmand
+
+# Build outputs that land next to their source
+/client/desktop/desktop
+/client/gui/gui
+/tmp/
