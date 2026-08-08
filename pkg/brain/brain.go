@@ -400,9 +400,22 @@ func (b *Brain) onVerdict(v events.ProductionVerdict) {
 			if rt.svc.RecoverAfter > 0 {
 				recoverAt = rt.svc.RecoverAfter
 			}
+			// A rule with nowhere left to escalate takes the FIRST measured success on
+			// a lower rung. The consecutive-success threshold buys one thing — it stops
+			// a WORKING service being dragged back onto a rung that is only
+			// intermittently good — and a rule whose own rung is failing has no working
+			// service to protect. Holding it to the same caution meant a service that
+			// was down, on a path measured down, refused a path measured UP because the
+			// measurement had only happened four times: escalation is forward-only
+			// (chain exhausted logs BROKEN and stays put), so this probe is the only
+			// road back, and it was gated as if the wait were free.
+			if rt.broken {
+				recoverAt = 1
+			}
 			b.log.Info("silent recovery progress",
 				"service", v.Service, "probed_position", v.Position,
-				"current_position", rt.position, "successes", n, "recover_at", recoverAt)
+				"current_position", rt.position, "successes", n, "recover_at", recoverAt,
+				"current_rung_broken", rt.broken)
 			if n >= recoverAt {
 				b.recoverToLocked(rt, v.Position)
 			}

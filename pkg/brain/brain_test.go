@@ -561,3 +561,86 @@ func TestSnapshotIsDeterministicallyOrdered(t *testing.T) {
 		}
 	}
 }
+
+// A rule that has run out of chain takes the FIRST measured success on a lower
+// rung, instead of the five a healthy rule needs.
+//
+// Escalation is forward-only: `escalateLocked` logs BROKEN at the end of the
+// chain and stays put, so the silent probe is the only road back. Gating that
+// road behind five consecutive successes treats a rule whose own rung is DOWN
+// exactly like one whose rung is up — and the threshold exists solely to keep a
+// working service from being dragged onto an intermittent rung. With nothing
+// working, the wait buys nothing and costs the user the service.
+func TestBrokenServiceRecoversOnTheFirstSuccess(t *testing.T) {
+	bus := events.NewBus()
+	reg := registry.Builtin()
+	cfg := Config{EscalateFails: 3, RecoverSuccess: 5, SettlingWindow: 0}
+	b := New(bus, reg, fakeKB{alt: "alt10"}, cfg, nil, discardLogger())
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go b.Run(ctx)
+
+	if d := readDesired(t, bus); d.Position != 0 {
+		t.Fatalf("init: pos=%d, want 0", d.Position)
+	}
+	// Walk it off the end of the chain.
+	last := 0
+	for pos := 0; ; pos++ {
+		for i := 0; i < 3; i++ {
+			sendVerdict(bus, pos, false)
+		}
+		select {
+		case d := <-bus.DesiredState:
+			last = d.Position
+		case <-time.After(200 * time.Millisecond):
+			// No further rung to move to: the chain is exhausted and the rule is BROKEN.
+			if last == 0 {
+				t.Fatal("the service never escalated at all")
+			}
+			goto exhausted
+		}
+	}
+exhausted:
+	// Keep failing where it stands, so `broken` is set rather than merely implied.
+	for i := 0; i < 3; i++ {
+		sendVerdict(bus, last, false)
+	}
+
+	// ONE silent success on the desync rung, and it must move.
+	sendVerdict(bus, 0, true)
+	if d := readDesired(t, bus); d.Position != 0 || d.State != registry.StatePreferred {
+		t.Fatalf("a broken rule refused a rung that just measured healthy: pos=%d state=%s", d.Position, d.State)
+	}
+}
+
+// The mirror, and the reason the threshold exists: a rule whose current rung is
+// WORKING keeps the full five, so one lucky probe cannot pull a healthy service
+// back onto a rung that is good only sometimes.
+func TestHealthyServiceStillNeedsTheFullThreshold(t *testing.T) {
+	bus := events.NewBus()
+	reg := registry.Builtin()
+	cfg := Config{EscalateFails: 3, RecoverSuccess: 5, SettlingWindow: 0}
+	b := New(bus, reg, fakeKB{alt: "alt10"}, cfg, nil, discardLogger())
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go b.Run(ctx)
+
+	if d := readDesired(t, bus); d.Position != 0 {
+		t.Fatalf("init: pos=%d, want 0", d.Position)
+	}
+	for i := 0; i < 3; i++ {
+		sendVerdict(bus, 0, false)
+	}
+	pos := readDesired(t, bus).Position
+	// The rung it landed on is healthy, so it is not broken.
+	sendVerdict(bus, pos, true)
+
+	sendVerdict(bus, 0, true)
+	select {
+	case d := <-bus.DesiredState:
+		t.Fatalf("one success moved a healthy service: pos=%d", d.Position)
+	case <-time.After(100 * time.Millisecond):
+	}
+}
