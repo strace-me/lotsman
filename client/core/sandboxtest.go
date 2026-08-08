@@ -302,6 +302,17 @@ func (c *Core) claimRotation(service string) bool {
 // could not measure at all yields the top candidate marked unverified rather than
 // nothing at all.
 func (c *Core) provenCandidate(ctx context.Context, svc registry.Service, exclude string, failOpen bool) (string, bool) {
+	return c.provenCandidateFor(ctx, svc, exclude, failOpen, true)
+}
+
+// provenCandidateFor is provenCandidate with the rung check made optional.
+//
+// steering means "we intend to change what this rule is running", and then the
+// rule must still be on the rung we are steering. Recovery is the other case: the
+// rule is deliberately somewhere else and we are asking whether it COULD come
+// back, so requiring it to be here already would refuse the only question worth
+// asking.
+func (c *Core) provenCandidateFor(ctx context.Context, svc registry.Service, exclude string, failOpen, steering bool) (string, bool) {
 	test := c.testCandidate
 	if test == nil {
 		test = c.testRecipe
@@ -312,7 +323,7 @@ func (c *Core) provenCandidate(ctx context.Context, svc registry.Service, exclud
 	}
 	anyMeasured := false
 	for _, cand := range cands {
-		if !c.zapExec.stillOnRung(svc.Name) {
+		if steering && !c.zapExec.stillOnRung(svc.Name) {
 			return "", false // the brain moved it; the rung is not ours to steer
 		}
 		ok, measured, why := test(ctx, svc, cand)
@@ -326,7 +337,7 @@ func (c *Core) provenCandidate(ctx context.Context, svc registry.Service, exclud
 		// Re-checked AFTER too: a measurement takes seconds and the brain moves on
 		// its own tick, so the rung was ours when we asked and may not be when we
 		// answer. Exactly the in-flight race the rung prober had.
-		if !c.zapExec.stillOnRung(svc.Name) {
+		if steering && !c.zapExec.stillOnRung(svc.Name) {
 			c.log.Info("rule left the desync rung mid-measurement, not applying the candidate",
 				"service", svc.Name, "candidate", cand)
 			return "", false

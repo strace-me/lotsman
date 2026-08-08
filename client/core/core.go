@@ -594,8 +594,13 @@ func (c *Core) buildLoop() error {
 					}
 				}
 			}
-			rp.SetDirectProber(bound)
-			c.log.Info("direct-rung probe armed: bound to the physical interface, so an inactive desync rung is measured instead of refused")
+			// A bound direct probe is the right question for a direct/LOCKED rung and
+			// the WRONG one for a desync rung: with the rule off that rung nfqws holds
+			// no profile for its domains, so it measures the path WITHOUT the recipe.
+			// On this network that path dies at the handshake, so recovery said "no"
+			// forever while the lane had already proved a recipe that carried it.
+			rp.SetDirectProber(newLaneProber(c, bound))
+			c.log.Info("direct-rung probe armed: a desync rung is proved in the lane, other direct rungs bound to the physical interface")
 		} else {
 			c.log.Warn("no direct-rung probe on this platform: a service that escalates to VPN will not return to the desync rung on its own")
 		}
