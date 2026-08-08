@@ -21,6 +21,11 @@ import (
 // rendering and a false one about ALT12. Preset mode runs the author's argv
 // instead, so the bundle is measured as the thing that actually works out there.
 
+// gameFilterOff is the port service.bat assigns when the game filter is off,
+// which is how every release ships. Nothing listens on 12; the profile is inert
+// by design rather than by our editing.
+const gameFilterOff = "12"
+
 // Preset is one upstream launcher converted to nfqws argv, verbatim.
 type Preset struct {
 	Name     string   // upstream's own name ("ALT12", "FAKE TLS AUTO")
@@ -28,6 +33,10 @@ type Preset struct {
 	Lists    []string // hostlist/ipset basenames it needs on disk
 	Payloads []string // .bin basenames it needs in the zapret files dir
 	Dropped  []string // what was removed, and why — never silent
+	// Substituted records values we resolved to an upstream DEFAULT rather than
+	// removed. It is a different claim from Dropped and deserves a different word:
+	// nothing is missing, one variable was pinned to the value the bundle ships.
+	Substituted []string
 }
 
 // PresetOptions carries the one path that differs between the upstream layout
@@ -47,6 +56,7 @@ var (
 	rePresetList = regexp.MustCompile(`(?i)[^\s=]*lists[\\/]([A-Za-z0-9._-]+)`)
 	rePresetBin  = regexp.MustCompile(`(?i)[^\s=]*bin[\\/]([A-Za-z0-9._-]+\.bin)`)
 	reWinVar     = regexp.MustCompile(`%[^%\s]+%`)
+	reGameFilter = regexp.MustCompile(`%GameFilter(TCP|UDP)?%`)
 	reFilterFlag = regexp.MustCompile(`^--(filter-tcp|filter-udp|filter-l7)=`)
 )
 
@@ -55,10 +65,11 @@ var (
 // the launcher, split on --new.
 func AsPreset(name string, src Source, opts PresetOptions) (*Preset, error) {
 	p := &Preset{Name: name}
-	lists, payloads, dropped := map[string]bool{}, map[string]bool{}, map[string]bool{}
+	lists, payloads := map[string]bool{}, map[string]bool{}
+	dropped, substituted := map[string]bool{}, map[string]bool{}
 
 	for _, block := range Blocks(src) {
-		out, ok := presetProfile(block, opts, lists, payloads, dropped)
+		out, ok := presetProfile(block, opts, lists, payloads, dropped, substituted)
 		if !ok {
 			continue
 		}
@@ -70,7 +81,8 @@ func AsPreset(name string, src Source, opts PresetOptions) (*Preset, error) {
 	if len(p.Args) == 0 {
 		return nil, fmt.Errorf("strategyimport: %s produced no usable profile", name)
 	}
-	p.Lists, p.Payloads, p.Dropped = sortedKeys(lists), sortedKeys(payloads), sortedKeys(dropped)
+	p.Lists, p.Payloads = sortedKeys(lists), sortedKeys(payloads)
+	p.Dropped, p.Substituted = sortedKeys(dropped), sortedKeys(substituted)
 	return p, nil
 }
 
@@ -79,7 +91,7 @@ func AsPreset(name string, src Source, opts PresetOptions) (*Preset, error) {
 // Three things cannot mean anything on this side. Each is dropped and RECORDED:
 // a silent drop produces a preset that is not the preset, which is the whole
 // failure this mode exists to end.
-func presetProfile(args []string, opts PresetOptions, lists, payloads, dropped map[string]bool) ([]string, bool) {
+func presetProfile(args []string, opts PresetOptions, lists, payloads, dropped, substituted map[string]bool) ([]string, bool) {
 	var out []string
 	filtered := false
 	for _, a := range args {
@@ -103,12 +115,24 @@ func presetProfile(args []string, opts PresetOptions, lists, payloads, dropped m
 			continue
 		}
 		if reFilterFlag.MatchString(a) {
+			if reGameFilter.MatchString(a) {
+				// service.bat fills these in, and its SHIPPED state is off: with no
+				// `utils/game_filter.enabled` in the release — and there is none — it sets
+				// GameFilterTCP=GameFilterUDP=12. Port 12 carries nothing, so upstream's
+				// default renders these profiles deliberately inert; the 1024-65535 form
+				// only appears once a user turns the filter on by hand.
+				//
+				// So substituting the default keeps the bundle at its full profile count
+				// and byte-faithful to how it ships, where dropping the profile would make
+				// our file quietly differ from the thing we promise to run verbatim.
+				a = reGameFilter.ReplaceAllString(a, gameFilterOff)
+				substituted["%GameFilter*% → "+gameFilterOff+" (upstream's shipped default: the game filter is OFF, and port "+gameFilterOff+" carries nothing)"] = true
+			}
 			if reWinVar.MatchString(a) {
-				// Ports service.bat fills in at runtime from the game-filter state. We have
-				// neither the script nor the state, and keeping the profile without its
-				// filter would let it claim every packet the queue hands it — which here is
-				// the household's uplink, not one Windows adapter.
-				dropped["profiles filtered only by %GameFilter*% (set by service.bat at runtime)"] = true
+				// Some other runtime variable we cannot resolve. Dropped WHOLE rather than
+				// kept unfiltered: a profile with no filter claims every packet the queue
+				// hands it, which here is the household's uplink, not one Windows adapter.
+				dropped["profiles filtered by an unresolvable %VAR%"] = true
 				return nil, false
 			}
 			filtered = true
@@ -161,10 +185,13 @@ func RenderPreset(p *Preset, source string) string {
 	if len(p.Payloads) > 0 {
 		fmt.Fprintf(&b, "# Needs these payloads in the zapret files dir: %s\n", strings.Join(p.Payloads, ", "))
 	}
-	if len(p.Dropped) > 0 {
+	if len(p.Dropped) > 0 || len(p.Substituted) > 0 {
 		b.WriteString("#\n# CHANGED FROM UPSTREAM — everything else passed through untouched:\n")
 		for _, d := range p.Dropped {
 			fmt.Fprintf(&b, "#   - dropped %s\n", d)
+		}
+		for _, x := range p.Substituted {
+			fmt.Fprintf(&b, "#   - substituted %s\n", x)
 		}
 	}
 	b.WriteString("\n")

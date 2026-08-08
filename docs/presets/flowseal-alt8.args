@@ -5,12 +5,12 @@
 # against the author's lists.
 #
 # Needs these lists on disk: ipset-all.txt, ipset-exclude.txt, list-exclude.txt, list-general.txt, list-google.txt
-# Needs these payloads in the zapret files dir: ACTIVE_DISCORD_UDP.bin, quic_initial_www_google_com.bin, tls_clienthello_max_ru.bin
+# Needs these payloads in the zapret files dir: ACTIVE_DISCORD_UDP.bin, ACTIVE_GAME_UDP.bin, quic_initial_www_google_com.bin, tls_clienthello_max_ru.bin
 #
 # CHANGED FROM UPSTREAM — everything else passed through untouched:
 #   - dropped *-user.txt references (empty upstream; a missing hostlist makes nfqws exit)
 #   - dropped --wf-* (WinDivert capture; ours is derived from --filter-* into nft)
-#   - dropped profiles filtered only by %GameFilter*% (set by service.bat at runtime)
+#   - substituted %GameFilter*% → 12 (upstream's shipped default: the game filter is OFF, and port 12 carries nothing)
 
 --filter-udp=443
 --hostlist=/var/lib/lotsman-hostlists/flowseal/list-general.txt
@@ -73,3 +73,24 @@
 --dpi-desync-fooling=badseq
 --dpi-desync-badseq-increment=2
 --dpi-desync-fake-http=tls_clienthello_max_ru.bin
+--new
+--filter-tcp=12
+--ipset=/var/lib/lotsman-hostlists/flowseal/ipset-all.txt
+--ipset-exclude=/var/lib/lotsman-hostlists/flowseal/ipset-exclude.txt
+--dpi-desync=fake
+--dpi-desync-any-protocol=1
+--dpi-desync-cutoff=n3
+--dpi-desync-fake-tls-mod=none
+--dpi-desync-repeats=6
+--dpi-desync-fooling=badseq
+--dpi-desync-badseq-increment=2
+--dpi-desync-fake-http=tls_clienthello_max_ru.bin
+--new
+--filter-udp=12
+--ipset=/var/lib/lotsman-hostlists/flowseal/ipset-all.txt
+--ipset-exclude=/var/lib/lotsman-hostlists/flowseal/ipset-exclude.txt
+--dpi-desync=fake
+--dpi-desync-repeats=12
+--dpi-desync-any-protocol=1
+--dpi-desync-fake-unknown-udp=ACTIVE_GAME_UDP.bin
+--dpi-desync-cutoff=n2

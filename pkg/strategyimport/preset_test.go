@@ -71,13 +71,8 @@ func TestAsPresetRecordsEverythingItChanged(t *testing.T) {
 	if strings.ContainsAny(got, `%"`) {
 		t.Errorf("an unresolved variable or stray quote reached the argv:\n%s", got)
 	}
-	// The game profile is filtered only by a runtime variable, so it is dropped
-	// WHOLE — kept unfiltered it would claim every packet the queue hands it.
-	if strings.Contains(got, "ipset-all.txt") {
-		t.Error("the game profile was kept without its filter")
-	}
 	joined := strings.Join(p.Dropped, " ")
-	for _, want := range []string{"--wf-*", "-user.txt", "%GameFilter"} {
+	for _, want := range []string{"--wf-*", "-user.txt"} {
 		if !strings.Contains(joined, want) {
 			t.Errorf("%q missing from the record: %v", want, p.Dropped)
 		}
@@ -86,6 +81,37 @@ func TestAsPresetRecordsEverythingItChanged(t *testing.T) {
 	// it, rather than staying in a commit message.
 	if !strings.Contains(RenderPreset(p, "test"), "CHANGED FROM UPSTREAM") {
 		t.Error("the rendered file does not say what was changed")
+	}
+}
+
+// The game profile is KEPT, with the port service.bat assigns when the filter is
+// off — which is how every release ships. Dropping it would have made our file
+// quietly differ from the thing preset mode promises to run verbatim, and the
+// difference would have been invisible: nothing listens on port 12 either way.
+func TestTheGameProfileIsPinnedToTheShippedDefaultNotDropped(t *testing.T) {
+	p, err := AsPreset("ALT12", presetSource(), PresetOptions{ListsDir: "/lists"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := strings.Join(p.Args, " ")
+	if !strings.Contains(got, "--filter-tcp=12") {
+		t.Errorf("the game profile was lost instead of pinned to the default:\n%s", got)
+	}
+	if !strings.Contains(got, "ipset-all.txt") {
+		t.Error("the game profile's own ipset went with it")
+	}
+	if n := strings.Count(got, "--new"); n != 2 {
+		t.Errorf("want three profiles kept, got %d separators:\n%s", n, got)
+	}
+	// A substitution is not a removal and must not be reported as one.
+	if strings.Contains(strings.Join(p.Dropped, " "), "GameFilter") {
+		t.Errorf("a pinned default was filed as a drop: %v", p.Dropped)
+	}
+	if !strings.Contains(strings.Join(p.Substituted, " "), "GameFilter") {
+		t.Errorf("the substitution went unrecorded: %v", p.Substituted)
+	}
+	if !strings.Contains(RenderPreset(p, "t"), "substituted %GameFilter") {
+		t.Error("the rendered file does not say the value was pinned")
 	}
 }
 
