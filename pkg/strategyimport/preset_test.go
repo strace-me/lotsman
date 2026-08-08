@@ -45,8 +45,10 @@ func TestAsPresetKeepsThePerProfileLists(t *testing.T) {
 			t.Errorf("missing %q in:\n%s", want, got)
 		}
 	}
-	if n := strings.Count(got, "--new"); n != 1 {
-		t.Errorf("want one --new between the two kept profiles, got %d:\n%s", n, got)
+	// Three profiles survive: the two hostlist ones and the game one, pinned to the
+	// port upstream assigns when its filter is off.
+	if n := strings.Count(got, "--new"); n != 2 {
+		t.Errorf("want two separators between three kept profiles, got %d:\n%s", n, got)
 	}
 	if p.Lists == nil || len(p.Payloads) == 0 {
 		t.Errorf("the file must declare what it needs on disk: lists=%v payloads=%v", p.Lists, p.Payloads)
