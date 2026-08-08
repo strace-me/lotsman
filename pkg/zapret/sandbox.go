@@ -156,6 +156,12 @@ func (s *Sandbox) log() *slog.Logger {
 }
 
 // Describe is for logs: what the sandbox is running, without the payload paths.
+// Describe is a LOSSY summary for a log line: desync modes and filters only.
+// It drops hostlists, payload paths and everything else, which is what makes it
+// readable — and what makes it useless as evidence. Reading it as the argv cost
+// an exchange: `--hostlist` is absent from every Describe output, and its absence
+// was taken for the candidate being composed without one. Compare argv against
+// the full record the caller logs, never against this.
 func (s *Sandbox) Describe(args []string) string {
 	var keep []string
 	for _, a := range args {

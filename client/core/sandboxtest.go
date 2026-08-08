@@ -109,7 +109,15 @@ func (c *Core) testRecipe(ctx context.Context, svc registry.Service, recipeID st
 	// cannot hold the lane's lock forever.
 	setup, cancelSetup := context.WithTimeout(context.WithoutCancel(ctx), sandboxProbeTimeout)
 	defer cancelSetup()
-	if err := sb.Apply(setup, absolutizePayloads(plan.Args, c.opts.ZapretFiles)); err != nil {
+	argv := absolutizePayloads(plan.Args, c.opts.ZapretFiles)
+	// The FULL argv, not the summary the lane logs for readability. Production
+	// records its own argv on every exit; without the same record here the two
+	// cannot be diffed, and the first time they disagreed the only available
+	// comparison was against a log line that omits hostlists by design — which read
+	// as "the candidate has no hostlist" and sent an hour after the wrong cause.
+	c.log.Info("sandbox candidate argv", "service", svc.Name, "candidate", recipeID,
+		"argv", strings.Join(argv, " "))
+	if err := sb.Apply(setup, argv); err != nil {
 		// nfqws validates its inputs after dropping privileges, so a refusal here is
 		// a real verdict ABOUT THIS RECIPE — it cannot run on this host — even though
 		// it says nothing about the network. Measured, and worth remembering.
