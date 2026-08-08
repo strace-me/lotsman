@@ -42,10 +42,35 @@ type Config struct {
 	DNS             *DNS                  // split-DNS: multi-server, DoT/DoH/DoQ, VPN-detoured (nil = client default)
 	Multiplex       *Multiplex            // default outbound multiplex for TCP proxies (nil = off)
 	SubViaPool      string                // route subscription endpoint hosts through this VPN pool (LOT-28); needs -probe-proxy ("" = off, direct fetch)
+	// ZapretPreset runs an upstream bundle verbatim (nil = compose per rule).
+	ZapretPreset *ZapretPreset
 	// DisabledServices names the services the operator switched OFF. They are absent
 	// from Registry entirely — nothing probes, routes or desyncs them — and are
 	// carried here only so a UI can list them and offer to switch them back on.
 	DisabledServices []string
+}
+
+// ZapretPreset is an upstream desync bundle run EXACTLY as its author wrote it:
+// its own profiles, in its own order, against its own hostlists.
+//
+// It exists because taking one apart is lossy in a way nothing downstream can
+// repair. Flowseal's ALT12 is one nfqws launch with nine profiles, and each
+// profile carries a DIFFERENT hostlist — the narrow tcp/443 Google treatment
+// against list-google, the broad one against list-general. Lotsman composes per
+// RULE, one hostlist per rule, so both profiles receive the same list, the second
+// can never match, and the recipe is refused as self-shadowing. The refusal is
+// correct about what we would have rendered and says nothing about ALT12, which
+// is a whole-machine bundle and simply is not a per-rule strategy.
+//
+// What the mode costs, stated plainly: per-rule recipe learning stops, because
+// one bundle serves every rule and there is nothing left to choose between. The
+// rungs still work — a rule on its desync rung routes DIRECT and meets the
+// preset, a rule on VPN is tunnelled and never reaches it — and the canary still
+// judges each rule on its own volume, so a preset that stops carrying still
+// escalates the rules it was carrying.
+type ZapretPreset struct {
+	Name string   // the upstream's own name, for the log and the UI ("ALT12")
+	Args []string // nfqws argv, verbatim
 }
 
 // FakeIP enables the generated fakeip DNS section (domain-accurate routing via
@@ -156,6 +181,14 @@ type deviceYAML struct {
 
 type zapretYAML struct {
 	Instances []instanceYAML `yaml:"instances"`
+	// Preset runs an upstream bundle VERBATIM instead of composing a recipe per
+	// rule. See registry.Preset for why that is a mode and not a shortcut.
+	Preset presetYAML `yaml:"preset"`
+}
+
+type presetYAML struct {
+	Name     string `yaml:"name"`
+	ArgsFile string `yaml:"args_file"`
 }
 
 type instanceYAML struct {
@@ -292,6 +325,10 @@ func Parse(data []byte) (*Config, error) {
 	if err != nil {
 		return nil, err
 	}
+	preset, err := buildPreset(f.Zapret.Preset)
+	if err != nil {
+		return nil, err
+	}
 	instances, err := buildZapret(f.Zapret)
 	if err != nil {
 		return nil, err
@@ -330,7 +367,7 @@ func Parse(data []byte) (*Config, error) {
 		}
 	}
 	sort.Strings(disabled)
-	return &Config{Registry: reg, Subscriptions: f.Subscriptions, Pools: pl, Zapret: instances, Devices: devices, Hostlists: hostlists, Strategies: strategies, UTLSFingerprint: f.UTLSFingerprint, SingboxVersion: f.SingboxVersion, FakeIP: fakeip, DNS: dns, Multiplex: mux, SubViaPool: f.SubViaPool, DisabledServices: disabled}, nil
+	return &Config{Registry: reg, Subscriptions: f.Subscriptions, Pools: pl, Zapret: instances, Devices: devices, Hostlists: hostlists, Strategies: strategies, UTLSFingerprint: f.UTLSFingerprint, SingboxVersion: f.SingboxVersion, FakeIP: fakeip, DNS: dns, Multiplex: mux, SubViaPool: f.SubViaPool, DisabledServices: disabled, ZapretPreset: preset}, nil
 }
 
 // LoadDocument reads the config file into its editable Document form (no
@@ -464,6 +501,41 @@ func toSources(urls []string) []aggregate.Source {
 		s = append(s, aggregate.Source{Name: u, URL: u})
 	}
 	return s
+}
+
+// buildPreset loads the verbatim argv from disk. One argument per line, blank
+// lines and # comments ignored, so the file can be pasted from the upstream .bat
+// and annotated.
+//
+// It REFUSES an empty or missing file rather than falling back to composing.
+// Silently composing when the operator asked for a preset is the precondition
+// that disables a feature while its flag says it is on — principle 4 — and here
+// it would also be invisible, because a composed strategy and a preset both look
+// like "nfqws is running".
+func buildPreset(p presetYAML) (*ZapretPreset, error) {
+	if p.ArgsFile == "" {
+		return nil, nil
+	}
+	data, err := os.ReadFile(p.ArgsFile)
+	if err != nil {
+		return nil, fmt.Errorf("zapret preset %q: %w", p.Name, err)
+	}
+	var args []string
+	for _, line := range strings.Split(string(data), "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		args = append(args, line)
+	}
+	if len(args) == 0 {
+		return nil, fmt.Errorf("zapret preset %q: %s holds no arguments", p.Name, p.ArgsFile)
+	}
+	name := p.Name
+	if name == "" {
+		name = "preset"
+	}
+	return &ZapretPreset{Name: name, Args: args}, nil
 }
 
 func buildZapret(z zapretYAML) ([]zapret.Instance, error) {

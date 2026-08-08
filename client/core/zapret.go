@@ -12,6 +12,7 @@ import (
 	"github.com/strace-me/lotsman/pkg/aggregate"
 
 	"github.com/strace-me/lotsman/pkg/brain"
+	"github.com/strace-me/lotsman/pkg/config"
 	"github.com/strace-me/lotsman/pkg/dataplane"
 	"github.com/strace-me/lotsman/pkg/registry"
 	"github.com/strace-me/lotsman/pkg/strategy"
@@ -48,11 +49,14 @@ type desyncPlatformEngine interface {
 }
 
 type zapretExec struct {
-	clash     *dataplane.ClashClient
-	engine    desyncEngine
-	recipes   []strategycat.Recipe
-	pick      zaptune.Picker            // ranks candidate recipes (KB-learned, catalog order as tiebreak)
-	files     string                    // zapret payload dir, for resolving .bin references
+	clash   *dataplane.ClashClient
+	engine  desyncEngine
+	recipes []strategycat.Recipe
+	pick    zaptune.Picker // ranks candidate recipes (KB-learned, catalog order as tiebreak)
+	files   string         // zapret payload dir, for resolving .bin references
+	// preset runs an upstream bundle verbatim instead of composing per rule
+	// (nil = compose). See config.ZapretPreset for what the mode costs.
+	preset    *config.ZapretPreset
 	hostlists string                    // dir for per-service hostlist files ("" = inline the domains)
 	active    func() []registry.Service // services CURRENTLY on a zapret rung
 	resolve   zaptune.Resolver
@@ -229,6 +233,31 @@ func (z *zapretExec) applyNow(ctx context.Context, service, recipe string) error
 	return nil
 }
 
+// applyPresetLocked puts the upstream bundle on the queue unchanged.
+//
+// No hostlists are written: the preset names its own files and they are the
+// operator's to place, so writing ours over them would be the same
+// take-it-apart-and-repair-it move the mode exists to avoid. The nft capture is
+// still derived from the argv, as it is for a composed strategy, so a preset that
+// filters ports we do not normally capture is captured anyway.
+func (z *zapretExec) applyPresetLocked(ctx context.Context, active []registry.Service) (*zaptune.Plan, error) {
+	full := absolutizePayloads(z.preset.Args, z.files)
+	restarted, err := z.engine.Apply(ctx, full)
+	if err != nil {
+		return nil, err
+	}
+	chosen := make(map[string]string, len(active))
+	for _, svc := range active {
+		chosen[svc.Name] = z.preset.Name
+	}
+	z.setChosen(chosen)
+	if restarted {
+		z.log.Info("zapret: preset applied verbatim, nothing composed",
+			"preset", z.preset.Name, "services", len(active), "args", len(z.preset.Args))
+	}
+	return &zaptune.Plan{Covered: true, Args: full, Chosen: chosen}, nil
+}
+
 // pinFor reports the strategy currently pinned for a service, if any.
 func (z *zapretExec) pinFor(service string) string {
 	z.mu.Lock()
@@ -264,6 +293,15 @@ func (z *zapretExec) composeAndApplyLocked(ctx context.Context) (*zaptune.Plan, 
 		}
 		z.setChosen(nil)
 		return nil, nil
+	}
+	// The operator asked for an upstream bundle EXACTLY as its author wrote it, so
+	// there is nothing to compose: its profiles, its order, its own hostlists. This
+	// is the whole point of the mode — a bundle taken apart into one profile per
+	// rule is a different strategy wearing the same name, and ALT12 is refused as
+	// self-shadowing precisely because our per-rule rendering gives two profiles the
+	// same hostlist where its author gave them different ones.
+	if z.preset != nil {
+		return z.applyPresetLocked(ctx, active)
 	}
 	plan := zaptune.ComposePinned(active, z.recipes, z.pick, z.resolve, z.hostlists, z.pinned)
 	// Once per state change, not once per reconcile. The condition is static — a

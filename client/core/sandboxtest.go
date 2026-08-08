@@ -81,6 +81,14 @@ func (c *Core) testRecipe(ctx context.Context, svc registry.Service, recipeID st
 	// queue — the profile nothing in this project had ever measured.
 	h3 := dataplane.SandboxH3Client(zapret.TuneMark, c.wanIface, sandboxProbeTimeout)
 
+	// In preset mode there is nothing to compose and nothing to choose: the lane
+	// measures the bundle the operator asked for, exactly as production will run it.
+	// Composing here instead would test a per-rule rendering of a whole-machine
+	// preset — a different strategy under the same name, which is the failure the
+	// mode exists to avoid.
+	if p := c.zapExec.preset; p != nil {
+		return c.measureArm(ctx, svc, sb, client, h3, p.Name, absolutizePayloads(p.Args, c.opts.ZapretFiles))
+	}
 	// Compose the candidate for THIS rule alone, pinned to the recipe under test.
 	// One service, so the argv is exactly the profiles that rule would get — not a
 	// composition of the whole rung, which would measure everyone at once.
@@ -501,6 +509,12 @@ func (c *Core) rankedCandidates(service, exclude string, n int) []string {
 	svc, ok := c.reg.Services[service]
 	if !ok {
 		return nil
+	}
+	// One bundle serves every rule, so there is exactly one thing to try and
+	// nothing to rank. Offering the catalogue here would let the lane crown a
+	// per-rule recipe that production, running the preset, is never going to apply.
+	if p := c.zapExec.preset; p != nil {
+		return []string{p.Name}
 	}
 	var out []string
 	// Only recipes the COMPOSER will honour for this rule. Offering anything else
