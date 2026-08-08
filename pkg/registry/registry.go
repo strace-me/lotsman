@@ -70,9 +70,12 @@ type Service struct {
 	// that very rule: x.com delivered 16401 bytes and then hung for 45 seconds, so a
 	// 24 KiB ask sees the freeze plainly while still fitting inside the endpoint.
 	VolumeBytes int
-	RuleSets    []string // sing-box rule-set tags (big curated .srs lists)
-	Domains     []string // inline domain_suffix matches (custom/small lists)
-	IPs         []string // inline ip_cidr matches (canonical CIDR; voice/geoip)
+	// VolumeFloorKBps overrides the throughput a candidate must sustain for THIS
+	// rule. 0 derives it from the ask (see Core.volumeFloor).
+	VolumeFloorKBps float64
+	RuleSets        []string // sing-box rule-set tags (big curated .srs lists)
+	Domains         []string // inline domain_suffix matches (custom/small lists)
+	IPs             []string // inline ip_cidr matches (canonical CIDR; voice/geoip)
 	// ExcludeDomains pass RAW through this service's nfqws desync profile (composer
 	// emits --hostlist-exclude-domains): CDNs/endpoints that work without desync but
 	// break under it (e.g. Epic download/EasyAntiCheat — LOT-36). Routing is

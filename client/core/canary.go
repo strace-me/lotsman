@@ -231,7 +231,26 @@ func (c *Core) goodputOK(ctx context.Context, svc registry.Service) (ok bool, wh
 			"service", svc.Name, "target", target, "bytes", q.Bytes, "want_bytes", c.opts.CanaryGoodputBytes)
 		return true, "", false
 	}
-	if q.GoodputKBps >= min {
+	ask := c.volumeBytes(svc)
+	// Nothing delivered at all comes FIRST. It is not a freeze — a freeze is bytes
+	// that flowed and then stopped — and the test caught this the moment the order
+	// was wrong: a refused connection was being reported as "froze at 0 KiB".
+	if q.Bytes == 0 && q.Loss >= 1 {
+		c.log.Info("canary: the volume fetch did not complete at all — no bytes, no response",
+			"service", svc.Name, "target", target)
+		return false, "the volume fetch did not complete at all — no bytes, no response from " + target, true
+	}
+	// COMPLETION first, speed second. These are two different questions and the
+	// floor was answering only the slower one. The failure this seam exists for is
+	// the freeze — bytes flow, then stop — and a frozen read is exactly one that
+	// delivered LESS than it asked for. That fact was already in the reading and
+	// nothing looked at it.
+	if q.Bytes < ask {
+		c.log.Info("canary: the path froze mid-stream",
+			"service", svc.Name, "delivered_kib", q.Bytes>>10, "asked_kib", ask>>10)
+		return false, fmt.Sprintf("froze at %d KiB of the %d KiB asked", q.Bytes>>10, ask>>10), true
+	}
+	if q.GoodputKBps >= c.volumeFloor(svc, ask) {
 		return true, "", true
 	}
 	// Say which of the two happened. The fetch either failed outright — nothing
@@ -241,14 +260,10 @@ func (c *Core) goodputOK(ctx context.Context, svc registry.Service) (ok bool, wh
 	// not connected at all: the same claim-about-the-unobserved this whole
 	// function exists to stop making. The same sentence is handed back as the
 	// reason, so the log and the brain's escalation cite one observation.
-	if q.Bytes == 0 && q.Loss >= 1 {
-		c.log.Info("canary: the volume fetch did not complete at all — no bytes, no response",
-			"service", svc.Name, "target", target, "min_kbps", min)
-		return false, "the volume fetch did not complete at all — no bytes, no response from " + target, true
-	}
-	c.log.Info("canary: recipe connects but does not carry volume",
-		"service", svc.Name, "goodput_kbps", q.GoodputKBps, "min_kbps", min)
-	return false, fmt.Sprintf("the path connects but carries nothing: %.0f KiB/s against a floor of %.0f", q.GoodputKBps, min), true
+	floor := c.volumeFloor(svc, ask)
+	c.log.Info("canary: recipe carries the volume but too slowly",
+		"service", svc.Name, "goodput_kbps", q.GoodputKBps, "min_kbps", floor, "delivered_kib", q.Bytes>>10)
+	return false, fmt.Sprintf("delivered all %d KiB but at %.0f KiB/s, under the %.0f floor", ask>>10, q.GoodputKBps, floor), true
 }
 
 // volumeSweepInterval is how often a rule sitting on a desync rung is re-measured
@@ -456,4 +471,30 @@ func (c *Core) volumeBytes(svc registry.Service) int64 {
 		return int64(svc.VolumeBytes)
 	}
 	return c.opts.CanaryGoodputBytes
+}
+
+// volumeFloor is the throughput a rule demands, and it is DERIVED from the ask
+// unless the rule says otherwise.
+//
+// The global default is 64 KiB/s, and it was chosen when the ask was 64 KiB — it
+// means "deliver the whole thing in about a second". Applied unchanged to a
+// smaller ask it silently gets harsher: against a 24 KiB target it demands the
+// lot in 0.4s, which is a stiff bar for a path a censor is actively squeezing.
+// Measured on the owner's laptop: three candidates for `x` delivered their full
+// 24 KiB at 7, 21 and 36 KiB/s — the best of them plainly better than the
+// incumbent, which freezes at 16 KiB and never finishes — and all three were
+// rejected against a floor of 64.
+//
+// So the floor is the smaller of the global and one-ask-per-second. It never
+// demands MORE than the operator configured, and it stops demanding a speed the
+// ask is too small to ask for.
+func (c *Core) volumeFloor(svc registry.Service, ask int64) float64 {
+	if svc.VolumeFloorKBps > 0 {
+		return svc.VolumeFloorKBps
+	}
+	perSecond := float64(ask) / 1024
+	if g := c.opts.CanaryGoodputKBps; g > 0 && g < perSecond {
+		return g
+	}
+	return perSecond
 }

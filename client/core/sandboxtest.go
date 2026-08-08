@@ -119,7 +119,8 @@ func (c *Core) testRecipe(ctx context.Context, svc registry.Service, recipeID st
 	// Pull real volume, not a status line: the failure this whole seam exists for
 	// is a path that establishes and then freezes, and a header-only fetch scores
 	// that as a win.
-	q := burstprobe.Probe(ctx, client, targets, c.volumeBytes(svc), 1)
+	ask := c.volumeBytes(svc)
+	q := burstprobe.Probe(ctx, client, targets, ask, 1)
 	switch {
 	case q.Samples == 0:
 		return false, false, "the candidate measurement did not happen"
@@ -130,8 +131,14 @@ func (c *Core) testRecipe(ctx context.Context, svc registry.Service, recipeID st
 		return false, false, "target smaller than the ask — set volume_bytes for this rule, or a bigger volume_target"
 	case q.Bytes == 0 && q.Loss >= 1:
 		return false, true, "candidate carried nothing at all"
-	case q.GoodputKBps < c.opts.CanaryGoodputKBps:
-		return false, true, fmt.Sprintf("candidate carries only %.0f KiB/s (floor %.0f)", q.GoodputKBps, c.opts.CanaryGoodputKBps)
+	case q.Bytes < ask:
+		// The freeze, which is the whole point: it delivered some and then stopped.
+		// Judged before speed, because a candidate that finishes slowly is better
+		// than the incumbent that never finishes at all.
+		return false, true, fmt.Sprintf("candidate froze at %d KiB of the %d KiB asked", q.Bytes>>10, ask>>10)
+	case q.GoodputKBps < c.volumeFloor(svc, ask):
+		return false, true, fmt.Sprintf("candidate delivered all %d KiB but at %.0f KiB/s, under the %.0f floor",
+			ask>>10, q.GoodputKBps, c.volumeFloor(svc, ask))
 	}
 	return true, true, fmt.Sprintf("%.0f KiB/s over %d KiB", q.GoodputKBps, q.Bytes>>10)
 }

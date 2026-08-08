@@ -187,12 +187,13 @@ type serviceYAML struct {
 	// one reports the size of the endpoint and blames the strategy for it.
 	// Empty = fall back to probe_target, and the canary refuses to judge when that
 	// turns out to have nothing to give.
-	VolumeTarget  string   `yaml:"volume_target"`
-	VolumeTargets []string `yaml:"volume_targets"` // measured alongside volume_target; the worst endpoint decides
-	VolumeBytes   int      `yaml:"volume_bytes"`   // how much to pull from them; 0 = the global -canary-goodput-bytes
-	RuleSets      []string `yaml:"rule_sets"`
-	Domains       []string `yaml:"domains"`
-	DomainLists   []string `yaml:"domain_lists"` // names of hostlists: whose domains are merged into Domains (declare a pack once, attach it to any service)
+	VolumeTarget    string   `yaml:"volume_target"`
+	VolumeTargets   []string `yaml:"volume_targets"`    // measured alongside volume_target; the worst endpoint decides
+	VolumeBytes     int      `yaml:"volume_bytes"`      // how much to pull from them; 0 = the global -canary-goodput-bytes
+	VolumeFloorKBps float64  `yaml:"volume_floor_kbps"` // throughput a candidate must sustain; 0 = derived from volume_bytes
+	RuleSets        []string `yaml:"rule_sets"`
+	Domains         []string `yaml:"domains"`
+	DomainLists     []string `yaml:"domain_lists"` // names of hostlists: whose domains are merged into Domains (declare a pack once, attach it to any service)
 	// ExcludeLists names hostlists whose domains are merged into ExcludeDomains —
 	// the same declare-once-attach-anywhere move, for the OTHER direction. Upstream
 	// strategy bundles ship a global exclude list (Flowseal's is 112 domains: CDNs
@@ -574,26 +575,27 @@ func buildRegistry(svcs []serviceYAML, cats map[string]registry.Category, hostli
 			continue
 		}
 		reg.Services[s.Name] = registry.Service{
-			Name:           s.Name,
-			Category:       s.Category,
-			ProbeType:      s.ProbeType,
-			ProbeTarget:    s.ProbeTarget,
-			VolumeTarget:   s.VolumeTarget,
-			VolumeTargets:  s.VolumeTargets,
-			VolumeBytes:    s.VolumeBytes,
-			RuleSets:       s.RuleSets,
-			Domains:        domains,
-			ExcludeDomains: excludes,
-			SpreadClients:  s.SpreadClients,
-			IPs:            ips,
-			Sticky:         sticky,
-			Profile:        profile,
-			Static:         s.Static,
-			EscalateAfter:  s.EscalateAfter,
-			RecoverAfter:   s.RecoverAfter,
-			Priority:       s.Priority,
-			TLSFragment:    s.TLSFragment,
-			Chain:          chain,
+			Name:            s.Name,
+			Category:        s.Category,
+			ProbeType:       s.ProbeType,
+			ProbeTarget:     s.ProbeTarget,
+			VolumeTarget:    s.VolumeTarget,
+			VolumeTargets:   s.VolumeTargets,
+			VolumeBytes:     s.VolumeBytes,
+			VolumeFloorKBps: s.VolumeFloorKBps,
+			RuleSets:        s.RuleSets,
+			Domains:         domains,
+			ExcludeDomains:  excludes,
+			SpreadClients:   s.SpreadClients,
+			IPs:             ips,
+			Sticky:          sticky,
+			Profile:         profile,
+			Static:          s.Static,
+			EscalateAfter:   s.EscalateAfter,
+			RecoverAfter:    s.RecoverAfter,
+			Priority:        s.Priority,
+			TLSFragment:     s.TLSFragment,
+			Chain:           chain,
 		}
 	}
 	if len(reg.Services) == 0 {
