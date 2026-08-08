@@ -9,6 +9,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/strace-me/lotsman/pkg/quality"
 	"github.com/strace-me/lotsman/pkg/registry"
 )
 
@@ -126,5 +127,42 @@ func TestBothTransportsDeadIsAFailureThatNamesBoth(t *testing.T) {
 	}
 	if !strings.Contains(why, "tcp") || !strings.Contains(why, "quic") {
 		t.Errorf("the reason must name both transports, got %q", why)
+	}
+}
+
+// One lucky pull is not a working recipe. x delivered its full 32 KiB once and
+// then timed out eight times running, and that single success passed both the
+// canary and the lane — every instrument called x healthy while the site would
+// not load. Bytes is the average over the attempts that SUCCEEDED, so a path that
+// works one time in three reads as a full delivery unless the loss is looked at.
+func TestAPathThatWorksSometimesIsNotAWorkingRecipe(t *testing.T) {
+	ask := int64(32 << 10)
+	q := quality.Quality{
+		Samples:     3,
+		Loss:        2.0 / 3.0, // two of three attempts never finished
+		Bytes:       ask,       // ...and the one that did delivered everything
+		GoodputKBps: 80,
+	}
+	ok, why, measured := volumeVerdict(q, ask, 32)
+	if ok {
+		t.Fatal("a recipe that failed two of three attempts was crowned")
+	}
+	if !measured {
+		t.Error("three real attempts is a measurement")
+	}
+	if !strings.Contains(why, "%") {
+		t.Errorf("the reason must say how often it carried, got %q", why)
+	}
+}
+
+// And the mirror, so the gate cannot be satisfied by refusing everything: a
+// recipe that carried on every attempt passes.
+func TestEveryAttemptCarryingIsAPass(t *testing.T) {
+	ask := int64(32 << 10)
+	ok, why, measured := volumeVerdict(quality.Quality{
+		Samples: 3, Loss: 0, Bytes: ask, GoodputKBps: 80,
+	}, ask, 32)
+	if !ok || !measured {
+		t.Fatalf("three of three carried and it did not pass: why=%q", why)
 	}
 }

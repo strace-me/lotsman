@@ -254,7 +254,7 @@ func (c *Core) measureVolume(ctx context.Context, svc registry.Service, tcp, h3 
 		if len(g.eps) == 0 {
 			continue
 		}
-		q := burstprobe.ProbeEndpoints(ctx, g.eps, ask, 1)
+		q := burstprobe.ProbeEndpoints(ctx, g.eps, ask, volumeAttempts)
 		ok, why, measured := volumeVerdict(q, ask, floor)
 		anyOK = anyOK || ok
 		anyMeasured = anyMeasured || measured
@@ -273,6 +273,17 @@ func (c *Core) measureVolume(ctx context.Context, svc registry.Service, tcp, h3 
 	}
 	return false, strings.Join(fails, "; "), true, detail
 }
+
+// volumeAttempts is how many fresh pulls stand behind one verdict.
+//
+// It was 1, and one is not a measurement of a path that flaps. x delivered its
+// full 32 KiB once and then timed out eight times running — 0 of 8 — and that one
+// success was enough to pass both the canary and the lane, so every instrument
+// called x healthy while the site would not load for the owner. Three fresh
+// connections, and the verdict below requires ALL of them to carry: a recipe is
+// moved onto live traffic on this evidence, and the operator must never be the
+// one who finds out it only works sometimes.
+const volumeAttempts = 3
 
 // volumeVerdict turns one reading into a verdict. Shared by the live canary and
 // the isolated lane so both mean the same thing by "this recipe carries" —
@@ -297,6 +308,20 @@ func volumeVerdict(q quality.Quality, ask int64, floor float64) (ok bool, why st
 		// flowed and then stopped — and with the order wrong a refused connection was
 		// reported as "froze at 0 KiB".
 		return false, "did not complete at all — no bytes, no response", true
+	case q.Loss > 0:
+		// Some attempts carried and some did not, and Bytes is the average over the
+		// ones that DID — so a path that succeeds once in three reads as a full
+		// delivery with a footnote. It is not: it is a path that fails most of the
+		// time, and crowning it moves the household onto a recipe that works
+		// occasionally.
+		//
+		// Measured on x: one pull delivered its full 32 KiB in 0.63s and the next
+		// eight timed out at 15–18 KiB, 0 of 8. A single lucky attempt was enough to
+		// pass both the canary and the lane, which is why every instrument called x
+		// healthy while the site would not load. The threshold, not the instrument,
+		// was the defect.
+		return false, fmt.Sprintf("carried on %.0f%% of attempts — the path works only sometimes",
+			(1-q.Loss)*100), true
 	case q.Bytes < ask:
 		return false, fmt.Sprintf("froze at %d KiB of the %d KiB asked", q.Bytes>>10, ask>>10), true
 	case q.GoodputKBps < floor:
