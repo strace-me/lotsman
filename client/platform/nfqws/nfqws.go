@@ -382,7 +382,11 @@ func DetectWAN(ctx context.Context) (string, error) {
 	if dev := ParseDefaultRouteIface(string(out)); dev != "" {
 		return dev, nil
 	}
-	return "", fmt.Errorf("nfqws: no default route found")
+	// Refusing beats guessing. If every default route belongs to a tunnel there is
+	// no physical egress to name, and naming the tunnel would arm a queue no
+	// traffic passes through. The caller retries on the next reconcile, and -wan
+	// remains the operator's override.
+	return "", fmt.Errorf("nfqws: no non-tunnel default route found")
 }
 
 // ParseDefaultRouteIface pulls the interface out of `ip route show default`
@@ -397,12 +401,39 @@ func ParseDefaultRouteIface(out string) string {
 			continue
 		}
 		for i, f := range fields {
-			if f == "dev" && i+1 < len(fields) {
-				return fields[i+1]
+			if f != "dev" || i+1 >= len(fields) {
+				continue
 			}
+			dev := fields[i+1]
+			// A TUNNEL is never the egress we want to queue on. Hanging the nft rule
+			// on one is a silent death: no user traffic leaves by that interface, so
+			// nothing is queued, `flags bypass` passes everything through untouched,
+			// and every status downstream reads healthy.
+			//
+			// Today this does not bite only because sing-box's auto_route installs its
+			// default in a POLICY table (2022) while this reads the main one — so the
+			// physical route is still what we see. That is luck, not design: WireGuard
+			// with `Table = main`, OpenVPN with redirect-gateway, or a differently
+			// configured sing-box would all put a default here, and we would take it.
+			if isTunnelIface(dev) {
+				continue
+			}
+			return dev
 		}
 	}
 	return ""
+}
+
+// isTunnelIface reports a conventional VPN data-plane interface name. Shares its
+// list with ForeignTunnels so the two cannot drift into disagreeing about what a
+// tunnel looks like.
+func isTunnelIface(dev string) bool {
+	for _, p := range tunnelPrefixes {
+		if strings.HasPrefix(dev, p) {
+			return true
+		}
+	}
+	return false
 }
 
 // tunnelPrefixes are the interface names VPN data planes conventionally take.
