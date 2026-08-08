@@ -24,20 +24,41 @@ older sections carry working dates rather than release dates.
   change reinstalls the table. A missing route at startup decides nothing. An
   operator's `-wan` still wins.
 
-### The recipe protects some clients and not others
+### RETRACTED: "the recipe protects some clients and not others"
 
-- Measured on a clean network, same URL, same minute, rule on
-  `flowseal-general-fake-multisplit-664-max`: curl 1.33 MB, python urllib
-  1.28 MB, `curl_cffi` impersonating Chrome instant — and requests/urllib3
-  **timed out at 45s, three times out of three**. Split offsets are positional,
-  so a recipe is tuned to a shape of ClientHello, and every probe here speaks
-  Go's. A green verdict certifies one dialect out of many.
-- `test/live/youtube-real.sh` grew a section that measures three clients against
-  one URL, so the divergence is visible rather than inferred.
-- Its "control" section was a lie and is fixed: it claimed to test blocked hosts
-  WITHOUT desync while instagram and x were both sitting on desync rungs, which
-  invited exactly the wrong reading. It now prints each neighbour's rung and
-  recipe beside its result.
+- The finding was written up here and made a principle, and it was wrong. Four
+  clients against one URL, three working and requests/urllib3 hanging, was read
+  as a desync recipe being tuned to a shape of TLS ClientHello. The clients also
+  differed in ADDRESS FAMILY: the host had an IPv6 leak — NixOS
+  `networking.enableIPv6 = false` sets two sysctls and does not touch
+  NetworkManager, whose profile for that network had `ipv6.method=auto`, so the
+  interface took a global v6 and a v6 default. curl was going over IPv6, which
+  nothing blocks there. Over IPv4 `www.youtube.com` does not complete a
+  handshake at all, three times out of three.
+- **Every YouTube number measured that day is withdrawn**, including 869 KB in
+  0.26s and the HTTP/3 figure. They describe an unfiltered v6 path.
+- What survives: `x.com` over IPv4 freezes at ~16 KB and aborts at 45s, which is
+  the volume freeze, textbook. And the diagnostic's "control" section was a lie
+  — it claimed to test blocked hosts WITHOUT desync while instagram and x were
+  both on desync rungs — now fixed to print each neighbour's rung and recipe.
+- Principle 17 has been replaced by the lesson that actually holds: when a
+  comparison shows a difference, check that only one thing differed.
+
+### The sandbox could not install its own table
+
+- `x` reported "no candidate passed the sandbox" forever on a network where its
+  recipe demonstrably did not work. The reason was not the recipe: `nft` refused
+  the install with `context canceled`.
+- `zapretExec.life` — the field whose entire purpose is to keep an async verdict
+  off a context that dies under it — **was never assigned anywhere**. So every
+  canary and every sandbox test rode whatever context reached `Enable`, which is
+  the autonomy loop's, which `Reload` cancels. A measurement in flight when the
+  config was reloaded kept running on a dead context, and the first thing to
+  notice was nft.
+- Now wired to the loop context explicitly; a cancelled context is refused in our
+  own words instead of surfacing as a recipe's failure; and the lane's install
+  and teardown run on a context of their own, bounded, so a cancellation between
+  "table up" and "engine started" cannot leave a table with nothing on its queue.
 
 
 ### The canary tests a candidate, and only a pass moves live traffic

@@ -60,6 +60,14 @@ func (c *Core) testRecipe(ctx context.Context, svc registry.Service, recipeID st
 	if !c.canJudge(svc) {
 		return false, false, "rule has no volume_target, so the lane has nothing to judge a candidate by"
 	}
+	// A cancelled context is not a verdict about the recipe. Without this check the
+	// first thing to notice was `nft`, which reported `context canceled` from inside
+	// the install — an error about the recipe's own plumbing, filed against the
+	// recipe. Measured as `x` reporting "no candidate passed the sandbox" forever on
+	// a network where the lane had simply never come up.
+	if err := ctx.Err(); err != nil {
+		return false, false, "the loop was torn down before this candidate could be measured: " + err.Error()
+	}
 	sb, err := c.sandbox()
 	if err != nil {
 		return false, false, "no sandbox: " + err.Error()
@@ -95,7 +103,13 @@ func (c *Core) testRecipe(ctx context.Context, svc registry.Service, recipeID st
 			c.log.Warn("desync sandbox did not tear down cleanly", "err", err)
 		}
 	}()
-	if err := sb.Apply(ctx, absolutizePayloads(plan.Args, c.opts.ZapretFiles)); err != nil {
+	// The LANE's own context, not the caller's. Installing an nft table and starting
+	// an engine are two steps that must both happen or neither: cancelled between
+	// them, the table stays up with nothing on its queue. Bounded so a wedged `nft`
+	// cannot hold the lane's lock forever.
+	setup, cancelSetup := context.WithTimeout(context.WithoutCancel(ctx), sandboxProbeTimeout)
+	defer cancelSetup()
+	if err := sb.Apply(setup, absolutizePayloads(plan.Args, c.opts.ZapretFiles)); err != nil {
 		// nfqws validates its inputs after dropping privileges, so a refusal here is
 		// a real verdict ABOUT THIS RECIPE — it cannot run on this host — even though
 		// it says nothing about the network. Measured, and worth remembering.

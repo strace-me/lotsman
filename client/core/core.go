@@ -501,6 +501,19 @@ func (c *Core) Start(ctx context.Context) error {
 // and metrics server (all process-level) stay up. On the reload path the caller holds
 // stateMu, so the swaps of brain/eng/prober/zap below are safe against the control
 // server's readers; on the Start path there are no readers yet.
+// loopCtx is the CURRENT autonomy loop's context, read under the lock because
+// Reload replaces it. Callers that hold it across a reload are meant to see the
+// cancellation — an in-flight verdict about a config that no longer exists must be
+// abandoned, not applied.
+func (c *Core) loopCtx() context.Context {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.life == nil {
+		return c.rootCtx
+	}
+	return c.life
+}
+
 func (c *Core) buildLoop() error {
 	c.mu.Lock()
 	c.life, c.lifeCancel = context.WithCancel(c.rootCtx)
@@ -1703,13 +1716,22 @@ func (c *Core) newZapretExec(ctx context.Context) *zapretExec {
 		pick:      zaptune.KBPicker(c.recipeScore),
 		files:     c.opts.ZapretFiles,
 		hostlists: c.opts.HostlistDir,
-		canary:    c.canaryProbe,
-		record:    func(service, recipe string, ok bool) { c.kb.RecordOutcome(service, recipe, ok, 0) },
-		rotate:    c.rotateRecipe,
-		gate:      c.gateEnable,
-		active:    c.zapretServices,
-		resolve:   rulesets.NewResolver(c.opts.SingboxBin, c.opts.RuleSetDir, c.log).Resolve,
-		log:       c.log,
+		// The lifetime an async verdict rides. It has a field because it must NOT be
+		// the applier's per-call context — and it was never assigned, so every canary
+		// and every sandbox test has been riding whatever context happened to reach
+		// Enable. That is the loop context, which Reload cancels: a measurement in
+		// flight when the config was reloaded kept running on a dead context and the
+		// first thing to notice was `nft` refusing to install with "context
+		// canceled". Measured as `x` never rotating off a recipe that plainly did not
+		// work on that network.
+		life:    func() context.Context { return c.loopCtx() },
+		canary:  c.canaryProbe,
+		record:  func(service, recipe string, ok bool) { c.kb.RecordOutcome(service, recipe, ok, 0) },
+		rotate:  c.rotateRecipe,
+		gate:    c.gateEnable,
+		active:  c.zapretServices,
+		resolve: rulesets.NewResolver(c.opts.SingboxBin, c.opts.RuleSetDir, c.log).Resolve,
+		log:     c.log,
 	}
 }
 
