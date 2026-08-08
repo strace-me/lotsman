@@ -36,14 +36,37 @@ const DefaultAttempts = 5
 // some bytes then stalls is recorded at its (low) goodput — both make a frozen
 // path fail the throughput gate. target/attempts <= 0 use the defaults.
 func Probe(ctx context.Context, client *http.Client, urls []string, target int64, attempts int) quality.Quality {
+	eps := make([]Endpoint, 0, len(urls))
+	for _, u := range urls {
+		eps = append(eps, Endpoint{URL: u, Client: client})
+	}
+	return ProbeEndpoints(ctx, eps, target, attempts)
+}
+
+// Endpoint is one thing to pull and the client to pull it with. The client is
+// per-endpoint because a service is not carried by one transport: YouTube's
+// media is QUIC and its page is TCP, and a desync recipe has a separate profile
+// for each. Measuring both with one client measures one profile and reports on
+// two.
+type Endpoint struct {
+	URL    string
+	Client *http.Client
+}
+
+// ProbeEndpoints is Probe with a transport per endpoint. The verdict is still
+// quality.Worst across them, so a recipe whose TCP half carries and whose QUIC
+// half does not is judged by the half that fails — which is the point: the user
+// watching a video is on the failing half.
+func ProbeEndpoints(ctx context.Context, eps []Endpoint, target int64, attempts int) quality.Quality {
 	if target <= 0 {
 		target = DefaultTargetBytes
 	}
 	if attempts <= 0 {
 		attempts = DefaultAttempts
 	}
-	qs := make([]quality.Quality, 0, len(urls))
-	for _, u := range urls {
+	qs := make([]quality.Quality, 0, len(eps))
+	for _, ep := range eps {
+		u, client := ep.URL, ep.Client
 		var rtts []float64
 		var bytesTotal int64
 		var secsTotal float64

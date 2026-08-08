@@ -7,7 +7,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/strace-me/lotsman/pkg/burstprobe"
 	"github.com/strace-me/lotsman/pkg/dataplane"
 	"github.com/strace-me/lotsman/pkg/executor"
 	"github.com/strace-me/lotsman/pkg/registry"
@@ -76,7 +75,10 @@ func (c *Core) testRecipe(ctx context.Context, svc registry.Service, recipeID st
 	if client == nil {
 		return false, false, "this platform cannot bind a probe to the interface, so a candidate cannot be measured without imposing it"
 	}
-	targets := volumeTargets(svc)
+	// The QUIC half of the lane. It carries the same mark and the same binding, so
+	// a `h3://` target measures the candidate's udp/443 profile through the sandbox
+	// queue — the profile nothing in this project had ever measured.
+	h3 := dataplane.SandboxH3Client(zapret.TuneMark, c.wanIface, sandboxProbeTimeout)
 
 	// Compose the candidate for THIS rule alone, pinned to the recipe under test.
 	// One service, so the argv is exactly the profiles that rule would get — not a
@@ -127,28 +129,14 @@ func (c *Core) testRecipe(ctx context.Context, svc registry.Service, recipeID st
 	// Pull real volume, not a status line: the failure this whole seam exists for
 	// is a path that establishes and then freezes, and a header-only fetch scores
 	// that as a win.
-	ask := c.volumeBytes(svc)
-	q := burstprobe.Probe(ctx, client, targets, ask, 1)
-	switch {
-	case q.Samples == 0:
-		return false, false, "the candidate measurement did not happen"
-	case q.Short:
-		// The endpoint ran out before we had pulled enough. That describes the URL,
-		// not the path, so it cannot condemn the candidate — but it cannot crown it
-		// either, and crowning it would move live traffic onto an unmeasured recipe.
-		return false, false, "target smaller than the ask — set volume_bytes for this rule, or a bigger volume_target"
-	case q.Bytes == 0 && q.Loss >= 1:
-		return false, true, "candidate carried nothing at all"
-	case q.Bytes < ask:
-		// The freeze, which is the whole point: it delivered some and then stopped.
-		// Judged before speed, because a candidate that finishes slowly is better
-		// than the incumbent that never finishes at all.
-		return false, true, fmt.Sprintf("candidate froze at %d KiB of the %d KiB asked", q.Bytes>>10, ask>>10)
-	case q.GoodputKBps < c.volumeFloor(svc, ask):
-		return false, true, fmt.Sprintf("candidate delivered all %d KiB but at %.0f KiB/s, under the %.0f floor",
-			ask>>10, q.GoodputKBps, c.volumeFloor(svc, ask))
+	// The same judgement the live canary uses, over the same transports — a lane
+	// that scored a candidate by different rules than the canary that later judges
+	// it in production would hand the rule between two graders who disagree.
+	ok, why, measured, detail := c.measureVolume(ctx, svc, client, h3)
+	if len(detail) > 0 {
+		why = strings.Join(detail, "; ")
 	}
-	return true, true, fmt.Sprintf("%.0f KiB/s over %d KiB", q.GoodputKBps, q.Bytes>>10)
+	return ok, measured, why
 }
 
 // sandbox builds the isolated test lane on first use and reuses it after. It
@@ -281,7 +269,8 @@ func (c *Core) gateEnable(ctx context.Context, service string) {
 // URL is, which is exactly how the knowledge base once learned that every recipe
 // scored zero.
 func (c *Core) canJudge(svc registry.Service) bool {
-	return strings.HasPrefix(svc.VolumeTarget, "http") || len(svc.VolumeTargets) > 0
+	return strings.HasPrefix(svc.VolumeTarget, "http") || dataplane.IsH3(svc.VolumeTarget) ||
+		len(svc.VolumeTargets) > 0
 }
 
 // claimRotation enforces the per-rule cooldown. Each test costs an engine start

@@ -3,12 +3,14 @@ package core
 import (
 	"context"
 	"fmt"
+	"net/http"
 	"sort"
 	"strings"
 	"time"
 
 	"github.com/strace-me/lotsman/pkg/burstprobe"
 	"github.com/strace-me/lotsman/pkg/dataplane"
+	"github.com/strace-me/lotsman/pkg/quality"
 	"github.com/strace-me/lotsman/pkg/registry"
 	"github.com/strace-me/lotsman/pkg/strategy"
 )
@@ -211,59 +213,97 @@ func (c *Core) goodputOK(ctx context.Context, svc registry.Service) (ok bool, wh
 		c.log.Info("canary: live UDP session, not pulling volume", "service", svc.Name)
 		return true, "", false
 	}
-	q := burstprobe.Probe(ctx, dataplane.BurstClient(c.opts.ProbeProxy, 15*time.Second),
-		targets, c.volumeBytes(svc), 1)
-	if q.Samples == 0 {
-		return true, "", false // the measurement did not happen; do not invent a verdict
+	ok, why, measured, detail := c.measureVolume(ctx, svc,
+		dataplane.BurstClient(c.opts.ProbeProxy, 15*time.Second),
+		dataplane.H3Client(15*time.Second))
+	if len(detail) > 0 {
+		c.log.Info("canary: volume", "service", svc.Name, "target", target,
+			"verdict", strings.Join(detail, "; "))
 	}
-	// The endpoint ran out before we had pulled enough to judge. Then the goodput
-	// figure describes how small the URL is, not how bad the path is, and blaming
-	// the strategy for it is the exact defect this project keeps finding.
-	//
-	// This was not hypothetical. youtube's probe target is `generate_204` — a
-	// response with NO BODY — so its throughput canary returned 0 KiB/s on every
-	// strategy ever applied and demoted all of them; the knowledge base ended up
-	// with every zapret recipe for youtube at ewma 0 after ninety consecutive
-	// "failures" that measured nothing. x's target is robots.txt, a few hundred
-	// bytes, which scored a similarly meaningless 4.6 KiB/s.
-	if q.Short {
-		c.log.Warn("canary: cannot judge volume, the probe target has less to give than we ask for — set a volume_target for this service",
-			"service", svc.Name, "target", target, "bytes", q.Bytes, "want_bytes", c.opts.CanaryGoodputBytes)
-		return true, "", false
-	}
+	return ok, why, measured
+}
+
+// measureVolume pulls a rule's volume over every transport its targets name and
+// takes the BEST outcome, while the reading within one transport is still the
+// worst of its endpoints.
+//
+// The asymmetry is not a compromise, it is what the user experiences. Across
+// DOMAINS worst-of is right: a service whose CDN is dead is dead, and judging it
+// by its best domain is Goodhart. Across TRANSPORTS it is wrong: a browser tries
+// QUIC, and when QUIC does not answer it falls back to TCP and the video plays.
+// Condemning a recipe because the half the browser abandoned did not carry would
+// hold YouTube on the tunnel forever on the strength of a path nobody uses when
+// it is broken — the same shape as every other verdict-about-the-untouched in
+// this codebase, just inverted.
+//
+// Both readings are returned in detail, so a QUIC path that quietly died is
+// visible in the log even on a pass. That is the case worth catching: QUIC that
+// is DROPPED costs a fallback delay, QUIC that is throttled is a video that
+// stalls, and only a volume pull can tell them apart.
+func (c *Core) measureVolume(ctx context.Context, svc registry.Service, tcp, h3 *http.Client) (bool, string, bool, []string) {
 	ask := c.volumeBytes(svc)
-	// Nothing delivered at all comes FIRST. It is not a freeze — a freeze is bytes
-	// that flowed and then stopped — and the test caught this the moment the order
-	// was wrong: a refused connection was being reported as "froze at 0 KiB".
-	if q.Bytes == 0 && q.Loss >= 1 {
-		c.log.Info("canary: the volume fetch did not complete at all — no bytes, no response",
-			"service", svc.Name, "target", target)
-		return false, "the volume fetch did not complete at all — no bytes, no response from " + target, true
-	}
-	// COMPLETION first, speed second. These are two different questions and the
-	// floor was answering only the slower one. The failure this seam exists for is
-	// the freeze — bytes flow, then stop — and a frozen read is exactly one that
-	// delivered LESS than it asked for. That fact was already in the reading and
-	// nothing looked at it.
-	if q.Bytes < ask {
-		c.log.Info("canary: the path froze mid-stream",
-			"service", svc.Name, "delivered_kib", q.Bytes>>10, "asked_kib", ask>>10)
-		return false, fmt.Sprintf("froze at %d KiB of the %d KiB asked", q.Bytes>>10, ask>>10), true
-	}
-	if q.GoodputKBps >= c.volumeFloor(svc, ask) {
-		return true, "", true
-	}
-	// Say which of the two happened. The fetch either failed outright — nothing
-	// was delivered and nothing timed itself — or it connected and crawled, and
-	// those want different next moves from whoever reads the log. The old line
-	// asserted "connects" over both, which was untrue exactly when the fetch had
-	// not connected at all: the same claim-about-the-unobserved this whole
-	// function exists to stop making. The same sentence is handed back as the
-	// reason, so the log and the brain's escalation cite one observation.
 	floor := c.volumeFloor(svc, ask)
-	c.log.Info("canary: recipe carries the volume but too slowly",
-		"service", svc.Name, "goodput_kbps", q.GoodputKBps, "min_kbps", floor, "delivered_kib", q.Bytes>>10)
-	return false, fmt.Sprintf("delivered all %d KiB but at %.0f KiB/s, under the %.0f floor", ask>>10, q.GoodputKBps, floor), true
+	tcpEps, h3Eps := splitEndpoints(volumeTargets(svc), tcp, h3)
+
+	var anyOK, anyMeasured bool
+	var fails, detail []string
+	for _, g := range []struct {
+		name string
+		eps  []burstprobe.Endpoint
+	}{{"tcp", tcpEps}, {"quic", h3Eps}} {
+		if len(g.eps) == 0 {
+			continue
+		}
+		q := burstprobe.ProbeEndpoints(ctx, g.eps, ask, 1)
+		ok, why, measured := volumeVerdict(q, ask, floor)
+		anyOK = anyOK || ok
+		anyMeasured = anyMeasured || measured
+		switch {
+		case ok:
+			detail = append(detail, fmt.Sprintf("%s carried %d KiB at %.0f KiB/s", g.name, q.Bytes>>10, q.GoodputKBps))
+		case !measured:
+			detail = append(detail, g.name+" not judged: "+why)
+		default:
+			detail = append(detail, g.name+" "+why)
+			fails = append(fails, g.name+" "+why)
+		}
+	}
+	if anyOK || !anyMeasured {
+		return anyOK, "", anyMeasured, detail
+	}
+	return false, strings.Join(fails, "; "), true, detail
+}
+
+// volumeVerdict turns one reading into a verdict. Shared by the live canary and
+// the isolated lane so both mean the same thing by "this recipe carries" —
+// they used to hold two copies of these rules and the copies had already drifted
+// in wording, which is one edit away from drifting in substance.
+//
+// measured=false is "we could not ask", and it must never reach the knowledge
+// base or a rung decision.
+func volumeVerdict(q quality.Quality, ask int64, floor float64) (ok bool, why string, measured bool) {
+	switch {
+	case q.Samples == 0:
+		return true, "the measurement did not happen", false
+	case q.Short:
+		// The endpoint ran out before we had pulled enough. That describes the URL,
+		// not the path. youtube's probe target used to be `generate_204` — no body at
+		// all — so its canary returned 0 KiB/s for every strategy ever applied and
+		// demoted the lot; the KB ended with every zapret recipe for youtube at ewma 0
+		// after ninety "failures" that measured nothing.
+		return true, "the target has less to give than we ask for — set volume_bytes or a bigger volume_target", false
+	case q.Bytes == 0 && q.Loss >= 1:
+		// Nothing at all comes FIRST. It is not a freeze — a freeze is bytes that
+		// flowed and then stopped — and with the order wrong a refused connection was
+		// reported as "froze at 0 KiB".
+		return false, "did not complete at all — no bytes, no response", true
+	case q.Bytes < ask:
+		return false, fmt.Sprintf("froze at %d KiB of the %d KiB asked", q.Bytes>>10, ask>>10), true
+	case q.GoodputKBps < floor:
+		return false, fmt.Sprintf("delivered all %d KiB but at %.0f KiB/s, under the %.0f floor",
+			ask>>10, q.GoodputKBps, floor), true
+	}
+	return true, "", true
 }
 
 // volumeSweepInterval is how often a rule sitting on a desync rung is re-measured
@@ -444,7 +484,7 @@ func volumeTargets(svc registry.Service) []string {
 	var out []string
 	seen := map[string]bool{}
 	add := func(u string) {
-		if strings.HasPrefix(u, "http") && !seen[u] {
+		if (strings.HasPrefix(u, "http") || dataplane.IsH3(u)) && !seen[u] {
 			seen[u] = true
 			out = append(out, u)
 		}
@@ -497,4 +537,36 @@ func (c *Core) volumeFloor(svc registry.Service, ask int64) float64 {
 		return g
 	}
 	return perSecond
+}
+
+// splitEndpoints pairs each volume target with the transport it must be pulled
+// over, keeping the two groups apart so each can be judged on its own.
+//
+// A target marked `h3://` goes over QUIC, which is the only way anything in this
+// project has ever exercised a recipe's udp/443 profile. YouTube composes one,
+// with a QUIC fake in it, and every probe and every volume pull until now went
+// over TCP — so that profile rode into production on a measurement that could not
+// touch it, on the service whose media is QUIC-first.
+//
+// A nil h3 client (the lane refuses one it cannot isolate) drops the h3 targets
+// rather than quietly pulling them over TCP. A QUIC target measured over TCP is
+// not a weaker measurement, it is a different one wearing the same name.
+func splitEndpoints(targets []string, tcp, h3 *http.Client) (tcpEps, h3Eps []burstprobe.Endpoint) {
+	for _, t := range targets {
+		ep := burstprobe.Endpoint{URL: dataplane.FetchURL(t)}
+		if dataplane.IsH3(t) {
+			if h3 == nil {
+				continue
+			}
+			ep.Client = h3
+			h3Eps = append(h3Eps, ep)
+			continue
+		}
+		if tcp == nil {
+			continue
+		}
+		ep.Client = tcp
+		tcpEps = append(tcpEps, ep)
+	}
+	return tcpEps, h3Eps
 }
