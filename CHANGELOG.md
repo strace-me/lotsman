@@ -6,6 +6,49 @@ older sections carry working dates rather than release dates.
 
 ## [Unreleased] — v7.1
 
+### A rule on VPN can finally come back to its desync rung
+
+- YouTube sat on VPN at the last rung with `fails=0` while the sandbox had, four
+  separate times, measured a recipe that carried it. The recovery decision
+  listens to a silent probe of the desync rung, and that probe measured the path
+  WITHOUT the recipe — with the rule off the rung nfqws holds no profile for its
+  domains, so it asked "does bare direct work" and answered no, correctly, to the
+  wrong question. The only thing able to measure WITH the recipe was wired solely
+  to rotation, which runs only for rules already on the rung.
+- `laneProber` answers a silent probe of a ZAPRET rung by proving a candidate in
+  the isolated lane. Other direct rungs keep the bound direct probe, which is the
+  right question there. Answers cache for three minutes, and between measurements
+  it reports Unmeasured rather than repeating itself — recovery wants five
+  consecutive successes and five echoes of one measurement are not five
+  measurements.
+
+### Instruments that answered a different question than the one asked
+
+- `--dpi-desync=fake,multisplit` appeared split across two argv entries in
+  `/proc/<pid>/cmdline`. It was not: nfqws rewrites its own process title, and
+  our launch record — written by the code that launches it — carries the comma 25
+  times out of 25. `exec.Command` cannot split an argv element; there is no comma
+  split anywhere in either path.
+- The lane "composed without a hostlist". It did not: `Sandbox.Describe` keeps
+  only `--dpi-desync` and `--filter` so the log line stays readable, and
+  `--hostlist` is absent from its output by construction. That one is ours —
+  production records its full argv on every exit and the lane recorded a summary,
+  with nothing saying so. The lane now logs the full argv in the same form.
+- Both are in principle 18 now, with the two earlier instances from the same day.
+
+### The floor conflated a frozen path with a slow one
+
+- Three candidates for `x` delivered their full 24 KiB at 7, 21 and 36 KiB/s and
+  all three were rejected against a floor of 64 — while the incumbent freezes at
+  16 KiB and never finishes at all. Completion is now judged before speed, and the
+  floor follows the ask: 64 KiB/s was chosen for a 64 KiB ask and silently demands
+  0.4-second delivery of a 24 KiB one. `volume_bytes` and `volume_floor_kbps` are
+  per rule; every verdict names delivered and asked.
+- And the sizing lesson underneath: a candidate is only as proven as the volume it
+  was asked for. `x` passed at 32 KiB and stayed dead, because healthy x.com is
+  34412 bytes and the freeze lives in the 9836 nobody measured.
+
+
 ### A laptop that boots before Wi-Fi lost its desync for the whole session
 
 - Found the first time the ThinkPad cold-booted away from home. The service
