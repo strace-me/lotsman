@@ -1748,14 +1748,25 @@ func (c *Core) newWinwsEngine(inst zapret.Instance) desyncPlatformEngine {
 // newNfqwsEngine builds the Linux desync engine: an nft NFQUEUE ruleset plus a
 // managed nfqws child.
 func (c *Core) newNfqwsEngine(ctx context.Context, inst zapret.Instance) desyncPlatformEngine {
+	// A missing default route RIGHT NOW is not a missing capability. On a laptop
+	// the service routinely starts before Wi-Fi associates, and returning nil here
+	// made dropUnsupportedRungs cut both desync rungs out of every rule FOR THE
+	// WHOLE SESSION — silently, behind a fully green verdict, with the user
+	// believing the desync was working. Measured on the owner's ThinkPad the first
+	// time it cold-booted away from home: eleven rules on VPN, nfqws never started,
+	// and one restart with the network up fixed everything.
+	//
+	// So build the engine regardless and let it resolve the interface when it
+	// installs the queue. Then a route that appears later is picked up by the next
+	// reconcile, and a route that CHANGES is picked up too.
 	wan := c.opts.WAN
 	if wan == "" {
-		detected, err := nfqws.DetectWAN(ctx)
-		if err != nil {
-			c.log.Warn("desync rung unavailable: cannot detect the WAN interface", "err", err)
-			return nil
+		if detected, err := nfqws.DetectWAN(ctx); err == nil {
+			wan = detected
+		} else {
+			c.log.Warn("no egress interface yet — the desync rung stays armed and will resolve it when the network is up",
+				"err", err)
 		}
-		wan = detected
 	}
 	// A foreign tunnel's packets are indistinguishable from ordinary traffic here,
 	// so arming the desync would silently mangle it. Refuse the RUNG rather than
@@ -1781,6 +1792,11 @@ func (c *Core) newNfqwsEngine(ctx context.Context, inst zapret.Instance) desyncP
 	e := nfqws.New(c.opts.NfqwsBin, inst, zapret.NftOptions{
 		Table: "inet lotsman", WAN: wan, VPNServers: excluded,
 	}, c.opts.ZapretFiles, c.log)
+	// Only when the operator did not pin one: -wan is an instruction, and
+	// re-deriving over it would silently ignore what they asked for.
+	if c.opts.WAN == "" {
+		e.SetWANResolver(nfqws.DetectWAN)
+	}
 	// Give the engine somewhere durable to leave its last words. An engine that dies
 	// on its own is the one failure the desync rung cannot see — nft keeps the queue
 	// rules with `flags bypass`, so traffic keeps flowing undesynced and everything

@@ -40,8 +40,17 @@ type Engine struct {
 	// narrow it below the ports the deployment always wants carried.
 	baseCapture zapret.Capture
 	nftOpts     zapret.NftOptions
-	fakeDir     string // working dir for nfqws so its bare fake-payload filenames resolve; "" = inherit ours
-	log         *slog.Logger
+	// wanFunc re-resolves the egress interface at INSTALL time. The interface was
+	// captured once when the engine was built, and that is wrong twice over on a
+	// laptop: at boot the service can start before Wi-Fi associates, so there is no
+	// default route to find; and on a roam the interface changes under a rule that
+	// still names the old one. Both end the same way — nft matching `oifname` of
+	// something that is not the egress, so nothing is queued, nothing is desynced,
+	// and every status downstream reads healthy.
+	// nil keeps whatever nftOpts.WAN was given (the operator's -wan, or a test).
+	wanFunc func(context.Context) (string, error)
+	fakeDir string // working dir for nfqws so its bare fake-payload filenames resolve; "" = inherit ours
+	log     *slog.Logger
 
 	mu       sync.Mutex
 	cmd      *exec.Cmd
@@ -66,6 +75,14 @@ func (e *Engine) SetSettle(d time.Duration) {
 // New returns an Engine for one nfqws instance. bin "" resolves nfqws on PATH.
 // fakeDir is nfqws's working dir, holding the fake-payload files its strategies name
 // by bare filename (tls_clienthello_*.bin, quic_initial_*.bin); "" inherits ours.
+// SetWANResolver makes the engine re-resolve its egress interface every time it
+// installs the queue, instead of trusting the one it was born with.
+func (e *Engine) SetWANResolver(f func(context.Context) (string, error)) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	e.wanFunc = f
+}
+
 func New(bin string, inst zapret.Instance, nftOpts zapret.NftOptions, fakeDir string, log *slog.Logger) *Engine {
 	if bin == "" {
 		bin = "nfqws"
@@ -237,7 +254,9 @@ func (e *Engine) installNftLocked(ctx context.Context, args []string) error {
 	// ordinary web ports queued even at a moment when no composed profile happens
 	// to name them.
 	want := e.baseCapture.Union(zapret.CaptureFromArgs(args))
-	if e.armed && e.inst.Capture.Equal(want) {
+	// The WAN check below can clear e.armed, so this early return is only safe for
+	// an engine with no resolver — with one, the interface is re-read first.
+	if e.wanFunc == nil && e.armed && e.inst.Capture.Equal(want) {
 		return nil
 	}
 	if e.armed && !e.inst.Capture.Equal(want) {
@@ -245,6 +264,26 @@ func (e *Engine) installNftLocked(ctx context.Context, args []string) error {
 			"tcp", want.TCP, "udp", want.UDP)
 	}
 	e.inst.Capture = want
+	// Ask again, every time. A stale interface is not a degraded queue, it is no
+	// queue at all — and it fails SILENTLY, which is why this is resolved here
+	// rather than remembered.
+	if e.wanFunc != nil {
+		wan, err := e.wanFunc(ctx)
+		if err != nil {
+			return fmt.Errorf("nfqws: no egress interface to queue on: %w", err)
+		}
+		if wan != e.nftOpts.WAN {
+			if e.nftOpts.WAN != "" {
+				e.log.Info("nfqws: egress interface changed, reinstalling the queue",
+					"was", e.nftOpts.WAN, "now", wan)
+			}
+			e.nftOpts.WAN = wan
+			e.armed = false // the old table names the old interface
+		}
+	}
+	if e.armed && e.inst.Capture.Equal(want) {
+		return nil // interface and capture both unchanged
+	}
 	rules := zapret.GenerateNft([]zapret.Instance{e.inst}, e.nftOpts)
 	// Drop a stale table from a previous run first; absence is fine.
 	_ = run(ctx, "nft", "delete", "table", e.nftOpts.Table)
