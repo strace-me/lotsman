@@ -32,8 +32,18 @@ func classesFor(svc registry.Service) []strategycat.TargetClass {
 	switch {
 	case svc.Name == "discord" || svc.Profile == "voice":
 		return []strategycat.TargetClass{strategycat.ClassDiscordTCP, strategycat.ClassGeneralTLS}
-	case svc.Profile == "streaming":
-		return []strategycat.TargetClass{strategycat.ClassQUIC, strategycat.ClassGeneralTLS}
+	case svc.Name == "youtube" || svc.Profile == "streaming":
+		// ClassYouTube FIRST, and its absence here was the whole reason YouTube could
+		// not be fixed. The catalogue holds 28 recipes written for exactly this
+		// service — zms-yv01..27 out of Zapret-Manager, plus router-google-hostfakesplit
+		// — and the streaming profile asked for quic and general_tls only, so the rule
+		// never saw one of them. Five candidates survived the composer's filters, the
+		// lane tried three of those five over and over, all three lost, and the search
+		// looked exhausted while twenty-seven purpose-built recipes sat in the
+		// catalogue unreachable.
+		return []strategycat.TargetClass{
+			strategycat.ClassYouTube, strategycat.ClassQUIC, strategycat.ClassGeneralTLS,
+		}
 	case svc.Profile == "gaming":
 		return []strategycat.TargetClass{strategycat.ClassGeneralTLS, strategycat.ClassGames}
 	default:
