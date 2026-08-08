@@ -100,14 +100,7 @@ func (c *Core) testRecipe(ctx context.Context, svc registry.Service, recipeID st
 	}
 
 	argv := absolutizePayloads(plan.Args, c.opts.ZapretFiles)
-	// The FULL argv, not the summary the lane logs for readability. Production
-	// records its own argv on every exit; without the same record here the two
-	// cannot be diffed, and the first time they disagreed the only available
-	// comparison was against a log line that omits hostlists by design — which read
-	// as "the candidate has no hostlist" and sent an hour after the wrong cause.
-	c.log.Info("sandbox candidate argv", "service", svc.Name, "candidate", recipeID,
-		"argv", strings.Join(argv, " "))
-	return c.measureArm(ctx, svc, sb, client, h3, argv)
+	return c.measureArm(ctx, svc, sb, client, h3, recipeID, argv)
 }
 
 // testBaseline measures the same path through the same lane with NO desync on the
@@ -142,7 +135,7 @@ func (c *Core) testBaseline(ctx context.Context, svc registry.Service) (ok, meas
 		return false, false, "this platform cannot bind a probe to the interface"
 	}
 	h3 := dataplane.SandboxH3Client(zapret.TuneMark, c.wanIface, sandboxProbeTimeout)
-	return c.measureArm(ctx, svc, sb, client, h3, nil)
+	return c.measureArm(ctx, svc, sb, client, h3, "no-desync control", nil)
 }
 
 // measureArm lifts the lane with argv (nil = the no-desync baseline), pulls the
@@ -151,7 +144,7 @@ func (c *Core) testBaseline(ctx context.Context, svc registry.Service) (ok, meas
 // a control that differed from the thing it controls would answer a question
 // nobody asked.
 func (c *Core) measureArm(ctx context.Context, svc registry.Service, sb *zapret.Sandbox,
-	client, h3 *http.Client, argv []string) (ok, measured bool, why string) {
+	client, h3 *http.Client, label string, argv []string) (ok, measured bool, why string) {
 	c.sbMu.Lock()
 	defer c.sbMu.Unlock()
 	defer func() {
@@ -165,6 +158,23 @@ func (c *Core) measureArm(ctx context.Context, svc registry.Service, sb *zapret.
 	// cannot hold the lane's lock forever.
 	setup, cancelSetup := context.WithTimeout(context.WithoutCancel(ctx), sandboxProbeTimeout)
 	defer cancelSetup()
+	// The FULL argv, recorded HERE — holding the lane, one line before the apply it
+	// describes. Logged at composition time instead, it sat outside the lock, and
+	// another rule's lift landed between the two: the record then showed a
+	// candidate's argv followed by somebody else's "candidate applied", three
+	// seconds and one service apart. The measurement was correct and serialized;
+	// only the record was misleading, which is the more dangerous of the two,
+	// because it is what a human reads when the numbers stop making sense.
+	//
+	// Production records its own argv on every exit; without the same record here
+	// the two cannot be diffed, and the first time they disagreed the only available
+	// comparison was against a log line that omits hostlists by design.
+	if len(argv) > 0 {
+		c.log.Info("sandbox candidate argv", "service", svc.Name, "candidate", label,
+			"argv", strings.Join(argv, " "))
+	} else {
+		c.log.Info("sandbox control arm: nothing on the queue", "service", svc.Name)
+	}
 	if err := sb.Apply(setup, argv); err != nil {
 		// nfqws validates its inputs after dropping privileges, so a refusal here is
 		// a real verdict ABOUT THIS RECIPE — it cannot run on this host — even though
