@@ -33,14 +33,39 @@ func SandboxClient(mark int, iface func() string, timeout time.Duration) *http.C
 	if ctrl == nil {
 		return nil
 	}
-	d := &net.Dialer{Timeout: timeout, Control: ctrl}
+	d := &net.Dialer{Timeout: DialPhaseTimeout, Control: ctrl}
 	return &http.Client{
 		Timeout: timeout,
-		// Establishing the connection is the thing being measured; a pooled one
-		// would present the DPI with nothing and the candidate with no work to do.
-		Transport: &http.Transport{DialContext: d.DialContext, DisableKeepAlives: true},
+		Transport: &http.Transport{
+			DialContext: d.DialContext,
+			// Establishing the connection is the thing being measured; a pooled one
+			// would present the DPI with nothing and the candidate with no work to do.
+			DisableKeepAlives:   true,
+			TLSHandshakeTimeout: TLSPhaseTimeout,
+		},
 	}
 }
+
+// DialPhaseTimeout and TLSPhaseTimeout bound the two phases SEPARATELY, and well
+// inside the client's overall timeout, so a failure names itself.
+//
+// With one deadline covering everything, Go reports whichever fired first as
+// "Client.Timeout exceeded while awaiting headers" — which is true and useless.
+// The two phases mean opposite things here: a TCP handshake that never completes
+// says the block is below TLS and no desync recipe can matter, because there will
+// be no ClientHello to rewrite; a TLS handshake that dies on an established
+// connection is the censor swallowing the hello, which is exactly what a recipe
+// rewrites. Split, the transport says `dial tcp …: i/o timeout` for the first and
+// `net/http: TLS handshake timeout` for the second, and the verdict carries the
+// distinction for free.
+//
+// Both are generous for a working path and short next to the 20s the caller
+// allows for pulling volume: a SYN that has gone unanswered for six seconds on a
+// household uplink is not slow, it is blocked.
+const (
+	DialPhaseTimeout = 6 * time.Second
+	TLSPhaseTimeout  = 8 * time.Second
+)
 
 // sandboxControl is the socket stamp both sandbox clients share: the mark that
 // makes the packet the lane's, then the binding that lets it leave on the WAN.

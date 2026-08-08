@@ -1,6 +1,7 @@
 package dataplane
 
 import (
+	"net"
 	"net/http"
 	"time"
 )
@@ -14,10 +15,18 @@ import (
 // sing-box routes per CONNECTION, so a pooled connection keeps the outbound it
 // was opened with and would report throughput for a route no longer in force.
 func BurstClient(proxyAddr string, timeout time.Duration) *http.Client {
-	tr := &http.Transport{DisableKeepAlives: true}
+	// The two phases bounded separately, so a failure says which one it was —
+	// see DialPhaseTimeout. The live canary and the lane must classify a failure
+	// the same way or the two graders describe the same path differently.
+	tr := &http.Transport{
+		DisableKeepAlives:   true,
+		TLSHandshakeTimeout: TLSPhaseTimeout,
+	}
 	if proxyAddr != "" {
 		d := &socks5Dialer{proxy: proxyAddr, timeout: timeout}
 		tr.DialContext = d.DialContext
+	} else {
+		tr.DialContext = (&net.Dialer{Timeout: DialPhaseTimeout}).DialContext
 	}
 	return &http.Client{Transport: tr, Timeout: timeout}
 }
