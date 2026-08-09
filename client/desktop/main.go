@@ -111,7 +111,14 @@ func main() {
 		printConfig   = flag.Bool("print-config", false, "generate the sing-box config from -config, print it, and exit (no sing-box needed)")
 	)
 	canaryGoodput := flag.Float64("canary-goodput-kbps", 64, "a zapret recipe must sustain at least this KiB/s to be credited; reachability alone scores a frozen path as a win. 0 disables the check.")
+	// See the daemon: neither binary could say what it was without being asked to
+	// start first, which is the wrong time for the question.
+	showVersion := flag.Bool("version", false, "print the build identity and exit")
 	flag.Parse()
+	if *showVersion {
+		fmt.Println(version.String())
+		return
+	}
 
 	log := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelInfo}))
 	log.Info("lotsman-client starting", "version", version.String())

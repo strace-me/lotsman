@@ -156,7 +156,18 @@ func main() {
 		rulesetsRatio      = flag.Float64("rulesets-min-ratio", 0.7, "shrink guard: reject a tag dropping below this fraction of its last good count (0 = off)")
 		rulesetsDir        = flag.String("rulesets-dir", "/etc/sing-box", "rule-set root holding rule-set-{geosite,geoip}/*.srs")
 	)
+	// -version, because "which build is on the box?" had no answer that did not
+	// involve reading the log of a daemon that is already running. On the router
+	// that meant `logread | grep "lotsmand starting"`, which fails exactly when it
+	// is needed most: after a crash loop, or before a start. pkg/version exists to
+	// make a bug report answerable and a rollback something other than a hunt; the
+	// flag is the half that was missing.
+	showVersion := flag.Bool("version", false, "print the build identity and exit")
 	flag.Parse()
+	if *showVersion {
+		fmt.Println(version.String())
+		return
+	}
 
 	log := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelInfo}))
 	log.Info("lotsmand starting", "version", version.String(), "dry_run", *dryRun, "simulate", *simulate, "interval", interval.String())
