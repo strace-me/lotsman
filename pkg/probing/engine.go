@@ -40,8 +40,9 @@ type Engine struct {
 	interval time.Duration
 	log      *slog.Logger
 	// stall reports that this service's CURRENT path is not carrying traffic, and
-	// why, even though a header probe succeeds. nil = disabled.
-	stall func(service string) (reason string, stalled bool)
+	// why, even though a header probe succeeds. measured distinguishes a verdict
+	// from bytes counted off the wire from one inferred over a ratio. nil = disabled.
+	stall func(service string) (reason string, stalled, measured bool)
 	// carrying reports that the service is demonstrably moving real traffic right
 	// now, from PASSIVE observation of the user's own connections. nil = disabled.
 	carrying func(service string) (reason string, ok bool)
@@ -63,8 +64,21 @@ type Engine struct {
 // REASON as well, because the failure recorded against the service must say what
 // was actually observed rather than borrow a neighbouring explanation.
 //
+// It also returns MEASURED, and that third value is the whole difference between
+// the two sources. The canary counted bytes off the wire: "this rule's own volume
+// target delivered nothing" is a fact. The eye counted a ratio: "five of seven
+// flows look frozen" is a suspicion, and a video player's abandoned parallel range
+// requests look exactly like frozen flows. Only the fact outranks the activity
+// veto below; the suspicion loses to megabytes the user is visibly moving.
+//
+// Both were filed under one flag until 2026-08-09, and the router paid for it: the
+// eye walked YouTube to VPN three times in ten minutes while the owner watched an
+// uninterrupted video, because a suspicion was given a measurement's authority.
+//
 // nil = disabled. Call before Run.
-func (e *Engine) SetStallOracle(f func(service string) (reason string, stalled bool)) { e.stall = f }
+func (e *Engine) SetStallOracle(f func(service string) (reason string, stalled, measured bool)) {
+	e.stall = f
+}
 
 // SetActivityOracle wires the OTHER half of the same problem. A synthetic probe
 // fetches one URL over one protocol, so it can be wrong in both directions: it
@@ -78,9 +92,9 @@ func (e *Engine) SetStallOracle(f func(service string) (reason string, stalled b
 // chase a failure that existed only in the probe.
 //
 // So a FAILED active probe is vetoed when passive observation of the user's own
-// connections shows the service genuinely moving traffic. Only a probe that failed
-// on its own is vetoed: a failure the stall oracle produced is itself a
-// measurement and outranks this.
+// connections shows the service genuinely moving traffic. A probe failed by a
+// MEASURED stall is not vetoed — bytes counted beat bytes inferred — but a probe
+// failed by an inferred one is, because the veto is itself a measurement.
 //
 // nil = disabled. Call before Run.
 func (e *Engine) SetActivityOracle(f func(service string) (reason string, ok bool)) { e.carrying = f }
@@ -183,8 +197,12 @@ func (e *Engine) runProbe(ctx context.Context, service string, position int, kin
 	// carrying nothing. Measured on the ThinkPad: 54 such failures in six minutes
 	// while YouTube did not load and the app said 11/11.
 	if v.OK && e.stall != nil && (kind == "active" || e.isZapretRung(service, position)) {
-		if reason, stalled := e.stall(service); stalled {
-			v.OK, v.Err, byMeasurement = false, reason, true
+		if reason, stalled, measured := e.stall(service); stalled {
+			// byMeasurement carries the oracle's OWN answer now, instead of assuming
+			// every stall verdict was measured. An inferred stall still fails the probe
+			// — the eye is usually right — but it no longer silences the one signal that
+			// can contradict it.
+			v.OK, v.Err, byMeasurement = false, reason, measured
 		}
 	}
 	// The mirror case, and the one that cost a working voice call: the probe failed

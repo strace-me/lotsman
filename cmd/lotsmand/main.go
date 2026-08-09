@@ -864,15 +864,21 @@ func main() {
 		// stalled, its active probe is failed so Brain escalates to a foreign egress
 		// (the only thing that escapes an IP-keyed throttle). Always-on (the eye runs
 		// regardless of -remediate); escalation itself is the standard chain walk.
-		eng.SetStallOracle(func(service string) (string, bool) {
+		//
+		// measured=false, and that is the honest label: the eye reads a RATIO over
+		// conntrack — so many flows carrying so little — not bytes off this rule's own
+		// target. It is usually right and still fails the probe, but a video player's
+		// abandoned parallel range requests are indistinguishable from frozen flows,
+		// so it must not silence the activity veto below.
+		eng.SetStallOracle(func(service string) (string, bool, bool) {
 			eyeMu.Lock()
 			defer eyeMu.Unlock()
 			for _, v := range verdicts {
 				if v.Service == service && v.Kind == misroute.KindStalled {
-					return "throttle-stall: flows frozen mid-stream (TSPU IP-throttle); escalate to a foreign egress (LOT-43)", true
+					return "throttle-stall: flows frozen mid-stream (TSPU IP-throttle); escalate to a foreign egress (LOT-43)", true, false
 				}
 			}
-			return "", false
+			return "", false, false
 		})
 		// The OTHER half, and the daemon ran without it. A synthetic probe is wrong in
 		// both directions, and the stall oracle above only fixes one of them: it fails

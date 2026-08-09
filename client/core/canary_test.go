@@ -141,12 +141,12 @@ func TestStallReasonOnlyWhileOnTheDesyncRung(t *testing.T) {
 		},
 	}
 
-	if _, stalled := z.StallReason("youtube"); stalled {
+	if _, stalled, _ := z.StallReason("youtube"); stalled {
 		t.Error("no verdict yet must not stall the probe")
 	}
 
 	z.noteCarrying("youtube", false, "the path connects but carries nothing")
-	reason, stalled := z.StallReason("youtube")
+	reason, stalled, _ := z.StallReason("youtube")
 	if !stalled {
 		t.Fatal("a canary that measured no goodput must fail the probe so the brain escalates")
 	}
@@ -160,19 +160,19 @@ func TestStallReasonOnlyWhileOnTheDesyncRung(t *testing.T) {
 	// Consumed, not held: a standing verdict failed every later probe until the
 	// next canary passed, so three "consecutive failures" could all come from one
 	// canary. The probe has to stay a second opinion, not an echo.
-	if _, stalled := z.StallReason("youtube"); stalled {
+	if _, stalled, _ := z.StallReason("youtube"); stalled {
 		t.Error("the verdict must be consumed by the first probe that reads it")
 	}
 
 	onRung = false
 	z.noteCarrying("youtube", false, "the path connects but carries nothing")
-	if _, stalled := z.StallReason("youtube"); stalled {
+	if _, stalled, _ := z.StallReason("youtube"); stalled {
 		t.Error("the verdict must not follow the service off the desync rung")
 	}
 
 	onRung = true
 	z.noteCarrying("youtube", true, "")
-	if _, stalled := z.StallReason("youtube"); stalled {
+	if _, stalled, _ := z.StallReason("youtube"); stalled {
 		t.Error("a recipe that carries again must clear the verdict")
 	}
 }

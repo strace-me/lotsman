@@ -120,18 +120,22 @@ func (z *zapretExec) noteCarrying(service string, carrying bool, why string) {
 // 151 probe failures in twenty minutes carried this reason, driving 37
 // escalations. One canary verdict now fails one probe, so three failures mean
 // three canaries actually said so.
-func (z *zapretExec) StallReason(service string) (string, bool) {
+// The third value is always true: this verdict comes from the canary, which
+// pulled the rule's OWN volume target and counted what arrived. That is a fact
+// about this rule's path, and it outranks the activity veto — unlike the eye's
+// ratio, which is a suspicion and must not.
+func (z *zapretExec) StallReason(service string) (string, bool, bool) {
 	if !z.stillOnRung(service) {
-		return "", false
+		return "", false, false
 	}
 	z.carryMu.Lock()
 	defer z.carryMu.Unlock()
 	why, pending := z.notCarrying[service]
 	if !pending {
-		return "", false
+		return "", false, false
 	}
 	delete(z.notCarrying, service)
-	return "desync canary: " + why, true
+	return "desync canary: " + why, true, true
 }
 
 // stillOnRung reports whether the service is STILL on a zapret rung.

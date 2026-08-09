@@ -104,7 +104,7 @@ func TestStallOracleFailsActiveProbe(t *testing.T) {
 	bus := events.NewBus()
 	prober := &fakeProber{ok: true, rtt: 42}
 	e := New(bus, prober, fixedPositioner(0), oneServiceReg(), kb.New(), nil, nil, 5*time.Millisecond, discardLog())
-	e.SetStallOracle(func(string) (string, bool) { return "flows frozen mid-stream", true })
+	e.SetStallOracle(func(string) (string, bool, bool) { return "flows frozen mid-stream", true, true })
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -235,7 +235,7 @@ func TestStallOracleAlsoFailsASilentProbeOfADesyncRung(t *testing.T) {
 		}},
 	}}
 	e := New(bus, &fakeProber{ok: true, rtt: 40}, fixedPositioner(1), reg, kb.New(), nil, nil, 5*time.Millisecond, discardLog())
-	e.SetStallOracle(func(string) (string, bool) { return "carries nothing", true })
+	e.SetStallOracle(func(string) (string, bool, bool) { return "carries nothing", true, true })
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -302,5 +302,55 @@ func TestUnmeasuredProbeIsNeitherSuccessNorFailure(t *testing.T) {
 		if s := k.Stats("youtube", e.strategyKey("youtube", pos)); s.Seen {
 			t.Errorf("position %d was never measured, but the KB learned from it", pos)
 		}
+	}
+}
+
+// The eye reads a RATIO — so many flows carrying so little — and a video player's
+// abandoned parallel range requests look exactly like frozen flows. That is a
+// suspicion, and it must lose to megabytes the user is visibly moving. It cost the
+// owner's router three flaps in ten minutes on 2026-08-09, mid-video, because an
+// inferred stall carried a measurement's authority and silenced the one signal
+// that could contradict it.
+func TestAnInferredStallDoesNotSilenceVisibleTraffic(t *testing.T) {
+	bus := events.NewBus()
+	e := New(bus, &fakeProber{ok: true, rtt: 42}, fixedPositioner(0), oneServiceReg(), kb.New(), nil, nil, 5*time.Millisecond, discardLog())
+	e.SetStallOracle(func(string) (string, bool, bool) { return "5 of 7 flows look frozen", true, false })
+	e.SetActivityOracle(func(string) (string, bool) { return "38 MB moved this window", true })
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go e.Run(ctx)
+
+	select {
+	case v := <-bus.Verdicts:
+		if !v.OK {
+			t.Fatalf("an inferred stall beat visible traffic: %+v", v)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("no verdict published")
+	}
+}
+
+// The mirror, and the reason the veto does not simply always win: the canary
+// counted bytes off THIS rule's own volume target and got none. That is a fact
+// about this path, and traffic moving elsewhere in the same rule does not refute
+// it.
+func TestAMeasuredStallOutranksVisibleTraffic(t *testing.T) {
+	bus := events.NewBus()
+	e := New(bus, &fakeProber{ok: true, rtt: 42}, fixedPositioner(0), oneServiceReg(), kb.New(), nil, nil, 5*time.Millisecond, discardLog())
+	e.SetStallOracle(func(string) (string, bool, bool) { return "carried 0 KiB of the 64 asked", true, true })
+	e.SetActivityOracle(func(string) (string, bool) { return "38 MB moved this window", true })
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go e.Run(ctx)
+
+	select {
+	case v := <-bus.Verdicts:
+		if v.OK {
+			t.Fatalf("a measured stall was vetoed by an inference: %+v", v)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("no verdict published")
 	}
 }
