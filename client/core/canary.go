@@ -432,76 +432,17 @@ func (c *Core) sweepVolume(ctx context.Context) {
 	}
 }
 
-// carryingFloorBytes is how much a rule must have MOVED since the previous
-// observation pass to count as demonstrably working. One interval of real use
-// clears it easily (a voice call is hundreds of KB); a keepalive or a failed
-// handshake does not.
-const carryingFloorBytes = 64 << 10
-
-// carryingFloorPerFlow is the same question asked per CONNECTION, and it is the
-// one that matters. An aggregate is trivially cleared by a browser thrashing:
-// measured on the ThinkPad while YouTube would not load, the eye saw 1110 KiB
-// across 387 live flows — 2.9 KiB each — which is not health, it is the freeze
-// signature, a client opening connection after connection and getting a few
-// kilobytes out of each before it dies. The aggregate floor waved that through.
-//
-// Above the ~16 KiB point where the TSPU volume freeze bites, so a flow that got
-// past it counts and a flow that died at it does not.
-const carryingFloorPerFlow = 24 << 10
-
-// carryingStalledMax is the share of a rule's flows that may be frozen while it
-// still counts as carrying. A path where most flows are stuck mid-stream is the
-// freeze signature, and calling that "working" because the remaining flows still
-// move bytes is exactly the false green this whole seam exists to prevent.
-const carryingStalledMax = 0.5
-
-// CarryingReason reports that a rule is demonstrably moving real traffic right
-// now, from PASSIVE observation of the operator's own connections — the probing
-// engine's activity-oracle contract.
-//
-// This is evidence of a different kind from a probe: it is the actual service
-// being used, not a synthetic fetch of one URL over one protocol. It exists
-// because the probe was measured wrong in both directions on the same machine
-// within a day, and this is the half that costs a working session: Discord's
-// gateway URL timed out for minutes while 3.5 MB of voice flowed through the same
-// rule, and escalating on that would have torn down the call.
-//
-// It requires MOVEMENT since the last pass, not merely the existence of flows: a
-// long-lived connection whose byte counter stopped advancing looks identical to a
-// busy one in a single snapshot, and treating it as healthy would be the
-// unobserved claim this project keeps finding.
+// CarryingReason is the probing engine's activity oracle: is this rule visibly
+// moving the user's own traffic right now? The judgement itself lives in
+// pkg/observe beside the metrics it reads, because the router daemon needs the
+// same answer and had none — it ran the stall oracle with nothing opposing it.
 func (c *Core) CarryingReason(service string) (string, bool) {
 	snap := c.observeSnapshot()
 	m, ok := snap.Services[service]
-	if !ok || m.Flows == 0 {
+	if !ok {
 		return "", false
 	}
-	if m.StalledRatio > carryingStalledMax {
-		return "", false // most of it is frozen; movement elsewhere does not redeem that
-	}
-	c.carriedMu.Lock()
-	if c.lastCarried == nil {
-		c.lastCarried = map[string]int64{}
-	}
-	prev, seen := c.lastCarried[service]
-	c.lastCarried[service] = m.Bytes
-	c.carriedMu.Unlock()
-	// The first observation has nothing to compare against; a cumulative total is
-	// not evidence of movement.
-	if !seen || m.Bytes <= prev {
-		return "", false
-	}
-	moved := m.Bytes - prev
-	if moved < carryingFloorBytes {
-		return "", false
-	}
-	// Per flow, not just in total. Many connections each carrying a trickle is the
-	// freeze, and summing them turns the symptom into the evidence.
-	if perFlow := moved / int64(m.Flows); perFlow < carryingFloorPerFlow {
-		return "", false
-	}
-	return fmt.Sprintf("%d KiB moved across %d live flows since the last pass (%d KiB each)",
-		moved>>10, m.Flows, (moved/int64(m.Flows))>>10), true
+	return c.carrying.Reason(service, m)
 }
 
 // volumeTargets is every bulk URL a rule declares, in one place so the canary,

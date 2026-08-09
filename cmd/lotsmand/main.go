@@ -874,6 +874,32 @@ func main() {
 			}
 			return "", false
 		})
+		// The OTHER half, and the daemon ran without it. A synthetic probe is wrong in
+		// both directions, and the stall oracle above only fixes one of them: it fails
+		// a probe the eye says is carrying nothing. With nothing opposing it, a rule the
+		// user is visibly using gets escalated off a path that works.
+		//
+		// Measured on the owner's router, 2026-08-09, an hour after YouTube first went
+		// onto its desync rung: the eye read the player's abandoned parallel range
+		// requests as "5 of 7 flows frozen", five such verdicts walked the rule to VPN,
+		// and it flapped three times in ten minutes while he watched an uninterrupted
+		// video and 28–40 MB moved per observation window. Every part was working as
+		// designed; the design was missing its counterweight.
+		//
+		// The judgement is pkg/observe's, shared with the desktop client, which had the
+		// only copy — including the part that matters most: bytes PER FLOW, since many
+		// connections each carrying a trickle IS the freeze.
+		carrying := observe.DefaultCarrying()
+		eng.SetActivityOracle(func(service string) (string, bool) {
+			eyeMu.Lock()
+			snap := eyeSnap
+			eyeMu.Unlock()
+			m, ok := snap.Services[service]
+			if !ok {
+				return "", false
+			}
+			return carrying.Reason(service, m)
+		})
 		// Remediation planner (LOT-18a): on each misroute verdict propose a
 		// remediation rung. PROPOSE-ONLY — it logs and publishes a metric; it does
 		// NOT call the generator with the plan, trigger reconcile, or touch the live

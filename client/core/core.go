@@ -212,11 +212,10 @@ type Core struct {
 	applyForTest func(ctx context.Context, service, recipe string) error
 
 	metricsSrv *http.Server // non-nil only when MetricsAddr is served
-	// lastCarried is the previous observation pass's byte total per rule, so the
-	// activity oracle can ask whether traffic MOVED rather than whether a
-	// connection merely exists. A cumulative total cannot answer that.
-	carriedMu   sync.Mutex
-	lastCarried map[string]int64
+	// carrying answers "is this rule visibly moving the user's own traffic right
+	// now" — the counterweight to the stall oracle. Shared with the router daemon,
+	// which ran the stall oracle with nothing opposing it.
+	carrying *observe.Carrying
 
 	// recipeIDs is what the desync executor can actually render here, so the
 	// brain is never offered a strategy the engine would silently replace.
@@ -306,6 +305,7 @@ func New(conf *config.Config, box ProxyCore, opts Options, log *slog.Logger) *Co
 	return &Core{
 		conf: conf, reg: conf.Registry, box: box, opts: opts, log: log,
 		detect: netid.Detect, pristineChains: snapshotChains(conf.Registry),
+		carrying: observe.DefaultCarrying(),
 	}
 }
 

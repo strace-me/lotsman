@@ -182,7 +182,7 @@ func TestStallReasonOnlyWhileOnTheDesyncRung(t *testing.T) {
 // working session: Discord's gateway URL timed out for minutes while 3.5 MB of
 // voice flowed through the same rule.
 func TestCarryingRequiresMovementNotMerelyFlows(t *testing.T) {
-	c := &Core{}
+	c := &Core{carrying: observe.DefaultCarrying()}
 	set := func(bytes int64, flows int, stalled float64) {
 		c.obsMu.Lock()
 		c.obsSnap = observe.Snapshot{Services: map[string]observe.ServiceMetrics{
@@ -226,25 +226,9 @@ func TestCarryingRequiresMovementNotMerelyFlows(t *testing.T) {
 	// The defect this floor exists for: a browser thrashing. 1110 KiB looks like
 	// plenty until you divide it by 387 connections and get 2.9 KiB each — which is
 	// the TSPU freeze, not health. Summing them turns the symptom into evidence.
-	c.lastCarried["discord"] = 0
-	set(1110<<10, 387, 0)
-	if _, ok := c.CarryingReason("discord"); ok {
-		t.Error("1110 KiB across 387 flows is 2.9 KiB each — the freeze signature, not traffic")
-	}
-
-	// Same volume, few flows: a real stream.
-	c.lastCarried["discord"] = 0
-	set(1110<<10, 4, 0)
-	if _, ok := c.CarryingReason("discord"); !ok {
-		t.Error("1110 KiB across 4 flows is real use and must count")
-	}
-
-	// A trickle is not use.
-	c.lastCarried["discord"] = 6 << 20
-	set(6<<20+1024, 4, 0)
-	if _, ok := c.CarryingReason("discord"); ok {
-		t.Error("1 KiB is a keepalive, not traffic")
-	}
+	// The per-flow floor and the freeze signature now live with the judgement, in
+	// pkg/observe — see TestCarryingDividesByFlowsBeforeBelievingTheTotal. What
+	// belongs here is that the CLIENT reads its own snapshot and delegates.
 
 	// Nothing observed at all.
 	if _, ok := c.CarryingReason("nosuch"); ok {
