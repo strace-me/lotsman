@@ -30,19 +30,14 @@ type Carrying struct {
 	// the ~16 KiB point where the TSPU volume freeze bites, so a flow that got past
 	// it counts and a flow that died at it does not.
 	FloorPerFlow int64
-	// StalledMax is the share of flows that may be frozen while the rule still
-	// counts as carrying. Where most flows are stuck, movement in the rest does not
-	// redeem it.
-	StalledMax float64
-
-	mu   sync.Mutex
-	last map[string]int64
+	mu           sync.Mutex
+	last         map[string]int64
 }
 
 // DefaultCarrying is the tuning both front-ends use, so a rule is not judged
 // carrying on one box and stalled on the other.
 func DefaultCarrying() *Carrying {
-	return &Carrying{FloorBytes: 64 << 10, FloorPerFlow: 24 << 10, StalledMax: 0.5}
+	return &Carrying{FloorBytes: 64 << 10, FloorPerFlow: 24 << 10}
 }
 
 // Reason reports whether the service is visibly carrying, and the evidence.
@@ -54,9 +49,21 @@ func (c *Carrying) Reason(service string, m ServiceMetrics) (string, bool) {
 	if m.Flows == 0 {
 		return "", false
 	}
-	if m.StalledRatio > c.StalledMax {
-		return "", false
-	}
+	// There was a third gate here — refuse when more than half the flows look
+	// frozen — and it made this oracle useless exactly when it was needed. It is
+	// the counterweight to the eye's stall verdict, and it stood down whenever the
+	// eye was loudest, on the eye's own inference. Two signals that both derive
+	// from one ratio are not two signals.
+	//
+	// Measured on the owner's router while he watched YouTube on the TV stick: the
+	// eye reported "7 of 10 flows frozen", the veto disqualified itself on that
+	// same ratio, and it fired zero times in an hour of uninterrupted video.
+	//
+	// It was also redundant. The two floors below already tell the cases apart FROM
+	// BYTES: a real freeze is ten flows thrashing at ~3 KiB each, which fails both;
+	// a video player is seven abandoned range requests beside three delivering
+	// megabytes, which passes both — and the per-flow divisor is total flows, so the
+	// abandoned ones already dilute the average rather than being ignored.
 	c.mu.Lock()
 	if c.last == nil {
 		c.last = map[string]int64{}
@@ -74,6 +81,15 @@ func (c *Carrying) Reason(service string, m ServiceMetrics) (string, bool) {
 	perFlow := moved / int64(m.Flows)
 	if perFlow < c.FloorPerFlow {
 		return "", false
+	}
+	// The stalled ratio is REPORTED, not obeyed. It is real evidence — a rule whose
+	// flows are mostly stuck while one big transfer masks it deserves a second look
+	// — but it is an inference, and the decision follows the bytes. A human reading
+	// the log sees both and can tell the two apart; the code does not pretend the
+	// ratio settles it.
+	if m.StalledRatio > 0 {
+		return fmt.Sprintf("%d KiB moved across %d live flows since the last pass (%d KiB each; %.0f%% of flows look frozen)",
+			moved>>10, m.Flows, perFlow>>10, m.StalledRatio*100), true
 	}
 	return fmt.Sprintf("%d KiB moved across %d live flows since the last pass (%d KiB each)",
 		moved>>10, m.Flows, perFlow>>10), true

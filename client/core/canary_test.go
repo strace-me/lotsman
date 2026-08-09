@@ -216,11 +216,20 @@ func TestCarryingRequiresMovementNotMerelyFlows(t *testing.T) {
 		t.Errorf("the reason must carry the evidence, got %q", reason)
 	}
 
-	// Movement, but most flows frozen: that is the freeze signature, and calling
-	// it healthy because the rest still moves is the false green this prevents.
+	// Movement while most flows look frozen: 768 KiB across 4 flows is 192 KiB
+	// EACH, and that is not a freeze — the freeze is ten flows thrashing at ~3 KiB,
+	// which the per-flow floor below catches on its own. The ratio is reported as
+	// evidence and does not decide, because it is the eye's inference and this
+	// oracle is the counterweight TO the eye: consulting it made the veto stand
+	// down exactly when it was needed. Measured on the router while the owner
+	// watched the TV stick — "7 of 10 flows frozen", zero vetoes in an hour.
 	set(6<<20, 4, 0.9)
-	if _, ok := c.CarryingReason("discord"); ok {
-		t.Error("a mostly-frozen rule must not count as carrying")
+	reason, ok = c.CarryingReason("discord")
+	if !ok {
+		t.Error("bytes say it is carrying; the eye's ratio must not overrule them")
+	}
+	if !strings.Contains(reason, "frozen") {
+		t.Errorf("the ratio must still reach the log as evidence, got %q", reason)
 	}
 
 	// The defect this floor exists for: a browser thrashing. 1110 KiB looks like

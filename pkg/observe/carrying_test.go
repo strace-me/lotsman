@@ -29,10 +29,20 @@ func TestCarryingJudgesMovementNotExistence(t *testing.T) {
 	if !strings.Contains(reason, "KiB") {
 		t.Errorf("the reason must carry the evidence, got %q", reason)
 	}
-	// Movement while most flows are frozen is the freeze signature; the rest still
-	// moving does not redeem it.
-	if _, ok := c.Reason("discord", m(6<<20, 4, 0.9)); ok {
-		t.Error("a mostly-frozen rule must not count as carrying")
+	// 768 KiB across 4 flows is 192 KiB EACH, which is not a freeze by any
+	// measurement — the freeze is ten flows thrashing at ~3 KiB. The ratio is
+	// reported in the evidence and does not decide.
+	if reason, ok := c.Reason("discord", m(6<<20, 4, 0.9)); !ok {
+		t.Error("bytes say it is carrying; a ratio must not overrule them")
+	} else if !strings.Contains(reason, "frozen") {
+		t.Errorf("the ratio must still be reported as evidence, got %q", reason)
+	}
+	// And the real freeze, which the byte floors catch on their own: ten flows
+	// thrashing at ~3 KiB each. This is the case the ratio gate was reaching for,
+	// and it never needed the ratio.
+	c.Reason("x", m(1<<20, 10, 0.9))
+	if _, ok := c.Reason("x", m(1<<20+(29<<10), 10, 0.9)); ok {
+		t.Error("29 KiB across ten flows is the freeze signature and must not count")
 	}
 	// A trickle is a keepalive, not use.
 	c.Reason("discord", m(6<<20, 4, 0))
