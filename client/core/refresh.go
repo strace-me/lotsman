@@ -121,6 +121,19 @@ func (c *Core) newReconciler() *reconcile.Reconciler {
 		// network it was built on, and the subnets it must keep out of the tunnel are
 		// whichever ones the machine is attached to now.
 		TunExcludes: tunExcludes,
+		// Whoever changes the fleet reports it (LOT-66). The counters behind /status
+		// and /metrics used to be written only by Core.generate, which this path
+		// deliberately bypasses — so a subscription added at runtime landed in the
+		// live config while the interface went on showing the count from startup, and
+		// read as a subscription that had not loaded.
+		// Under stateMu because this one runs on the refresh goroutine while the
+		// control socket serves /status from another; the startup writer does not
+		// need it and must not take it (Reload holds stateMu for its whole body).
+		OnLive: func(nodes []subscription.Node) {
+			c.stateMu.Lock()
+			defer c.stateMu.Unlock()
+			c.recordFleet(nodes)
+		},
 	}
 	// Keep the config we are about to replace. The daemon has done this since June
 	// and the client never did (LOT-64): BackupDir defaults to "" = no backup, only

@@ -1651,23 +1651,26 @@ func dnsFromConfig(d *config.DNS, pool string) *singbox.DNSOptions {
 
 // generate fetches subscription nodes and renders the client sing-box config
 // (tun ingress + the mandatory Clash secret), reusing the daemon's exact path.
-func (c *Core) generate(ctx context.Context) ([]byte, error) {
-	if err := c.ensureRuleSets(ctx); err != nil {
-		return nil, err
+// recordFleet snapshots the counters /status and /metrics report about the fleet.
+//
+// It is a method, and exported to the reconciler through Reconciler.OnLive, for
+// one reason: it used to live inline in generate(), and generate() is NOT the only
+// path that makes a node set live. The refresh loop applies through
+// pkg/reconcile, which builds the config itself — so it swapped in 108 nodes while
+// /status went on reporting the 53 counted at startup, and a freshly added
+// subscription read as one that had failed to load (LOT-66). The number describing
+// the fleet now comes from whoever changed the fleet.
+//
+// It does NOT take stateMu itself, and must not: generate() reaches it on the
+// startup path, and Reload holds stateMu for its whole body — a lock here would
+// be one refactor away from a deadlock in the client's most load-bearing
+// function. The caller that runs CONCURRENTLY with /status readers — the refresh
+// loop — takes it instead; see the OnLive hook in newReconciler.
+func (c *Core) recordFleet(nodes []subscription.Node) {
+	if c.conf == nil || c.conf.Pools == nil {
+		return
 	}
-	mgr := subscription.NewManager(subscription.NewHTTPFetcher())
-	nodes, errs := mgr.Load(ctx, c.conf.Subscriptions)
-	for _, e := range errs {
-		c.log.Warn("subscription load issue", "err", e)
-	}
-	// Capture the quota/expiry the fetch just parsed from the Subscription-Userinfo
-	// header before mgr is discarded, so /status can report it (the mgr itself is
-	// throwaway — only this snapshot is retained).
-	c.subMu.Lock()
-	c.subInfo = mgr.Userinfo()
-	c.subMu.Unlock()
 	memberships := c.conf.Pools.Memberships(nodes)
-	c.tunnelIPs = tunnelIPs(nodes, c.log)
 	c.lastNodes = len(nodes)
 	// Record the other two counts while we hold the material for them: how many
 	// distinct addresses the fleet actually sits behind, and what each pool
@@ -1698,6 +1701,26 @@ func (c *Core) generate(ctx context.Context) ([]byte, error) {
 			Country: n.Country, Source: n.Source, Pools: pl, Warm: warm[n.ID],
 		})
 	}
+}
+
+func (c *Core) generate(ctx context.Context) ([]byte, error) {
+	if err := c.ensureRuleSets(ctx); err != nil {
+		return nil, err
+	}
+	mgr := subscription.NewManager(subscription.NewHTTPFetcher())
+	nodes, errs := mgr.Load(ctx, c.conf.Subscriptions)
+	for _, e := range errs {
+		c.log.Warn("subscription load issue", "err", e)
+	}
+	// Capture the quota/expiry the fetch just parsed from the Subscription-Userinfo
+	// header before mgr is discarded, so /status can report it (the mgr itself is
+	// throwaway — only this snapshot is retained).
+	c.subMu.Lock()
+	c.subInfo = mgr.Userinfo()
+	c.subMu.Unlock()
+	memberships := c.conf.Pools.Memberships(nodes)
+	c.tunnelIPs = tunnelIPs(nodes, c.log)
+	c.recordFleet(nodes)
 
 	services := make([]registry.Service, 0, len(c.reg.Services))
 	for _, s := range c.reg.Services {

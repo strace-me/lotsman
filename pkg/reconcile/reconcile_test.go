@@ -751,3 +751,51 @@ func TestPruneLeavesAShortHistoryAlone(t *testing.T) {
 		t.Errorf("kept %d of 3 backups", len(left))
 	}
 }
+
+// The owner added a subscription, saw the node count unchanged, and concluded it
+// had not loaded. It had: the live config held all of it. What was stale was the
+// counter, because the client wrote it only in Core.generate — which this
+// reconciler deliberately does not use (LOT-66). Whoever makes a node set live
+// has to be the one that reports it.
+func TestOnLiveFiresWhenAPassMakesANodeSetLive(t *testing.T) {
+	run := &fakeRunner{}
+	r, cfgPath := testReconciler(t, run, fakeLoader{nodes: []subscription.Node{node(t)}}, false)
+	var got [][]subscription.Node
+	r.OnLive = func(n []subscription.Node) { got = append(got, n) }
+
+	if err := r.Reconcile(context.Background()); err != nil {
+		t.Fatalf("first pass: %v", err)
+	}
+	if _, err := os.Stat(cfgPath); err != nil {
+		t.Fatalf("the pass should have written a config: %v", err)
+	}
+	if len(got) != 1 || len(got[0]) != 1 {
+		t.Fatalf("after an apply OnLive got %v, want one call with one node", got)
+	}
+
+	// And on the pass that changes nothing: the set is still live, and a caller
+	// that started late (or lost its snapshot) must be able to learn it without
+	// waiting for the fleet to change.
+	if err := r.Reconcile(context.Background()); err != nil {
+		t.Fatalf("second pass: %v", err)
+	}
+	if len(got) != 2 {
+		t.Errorf("an already-in-sync pass did not report the live set (%d calls)", len(got))
+	}
+}
+
+// A pass that deliberately applies nothing must not claim a set is live: dry-run
+// leaves the previous config in force, and reporting the candidate would move the
+// counter to a fleet nobody is running.
+func TestOnLiveStaysSilentOnDryRun(t *testing.T) {
+	run := &fakeRunner{}
+	r, _ := testReconciler(t, run, fakeLoader{nodes: []subscription.Node{node(t)}}, true)
+	called := 0
+	r.OnLive = func([]subscription.Node) { called++ }
+	if err := r.Reconcile(context.Background()); !errors.Is(err, ErrNotApplied) {
+		t.Fatalf("want ErrNotApplied, got %v", err)
+	}
+	if called != 0 {
+		t.Errorf("dry-run reported %d live sets; it applied none", called)
+	}
+}

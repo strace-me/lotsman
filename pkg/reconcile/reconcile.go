@@ -94,6 +94,19 @@ type Reconciler struct {
 	// driver. nil = use Opts as given (the router, whose subnets do not move).
 	TunExcludes func() []string
 
+	// OnLive is called with the node set that IS live once a pass has made it so —
+	// after a successful apply, and also when the desired config already matched, so
+	// the caller learns the truth on the tick that established it rather than only
+	// when something changed.
+	//
+	// It exists because the client's fleet counters were written only by
+	// Core.generate, which the reconciler deliberately does not use (it builds the
+	// config itself). So the refresh loop swapped in 108 nodes while /status went on
+	// reporting the 53 from startup, and the owner read that as a subscription that
+	// had failed to load (LOT-66). A number describing the fleet has to come from
+	// whoever changed it.
+	OnLive func(nodes []subscription.Node)
+
 	// Baseline persists lastNodes across restarts so the anti-churn guard works on
 	// the very first reconcile after a restart (otherwise lastNodes resets to 0 and
 	// a degraded startup fetch is applied wholesale — LOT-29). nil = in-memory only.
@@ -224,6 +237,9 @@ func (r *Reconciler) Reconcile(ctx context.Context) error {
 	if sameConfig(desired, live) {
 		r.last = desired
 		r.setLastNodes(len(nodes))
+		if r.OnLive != nil {
+			r.OnLive(nodes)
+		}
 		return nil // already in sync
 	}
 
@@ -266,6 +282,9 @@ func (r *Reconciler) Reconcile(ctx context.Context) error {
 	r.last = desired
 	r.setLastNodes(len(nodes))
 	r.Log.Info("reconcile: applied new sing-box config", "nodes", len(nodes), "pools", len(memberships))
+	if r.OnLive != nil {
+		r.OnLive(nodes)
+	}
 	return nil
 }
 
