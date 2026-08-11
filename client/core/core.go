@@ -37,6 +37,7 @@ import (
 	"github.com/strace-me/lotsman/pkg/nodepass"
 	"github.com/strace-me/lotsman/pkg/noderank"
 	"github.com/strace-me/lotsman/pkg/observe"
+	"github.com/strace-me/lotsman/pkg/pathhealth"
 	"github.com/strace-me/lotsman/pkg/probing"
 	"github.com/strace-me/lotsman/pkg/reconcile"
 	"github.com/strace-me/lotsman/pkg/registry"
@@ -112,6 +113,8 @@ type Options struct {
 	SingboxConfig string        // path of the live sing-box config the reconciler swaps
 	StateFile     string        // persists each service's chain position across restarts ("" = start cold every time)
 	NodeRank      bool          // rank a VPN pool's concrete nodes per service and pin the best, instead of riding plain url-test
+	PathHealth    bool          // escalation-v2 DETECT: probe every chain step out-of-band and log which tier works
+	PathHealthAct bool          // escalation-v2 ACT: let the brain jump straight to the best working tier (needs PathHealth)
 	RefreshEvery  time.Duration // how often to re-fetch subscriptions and reconcile (0 = never)
 	RoamInterval  time.Duration // how often to re-fingerprint the network for roaming (0 = default 15s; only in -kb-dir mode)
 	QNum          int           // NFQUEUE queue number (0 = 200, matching the router)
@@ -158,15 +161,16 @@ type Core struct {
 	opts Options
 	log  *slog.Logger
 
-	bus    *events.Bus
-	kb     *kb.KB
-	kbFile string           // resolved KB path (KBFile, or a per-network file under KBDir); guarded by mu
-	ranker *noderank.Ranker // per-service node ranker; nil when NodeRank is off or there are no subscriptions
-	clash  *dataplane.ClashClient
-	brain  *brain.Brain
-	eng    *probing.Engine     // probing engine, retained so the UI can force a recheck
-	events *audit.RingRecorder // in-memory brain-transition history for the UI
-	secret string
+	bus        *events.Bus
+	kb         *kb.KB
+	kbFile     string               // resolved KB path (KBFile, or a per-network file under KBDir); guarded by mu
+	ranker     *noderank.Ranker     // per-service node ranker; nil when NodeRank is off or there are no subscriptions
+	pathHealth *pathhealth.Detector // escalation-v2 detector; nil when PathHealth is off or no box-direct probe exists
+	clash      *dataplane.ClashClient
+	brain      *brain.Brain
+	eng        *probing.Engine     // probing engine, retained so the UI can force a recheck
+	events     *audit.RingRecorder // in-memory brain-transition history for the UI
+	secret     string
 
 	// Roaming: re-detect the network on an interval and swap the KB when it changes.
 	// detect is the fingerprint source (netid.Detect; overridable in tests). roamLoop
@@ -599,10 +603,16 @@ func (c *Core) buildLoop() error {
 		}
 	}
 	rp := dataplane.NewRungProber(mp, c.clash, c.reg, "", 0)
+	// The same box-direct prober the rung prober picks below, kept for the
+	// path-health detector: it needs a probe that leaves outside our own tun, and
+	// working out which one that is on this platform is exactly what this switch
+	// already does.
+	var boxDirect dataplane.Prober
 	switch {
 	case directMP != nil:
 		// Proxy mode: "direct" really is direct, because nothing captured it.
 		rp.SetDirectProber(directMP)
+		boxDirect = directMP
 	default:
 		// Tun mode. A plain dial is captured by our own tun and routed by the
 		// service's rule — into the VPN node the rule sits on — so an inactive
@@ -623,6 +633,7 @@ func (c *Core) buildLoop() error {
 			// no profile for its domains, so it measures the path WITHOUT the recipe.
 			// On this network that path dies at the handshake, so recovery said "no"
 			// forever while the lane had already proved a recipe that carried it.
+			boxDirect = bound
 			rp.SetDirectProber(newLaneProber(c, bound))
 			c.log.Info("direct-rung probe armed: a desync rung is proved in the lane, other direct rungs bound to the physical interface")
 		} else {
@@ -648,6 +659,31 @@ func (c *Core) buildLoop() error {
 	c.eng = eng
 
 	runners := []func(context.Context){c.brain.Run, ap.Run, eng.Run, c.superviseBox}
+	// escalation-v2 DETECT (E-1) on the client, which had none: the daemon has run
+	// this since June and the laptop walked its chain one rung at a time in both
+	// directions instead (LOT-63). Probing every step out-of-band answers "which
+	// tier works HERE, now" in one pass, which is the question a machine that moves
+	// between networks asks on every arrival.
+	if c.opts.PathHealth && boxDirect != nil {
+		det := &pathhealth.Detector{
+			Reg: c.reg, Pos: c.brain, Direct: boxDirect, Nodes: c.clash,
+			TestURL: pathHealthTestURL, Timeout: 4 * time.Second, Log: c.log,
+			// Two, not the package default of four. docs/DESIGN-clients.md: the TSPU
+			// freezes on more than three parallel handshakes, so a fan-out sized for a
+			// router on a wired uplink is the wrong shape on a client that shares one
+			// radio — the scan would provoke the very failure it is measuring for.
+			MaxParallel: 2,
+		}
+		c.pathHealth = det
+		runners = append(runners, func(rctx context.Context) { c.pathHealthLoop(rctx, det) })
+		if c.opts.PathHealthAct {
+			c.brain.SetPathOracle(det)
+			c.log.Info("path-health ACT: the brain jumps straight to the best working tier", "interval", pathHealthInterval.String())
+		} else {
+			c.log.Info("path-health detect (propose-only): logging the best working tier, changing nothing", "interval", pathHealthInterval.String())
+		}
+	}
+
 	if c.opts.RefreshEvery > 0 && c.opts.SingboxConfig != "" {
 		rc := c.newReconciler()
 		runners = append(runners, func(rctx context.Context) { c.refreshLoop(rctx, rc, c.opts.RefreshEvery) })
@@ -954,6 +990,35 @@ const (
 //
 // Decaying also lifts the exploration bonus on strategies nobody has retried lately, so
 // "worked before" gets re-validated instead of trusted forever.
+// pathHealthInterval is how often every chain step is re-probed, and
+// pathHealthTestURL is the generic connectivity target used for a vpn-tier step
+// of a service whose own probe is not HTTP.
+const (
+	pathHealthInterval = time.Minute
+	pathHealthTestURL  = "http://www.gstatic.com/generate_204"
+)
+
+// pathHealthLoop runs the detector on an interval, starting immediately: the
+// first scan is the one that matters, because it is what tells a laptop that has
+// just joined a network which tier works here before the chain is walked.
+func (c *Core) pathHealthLoop(ctx context.Context, det *pathhealth.Detector) {
+	if err := det.Scan(ctx); err != nil {
+		c.log.Warn("path-health scan failed", "err", err)
+	}
+	t := time.NewTicker(pathHealthInterval)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+			if err := det.Scan(ctx); err != nil {
+				c.log.Warn("path-health scan failed", "err", err)
+			}
+		}
+	}
+}
+
 // noderankSamples is how many delay samples the ranker takes per node; the same
 // value the daemon passes.
 const noderankSamples = 3

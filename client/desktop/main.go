@@ -102,6 +102,8 @@ func main() {
 		refreshEvery  = flag.Duration("refresh-interval", 5*time.Minute, "how often to re-fetch subscriptions and reconcile the config (0 = never)")
 		roamInterval  = flag.Duration("roam-interval", 15*time.Second, "how often to re-fingerprint the network and swap the KB on a change (only with -kb-dir)")
 		nodeRank      = flag.Bool("noderank", true, "rank a VPN pool's concrete nodes per service and pin the best, instead of riding plain url-test. url-test ranks by LATENCY, and a node under the TSPU volume freeze answers in 40ms and then carries nothing, so latency alone crowns the deadest exit.")
+		pathHealth    = flag.Bool("path-health", true, "escalation-v2 DETECT: probe EVERY chain step out-of-band each minute and log which tier works here, instead of discovering it by walking the chain one rung at a time")
+		pathHealthAct = flag.Bool("path-health-act", false, "escalation-v2 ACT: let the brain jump straight to the best WORKING tier instead of escalating one rung at a time. Requires -path-health.")
 		controlSock   = flag.String("control-socket", "", "unix socket for the local control API (empty = default under the runtime dir)")
 		controlGroup  = flag.String("control-socket-group", "", "UNIX group to own the control socket (0660, group-traversable dir) so an unprivileged UI in this group can drive a root service; empty = owner-only 0600")
 		metricsAddr   = flag.String("metrics-addr", "", "serve Prometheus /metrics on this host:port (empty = off; also enables the passive observe pass that surfaces frozen/leak/one-way flows)")
@@ -191,6 +193,8 @@ func main() {
 		KBDir:             *kbDir,
 		StateFile:         *stateFile,
 		NodeRank:          *nodeRank,
+		PathHealth:        *pathHealth,
+		PathHealthAct:     *pathHealthAct,
 		CanaryGoodputKBps: *canaryGoodput,
 		ProbeProxy:        *probeProxy,
 		RuleSetDir:        *ruleSetDir,
