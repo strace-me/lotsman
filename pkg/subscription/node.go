@@ -8,6 +8,8 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"net/url"
+	"sort"
 	"strconv"
 	"strings"
 )
@@ -100,23 +102,134 @@ func nodeID(proto, server string, port int) string {
 // The cost of being wrong each way is asymmetric and decides the default:
 // over-distinguishing splits a node's health history, which heals in minutes,
 // while under-distinguishing silently deletes exits you are paying for.
-func assignIDs(nodes []Node) {
-	byAddr := make(map[string]int, len(nodes))
+//
+// The premise above — "a rotating credential appears once per address, a selector
+// appears many times at once" — turned out to be false for AcmeVPN, and that is
+// what this function now guards against. Measured on the live subscription
+// 2026-08-11: 50 nodes over 6 addresses, up to 15 on one, and a fresh `sid` on
+// EVERY fetch — 48 of 50 changed between two pulls three seconds apart. So the
+// provider both multiplexes by address and rotates, the extension below baked the
+// rotating value into every ID, and sing-box was rebuilt and restarted every five
+// minutes on churn (LOT-1 again, from the other side).
+//
+// The rule is therefore self-checking rather than provider-specific: prefer the
+// identity that ignores rotating credentials, but only where it still tells the
+// pull's own nodes apart, and fall back to the full one for any address group it
+// would merge. A wrong guess in volatileParams then cannot cost an exit — the
+// worst it can do is leave the churn as it is today, which is the recoverable
+// direction.
+//
+// It returns the addresses it fell back on. NOTHING SURFACES THAT YET — Parse's
+// signature has thirteen call sites and widening it would bury this fix in
+// mechanical churn — so today the list exists for the tests and the fallback is
+// visible only as the restarts continuing. That gap is LOT-60: a provider whose
+// only discriminator rotates is a fact worth a log line.
+func assignIDs(nodes []Node) (fellBack []string) {
+	byAddr := make(map[string][]int, len(nodes))
 	for i := range nodes {
-		byAddr[nodes[i].ID]++
+		byAddr[nodes[i].ID] = append(byAddr[nodes[i].ID], i)
 	}
-	for i := range nodes {
-		if byAddr[nodes[i].ID] < 2 {
+	for addr, idx := range byAddr {
+		if len(idx) < 2 {
+			// One node behind this address: the plain address identity already tells it
+			// apart from everything else, so a rotated credential stays invisible.
 			continue
 		}
-		h := sha256.Sum256([]byte(nodes[i].ID + "|" + connectionIdentity(nodes[i].Raw)))
-		nodes[i].ID = hex.EncodeToString(h[:8])
+		stable := make(map[string]bool, len(idx))
+		for _, i := range idx {
+			stable[connectionIdentityStable(nodes[i].Raw)] = true
+		}
+		useStable := len(stable) == len(idx)
+		if !useStable {
+			fellBack = append(fellBack, nodes[idx[0]].Server)
+		}
+		for _, i := range idx {
+			ident := connectionIdentityStable(nodes[i].Raw)
+			if !useStable {
+				ident = connectionIdentity(nodes[i].Raw)
+			}
+			h := sha256.Sum256([]byte(addr + "|" + ident))
+			nodes[i].ID = hex.EncodeToString(h[:8])
+		}
 	}
+	sort.Strings(fellBack)
+	return fellBack
 }
 
 // cosmeticKeys are the fields that name a node rather than describe how to reach
 // it, across the shapes Raw takes (a Clash proxy map, a sing-box outbound).
 var cosmeticKeys = []string{"name", "tag", "remarks"}
+
+// volatileParams are credentials a provider may re-issue for a node that has not
+// otherwise changed, so they describe the CONNECTION but not the NODE. The two
+// spellings are not a duplicate: `sid` is the vless URL query parameter and
+// `short_id` is the sing-box/Clash field for the same REALITY value, and Raw
+// arrives in both shapes. pkg/reconcile has its own list (`volatileKeys`) that
+// blanks the same value in the rendered config; this is that fact applied one
+// level earlier, because blanking the value there could not help once the value
+// had already been hashed into the outbound's TAG.
+//
+// Nothing here is trusted blindly — assignIDs verifies on every pull that
+// ignoring these still tells the nodes apart, and keeps them when it does not.
+var volatileParams = map[string]bool{
+	"sid":      true,
+	"short_id": true,
+}
+
+// connectionIdentityStable is connectionIdentity with the rotating credentials
+// removed, so re-fetching an unchanged fleet yields unchanged identities.
+func connectionIdentityStable(raw string) string {
+	if raw == "" {
+		return ""
+	}
+	if strings.Contains(raw, "://") {
+		u, err := url.Parse(raw)
+		if err != nil {
+			// Unparseable: fall back to the full identity rather than guess. Merging two
+			// exits is the unrecoverable direction.
+			return connectionIdentity(raw)
+		}
+		q := u.Query()
+		for k := range volatileParams {
+			q.Del(k)
+		}
+		u.RawQuery = q.Encode() // sorted by key, so it is stable across pulls
+		u.Fragment = ""
+		return u.String()
+	}
+	var m map[string]any
+	if err := json.Unmarshal([]byte(raw), &m); err != nil {
+		return raw
+	}
+	for _, k := range cosmeticKeys {
+		delete(m, k)
+	}
+	dropVolatile(m)
+	out, err := json.Marshal(m)
+	if err != nil {
+		return raw
+	}
+	return string(out)
+}
+
+// dropVolatile walks a decoded node and deletes the rotating credentials wherever
+// they sit — REALITY's short_id is nested under tls.reality, not at the top.
+func dropVolatile(v any) {
+	switch t := v.(type) {
+	case map[string]any:
+		for k := range t {
+			if volatileParams[k] {
+				delete(t, k)
+			} else {
+				dropVolatile(t[k])
+			}
+		}
+	case []any:
+		for _, e := range t {
+			dropVolatile(e)
+		}
+	}
+}
 
 // connectionIdentity reduces a node's raw config to the part that determines the
 // connection, dropping only what a provider is free to re-label. A URL's fragment

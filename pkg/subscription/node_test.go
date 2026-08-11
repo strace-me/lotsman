@@ -75,3 +75,86 @@ func TestConnectionIdentityFallsBackToTheWholeString(t *testing.T) {
 		t.Errorf("got %q, want the input unchanged", got)
 	}
 }
+
+// AcmeVPN turned out to be BOTH providers at once, which is what broke the
+// premise the identity rule was built on: 50 nodes over 6 addresses (so the
+// address alone merges them) and a fresh `sid` on EVERY fetch — 48 of 50 changed
+// between two pulls three seconds apart, measured on the live subscription
+// 2026-08-11. Folding sid into the ID renamed every outbound every pull, which
+// rewrote the sing-box config and restarted it every five minutes, dropping every
+// established TCP session with it (LOT-1, from the other side).
+func TestNodeIDSurvivesRotationOnAnAddressCarryingSeveralExits(t *testing.T) {
+	pull := func(sid1, sid2 string) []string {
+		n := []Node{
+			{Protocol: ProtoVLESS, Server: "198.51.100.10", Port: 443,
+				Raw: "vless://u@198.51.100.10:443?security=reality&sni=cdn2-15.yahoo.com&sid=" + sid1 + "#Вена"},
+			{Protocol: ProtoVLESS, Server: "198.51.100.10", Port: 443,
+				Raw: "vless://u@198.51.100.10:443?security=reality&sni=cdn6-91.yahoo.com&sid=" + sid2 + "#Прага"},
+		}
+		for i := range n {
+			n[i].finalize("sub")
+		}
+		assignIDs(n)
+		return []string{n[0].ID, n[1].ID}
+	}
+	a := pull("3be8339923410338", "55e6d9bd269aac46")
+	b := pull("ffff111122223333", "4444555566667777")
+	if a[0] == a[1] {
+		t.Fatal("two exits behind one address collapsed into one identity — exits would be silently dropped")
+	}
+	if a[0] != b[0] || a[1] != b[1] {
+		t.Errorf("a rotated short_id moved the identities: %v then %v", a, b)
+	}
+}
+
+// The honest fallback. When the ONLY thing telling two exits apart is the field
+// that rotates, ignoring it would merge them — and merging silently deletes an
+// exit you are paying for, which is the unrecoverable direction. So the full
+// identity is kept for that address: the churn stays, no exit is lost, and the
+// address is named in the return value.
+func TestNodeIDKeepsTheRotatingFieldWhenItIsTheOnlyDiscriminator(t *testing.T) {
+	n := []Node{
+		{Protocol: ProtoVLESS, Server: "198.51.100.11", Port: 443,
+			Raw: "vless://u@198.51.100.11:443?security=reality&sni=one.yahoo.com&sid=aaaaaaaaaaaaaaaa#Осло"},
+		{Protocol: ProtoVLESS, Server: "198.51.100.11", Port: 443,
+			Raw: "vless://u@198.51.100.11:443?security=reality&sni=one.yahoo.com&sid=bbbbbbbbbbbbbbbb#Рига"},
+	}
+	for i := range n {
+		n[i].finalize("sub")
+	}
+	fellBack := assignIDs(n)
+	if n[0].ID == n[1].ID {
+		t.Fatal("two exits merged — the fallback must keep them apart even at the cost of churn")
+	}
+	if len(fellBack) != 1 || fellBack[0] != "198.51.100.11" {
+		t.Errorf("the fallback was not reported: %v", fellBack)
+	}
+}
+
+// Raw also arrives as a marshalled sing-box outbound, where the same REALITY
+// value is spelled `short_id` and sits NESTED under tls.reality rather than in a
+// query string. Blanking only the top level would have missed it entirely.
+func TestNodeIDIgnoresANestedShortIDRotation(t *testing.T) {
+	pull := func(sid string) []string {
+		mk := func(sni, sid string) string {
+			return `{"type":"vless","server":"198.51.100.12","server_port":443,` +
+				`"tls":{"enabled":true,"server_name":"` + sni + `","reality":{"enabled":true,"short_id":"` + sid + `"}}}`
+		}
+		n := []Node{
+			{Protocol: ProtoVLESS, Server: "198.51.100.12", Port: 443, Raw: mk("a.yahoo.com", sid)},
+			{Protocol: ProtoVLESS, Server: "198.51.100.12", Port: 443, Raw: mk("b.yahoo.com", sid+"ff")},
+		}
+		for i := range n {
+			n[i].finalize("sub")
+		}
+		assignIDs(n)
+		return []string{n[0].ID, n[1].ID}
+	}
+	a, b := pull("1111"), pull("2222")
+	if a[0] == a[1] {
+		t.Fatal("two exits behind one address collapsed into one identity")
+	}
+	if a[0] != b[0] || a[1] != b[1] {
+		t.Errorf("a rotated nested short_id moved the identities: %v then %v", a, b)
+	}
+}
