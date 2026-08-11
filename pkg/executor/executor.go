@@ -230,6 +230,15 @@ func (v *VPN) target(service, pool string) string {
 	return pool
 }
 
+// Enable re-asserts on every tick BY DESIGN, and must not grow a
+// `if current == target { return nil }` short-circuit like ScriptSwitcher's.
+// Two things would break. The target is recomputed here from bestNode, whose
+// advice moves as the ranker measures — caching would freeze a service on the
+// node it happened to get and silence the ranker until the next state change.
+// And this call is what heals drift: the desync executor's applyNow writes
+// "direct" into the same selector, and every sing-box respawn rebuilds the whole
+// selector table, so something else moves it regularly. The cost is ~11 requests
+// per tick to 127.0.0.1, which is not worth trading a self-healing property for.
 func (v *VPN) Enable(ctx context.Context, service, strategyID string) error {
 	selector := registry.SelectorTag(service)
 	pool := strategyID // VPN strategy IDs name the pool to select
