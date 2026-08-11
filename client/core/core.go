@@ -568,9 +568,7 @@ func (c *Core) buildLoop() error {
 	c.brain = brain.New(c.bus, c.reg, c.renderableKB(), brain.DefaultConfig(), c.events, c.log)
 	c.brain.SetReassert(c.opts.Interval)
 	if c.opts.StateFile != "" {
-		store := state.NewFileStore(c.opts.StateFile)
-		c.brain.Restore(store.Load())
-		c.brain.SetPersist(func(pos map[string]int) { store.Save(pos) })
+		c.bindStateStore(c.currentNetID)
 	}
 	ap := applier.New(c.bus, execs, c.log)
 
@@ -891,6 +889,13 @@ func (c *Core) maybeRoam(ctx context.Context, net netid.Network) bool {
 	if err := c.kb.Save(old); err != nil {
 		c.log.Warn("kb save before roam failed (learning for the old network may be lost)", "path", old, "err", err)
 	}
+	// The positions belong to the network being LEFT, so they are written here,
+	// while currentNetID still names it — after the swap below it names the new one
+	// and this would file the old network's rungs under the new network's name.
+	c.roamMu.Lock()
+	leaving := c.currentNetID
+	c.roamMu.Unlock()
+	c.saveStatePositions(leaving)
 	newPath := filepath.Join(c.opts.KBDir, net.Id+".json")
 	if err := c.kb.Reload(newPath); err != nil {
 		// Keep the current KB rather than run on a half-swapped one.
@@ -910,6 +915,19 @@ func (c *Core) maybeRoam(ctx context.Context, net netid.Network) bool {
 	c.roamMu.Unlock()
 	c.log.Info("network changed — swapped knowledge base",
 		"network", net.Id, "kind", net.Kind, "carrier", net.Carrier, "iface", net.IFace, "kb", newPath)
+	// And the positions with it (LOT-62). The KB has been per-network since it was
+	// introduced while the chain position stayed global, so half the knowledge
+	// followed the machine and half did not: arriving somewhere new, a rule resumed
+	// on the rung that worked in the PREVIOUS network and discovered the truth by
+	// failing on the owner's traffic. The old network's positions were written
+	// above, next to its knowledge base, for the same reason.
+	if c.opts.StateFile != "" && c.brain != nil {
+		c.bindStateStore(net.Id)
+		// Restore only moves Brain's own bookkeeping; the data plane still points
+		// where the previous network left it, so ask for an immediate re-converge
+		// rather than waiting out a reassert tick on a network that just changed.
+		c.brain.Reassert()
+	}
 	c.recaptureForNetwork(ctx)
 	return true
 }
@@ -990,6 +1008,57 @@ const (
 //
 // Decaying also lifts the exploration bonus on strategies nobody has retried lately, so
 // "worked before" gets re-validated instead of trusted forever.
+// saveStatePositions writes the CURRENT positions to the store bound right now,
+// before a roam rebinds it. Brain persists on every transition, so this only
+// matters for the last transition-free stretch — which is exactly the steady
+// state a network is usually left in.
+func (c *Core) saveStatePositions(netID string) {
+	// Guards first: the roam path also runs in tests and on a client that persists
+	// nothing, where there is no brain to ask and no file to write.
+	if c.opts.StateFile == "" || c.brain == nil {
+		return
+	}
+	pos := make(map[string]int, len(c.reg.Services))
+	for _, st := range c.brain.Snapshot() {
+		pos[st.Service] = st.Position
+	}
+	if err := state.NewFileStore(state.PathFor(c.opts.StateFile, netID)).Save(pos); err != nil {
+		c.log.Warn("could not save chain positions before the roam (this network's rungs may be re-derived on return)",
+			"network", netID, "err", err)
+	}
+}
+
+// bindStateStore points chain-position persistence at THIS network's file and
+// restores what that network last knew. Positions are per-network for the same
+// reason the knowledge base is (LOT-62): a position answers "which rung works
+// here", and one shared number made the rung the laptop ended on at the office
+// the rung it started from at home — a walk down the chain paid in broken service
+// on every arrival.
+//
+// A network with no file of its own inherits the shared one ONCE, so an install
+// upgrading to per-network state does not forget where every rule was sitting.
+// After that each network keeps its own.
+//
+// Caller holds nothing; safe to call from the roam path and from Start.
+func (c *Core) bindStateStore(netID string) {
+	path := state.PathFor(c.opts.StateFile, netID)
+	store := state.NewFileStore(path)
+	pos := store.Load()
+	if len(pos) == 0 && path != c.opts.StateFile {
+		if legacy := state.NewFileStore(c.opts.StateFile).Load(); len(legacy) > 0 {
+			pos = legacy
+			c.log.Info("chain positions: seeding this network from the shared store",
+				"network", netID, "path", path, "services", len(pos))
+		}
+	}
+	if c.brain == nil {
+		return
+	}
+	c.brain.Restore(pos)
+	c.brain.SetPersist(func(p map[string]int) { store.Save(p) })
+	c.log.Info("chain positions bound to this network", "network", netID, "path", path, "restored", len(pos))
+}
+
 // pathHealthInterval is how often every chain step is re-probed, and
 // pathHealthTestURL is the generic connectivity target used for a vpn-tier step
 // of a service whose own probe is not HTTP.

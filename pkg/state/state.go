@@ -7,6 +7,8 @@ package state
 import (
 	"encoding/json"
 	"os"
+	"path/filepath"
+	"strings"
 )
 
 // FileStore persists positions to a JSON file: {"service": position}.
@@ -41,4 +43,22 @@ func (s *FileStore) Save(positions map[string]int) error {
 		return err
 	}
 	return os.Rename(tmp, s.path)
+}
+
+// PathFor derives a per-network store path from a base one: /var/lib/lotsman/
+// state.json with network "86bddb09" becomes state.86bddb09.json. An empty
+// network id returns base unchanged.
+//
+// Positions are per-network for the same reason the knowledge base is (LOT-62).
+// A chain position is an answer to "which rung works HERE", and one number shared
+// across every network makes the rung a laptop ended on at the office the rung it
+// starts from at home — where the honest answer is usually a different one, and
+// the walk to it is paid in broken service on every arrival.
+func PathFor(base, networkID string) string {
+	if base == "" || networkID == "" {
+		return base
+	}
+	ext := filepath.Ext(base)             // ".json"
+	stem := strings.TrimSuffix(base, ext) // "/var/lib/lotsman/state"
+	return stem + "." + networkID + ext
 }
