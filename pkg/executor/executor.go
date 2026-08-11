@@ -16,9 +16,25 @@ import (
 	"github.com/strace-me/lotsman/pkg/strategy"
 )
 
+// ErrDeferred is returned by an Enable that ACCEPTED the request but has not
+// carried it out yet — the zapret executor hands a candidate to the gate, which
+// proves it in the sandbox before any real traffic moves, and that outcome
+// arrives later or not at all.
+//
+// It exists because a nil return meant "applied", and the applier logged exactly
+// that: `applied service=youtube class=zapret strategy=ALT12` was written while
+// the recipe was still queued for proof, and on the office network it went on to
+// FAIL the canary. A line asserting a state must come from the code that observed
+// it (principle 1), so the executor now says which of the two it means.
+//
+// It is not a failure: callers that treat it as one would suppress the
+// actual-state report and spin.
+var ErrDeferred = errors.New("accepted, not applied yet")
+
 // StrategyExecutor routes a service's traffic through one mechanism. Enable
 // must be idempotent: calling it twice with the same args is a no-op on the
-// data plane's observable state.
+// data plane's observable state. It returns ErrDeferred when the request was
+// accepted but the data plane has not moved yet.
 type StrategyExecutor interface {
 	Class() string
 	Enable(ctx context.Context, service, strategyID string) error

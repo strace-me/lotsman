@@ -14,6 +14,7 @@ import (
 	"github.com/strace-me/lotsman/pkg/brain"
 	"github.com/strace-me/lotsman/pkg/config"
 	"github.com/strace-me/lotsman/pkg/dataplane"
+	"github.com/strace-me/lotsman/pkg/executor"
 	"github.com/strace-me/lotsman/pkg/registry"
 	"github.com/strace-me/lotsman/pkg/strategy"
 	"github.com/strace-me/lotsman/pkg/strategycat"
@@ -191,7 +192,11 @@ func (z *zapretExec) Enable(ctx context.Context, service, strategyID string) err
 		gctx = z.life()
 	}
 	go z.gate(gctx, service)
-	return nil
+	// Nothing has moved yet: the gate proves a candidate in the sandbox first and
+	// only a pass reaches real traffic. Returning nil here made the applier log
+	// `applied ... strategy=ALT12` for a recipe that was still queued and that then
+	// failed its canary — see executor.ErrDeferred.
+	return executor.ErrDeferred
 }
 
 // applyNow routes the service DIRECT and applies recipe — the only place a

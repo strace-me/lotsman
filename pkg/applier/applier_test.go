@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"log/slog"
+	"sync"
 	"testing"
 	"time"
 
@@ -174,5 +175,101 @@ func TestUnknownStrategyClassNoPanic(t *testing.T) {
 		t.Fatalf("actual published for unknown class: %+v", act)
 	case <-time.After(150 * time.Millisecond):
 		// expected: dropped without panic or report
+	}
+}
+
+// countingHandler records how many times each message was logged at Info or above.
+type countingHandler struct {
+	mu   sync.Mutex
+	seen map[string]int
+}
+
+func (h *countingHandler) Enabled(_ context.Context, l slog.Level) bool { return l >= slog.LevelInfo }
+func (h *countingHandler) Handle(_ context.Context, r slog.Record) error {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.seen[r.Message]++
+	return nil
+}
+func (h *countingHandler) WithAttrs([]slog.Attr) slog.Handler { return h }
+func (h *countingHandler) WithGroup(string) slog.Handler      { return h }
+func (h *countingHandler) count(msg string) int {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return h.seen[msg]
+}
+
+// Brain re-emits desired state for every service on every tick to heal drift, so
+// this path runs constantly with nothing changing. Logging each run at Info gave
+// eleven services × six ticks a minute ≈ 4000 lines an hour, and the journal ring
+// on the ThinkPad holds about six minutes — which twice erased the evidence for a
+// bug that was being hunted at the time. A re-assert must not read as a
+// transition.
+func TestReassertingTheSameStateDoesNotLogAsATransition(t *testing.T) {
+	bus := events.NewBus()
+	h := &countingHandler{seen: map[string]int{}}
+	vpn := newFakeExecutor("vpn", nil)
+	a := New(bus, []executor.StrategyExecutor{vpn}, slog.New(h))
+	cancel, done := runApplier(a)
+	defer func() { cancel(); <-done }()
+
+	same := events.DesiredStateChanged{
+		Service: "youtube", Position: 2, State: "VPN",
+		StrategyClass: "vpn", StrategyID: "vpn_url_test",
+	}
+	for i := 0; i < 5; i++ {
+		bus.DesiredState <- same
+		<-vpn.calls // Enable still runs every time: it is the idempotent converge
+	}
+	if got := h.count("applied"); got != 1 {
+		t.Errorf("five identical re-asserts logged %d transitions, want 1", got)
+	}
+
+	moved := same
+	moved.Position, moved.State, moved.StrategyID = 0, "PREFERRED", "ALT12"
+	moved.StrategyClass = "vpn" // same executor, so only the state changes
+	bus.DesiredState <- moved
+	<-vpn.calls
+	if got := h.count("applied"); got != 2 {
+		t.Errorf("a real transition logged %d times in total, want 2", got)
+	}
+}
+
+// The zapret executor accepts a rule onto the desync rung but applies nothing
+// until the gate has proven a candidate in the sandbox. Enable used to return
+// nil for that, so the log said `applied service=youtube strategy=ALT12` about a
+// recipe that was still queued — and on the office network that recipe went on to
+// fail its canary. The line must not claim what has not happened.
+func TestDeferredApplyIsNotLoggedAsApplied(t *testing.T) {
+	bus := events.NewBus()
+	h := &countingHandler{seen: map[string]int{}}
+	zap := newFakeExecutor("zapret", executor.ErrDeferred)
+	a := New(bus, []executor.StrategyExecutor{zap}, slog.New(h))
+	cancel, done := runApplier(a)
+	defer func() { cancel(); <-done }()
+
+	bus.DesiredState <- events.DesiredStateChanged{
+		Service: "youtube", Position: 0, State: "PREFERRED",
+		StrategyClass: "zapret", StrategyID: "ALT12",
+	}
+	<-zap.calls
+	// Convergence is unchanged: ErrDeferred is not a failure, so the actual-state
+	// report still goes out and Brain does not spin.
+	select {
+	case ev := <-bus.ActualState:
+		if ev.Service != "youtube" {
+			t.Errorf("actual state reported for %q", ev.Service)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("a deferred apply suppressed the actual-state report")
+	}
+	if got := h.count("applied"); got != 0 {
+		t.Errorf(`logged "applied" %d times for a recipe that is only queued`, got)
+	}
+	if got := h.count("handed to the gate — not applied until it proves the candidate"); got != 1 {
+		t.Errorf("the deferred hand-off was logged %d times, want 1", got)
+	}
+	if got := h.count("apply failed"); got != 0 {
+		t.Errorf(`ErrDeferred was treated as a failure (%d "apply failed" lines)`, got)
 	}
 }

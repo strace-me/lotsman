@@ -6,7 +6,9 @@ package applier
 
 import (
 	"context"
+	"errors"
 	"log/slog"
+	"strconv"
 	"sync"
 
 	"github.com/strace-me/lotsman/pkg/events"
@@ -29,6 +31,15 @@ type Applier struct {
 	pendMu sync.Mutex
 	pend   map[string]events.ActualStateObserved
 	signal chan struct{}
+
+	// What each service was last converged onto, so a re-assert can be told from a
+	// real transition. Brain re-emits desired state for every service every tick to
+	// heal drift, so the apply path runs constantly with nothing changing; logging
+	// each run at Info produced ~4000 lines an hour for eleven services and burned
+	// the journal ring on the ThinkPad down to six minutes, which twice destroyed
+	// the evidence for a bug being hunted at the time. Touched only from the Run
+	// loop, which is the single goroutine calling apply.
+	last map[string]string
 }
 
 // New builds an Applier. execs are keyed by strategy class.
@@ -41,6 +52,7 @@ func New(bus *events.Bus, execs []executor.StrategyExecutor, log *slog.Logger) *
 		bus: bus, execs: m, log: log,
 		pend:   map[string]events.ActualStateObserved{},
 		signal: make(chan struct{}, 1),
+		last:   map[string]string{},
 	}
 }
 
@@ -65,14 +77,38 @@ func (a *Applier) apply(ctx context.Context, d events.DesiredStateChanged) {
 		a.log.Error("no executor for class", "service", d.Service, "class", d.StrategyClass)
 		return
 	}
+	deferred := false
 	if err := ex.Enable(ctx, d.Service, d.StrategyID); err != nil {
-		// Apply failed: do NOT report actual=desired. Brain keeps seeing the
-		// stale actual and will re-emit desired, so the next reconcile retries.
-		a.log.Error("apply failed", "service", d.Service, "state", d.State, "err", err)
-		return
+		if !errors.Is(err, executor.ErrDeferred) {
+			// Apply failed: do NOT report actual=desired. Brain keeps seeing the
+			// stale actual and will re-emit desired, so the next reconcile retries.
+			a.log.Error("apply failed", "service", d.Service, "state", d.State, "err", err)
+			return
+		}
+		// Accepted, not carried out: the executor is proving it first. The report
+		// below is unchanged on purpose — Brain's convergence is not being altered
+		// here, only the sentence written about it.
+		deferred = true
 	}
-	a.log.Info("applied", "service", d.Service, "position", d.Position,
-		"state", d.State, "class", d.StrategyClass, "strategy", d.StrategyID)
+	// Enable is idempotent and is run on every tick either way; only the LOG level
+	// distinguishes the two, so a re-assert stays observable at Debug rather than
+	// vanishing. Silence would be worse than noise: "nothing was logged" cannot be
+	// told apart from "the loop stopped".
+	msg := "applied"
+	if deferred {
+		msg = "handed to the gate — not applied until it proves the candidate"
+	}
+	fp := d.State + "|" + d.StrategyClass + "|" + d.StrategyID + "|" + strconv.Itoa(d.Position)
+	if a.last[d.Service] == fp {
+		a.log.Debug("re-asserted", "service", d.Service, "position", d.Position,
+			"state", d.State, "class", d.StrategyClass, "strategy", d.StrategyID,
+			"deferred", deferred)
+	} else {
+		a.log.Info(msg, "service", d.Service, "position", d.Position,
+			"state", d.State, "class", d.StrategyClass, "strategy", d.StrategyID,
+			"was", a.last[d.Service])
+		a.last[d.Service] = fp
+	}
 
 	// Read-back: M0 trusts a successful Enable as the actual state. Real
 	// data-plane introspection (query nft/clash) replaces this on hardware.
