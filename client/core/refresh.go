@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -120,6 +121,23 @@ func (c *Core) newReconciler() *reconcile.Reconciler {
 		// network it was built on, and the subnets it must keep out of the tunnel are
 		// whichever ones the machine is attached to now.
 		TunExcludes: tunExcludes,
+	}
+	// Keep the config we are about to replace. The daemon has done this since June
+	// and the client never did (LOT-64): BackupDir defaults to "" = no backup, only
+	// cmd/lotsmand set it, so on a laptop `apply` renamed over the live config and
+	// restarted the engine with nothing kept. Principle 10 broken silently — from
+	// outside, the absence of the safety net looks exactly like having one.
+	//
+	// Derived rather than configured, because a backup that can be switched off is
+	// one that will be found switched off. `singbox.json.baseline` is not a
+	// substitute: it is the pristine snapshot, not the last thing that worked.
+	if c.opts.SingboxConfig != "" {
+		dir := filepath.Join(filepath.Dir(c.opts.SingboxConfig), "backups")
+		if err := os.MkdirAll(dir, 0o700); err != nil {
+			c.log.Warn("reconcile: no backup dir, config swaps will keep nothing", "dir", dir, "err", err)
+		} else {
+			rc.BackupDir = dir
+		}
 	}
 	// Persist the anti-churn baseline so the degraded-fetch guard fires on the very
 	// first reconcile after a restart instead of resetting to zero and applying a

@@ -21,6 +21,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"sort"
 	"sync"
 	"time"
 
@@ -320,6 +321,7 @@ func (r *Reconciler) apply(ctx context.Context, tmp string, live []byte) error {
 			r.Log.Warn("reconcile: backup failed (continuing)", "err", err)
 		} else {
 			r.Log.Info("reconcile: backed up current config", "path", backup)
+			r.pruneBackups()
 		}
 	}
 	if err := os.Rename(tmp, r.ConfigPath); err != nil {
@@ -418,6 +420,31 @@ func blankVolatile(v any) {
 	case []any:
 		for _, e := range t {
 			blankVolatile(e)
+		}
+	}
+}
+
+// keepBackups is how many pre-apply configs are retained. The names sort
+// chronologically, so "newest N" is the tail of a sorted list.
+//
+// Ten because the backup answers "what did the last few applies look like" — a
+// question about the recent past, not an archive. Unpruned it was neither: the
+// router accumulated dozens over June and, at twelve applies an hour before
+// LOT-1b was fixed, would have grown by nearly three hundred a day.
+const keepBackups = 10
+
+// pruneBackups deletes all but the newest keepBackups pre-apply configs. Failure
+// is logged and ignored: a full backup dir must never stop a reconcile, which is
+// the operation that keeps the tunnel matching the subscriptions.
+func (r *Reconciler) pruneBackups() {
+	found, err := filepath.Glob(filepath.Join(r.BackupDir, "config.json.*"))
+	if err != nil || len(found) <= keepBackups {
+		return
+	}
+	sort.Strings(found)
+	for _, old := range found[:len(found)-keepBackups] {
+		if err := os.Remove(old); err != nil {
+			r.Log.Warn("reconcile: could not prune an old backup", "path", old, "err", err)
 		}
 	}
 }

@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"sort"
 	"sync"
 	"testing"
 	"time"
@@ -688,4 +689,65 @@ func tunExcludesOf(t *testing.T, path string) []string {
 	}
 	t.Fatal("no tun inbound in the generated config")
 	return nil
+}
+
+// The backup exists so a human can see what the last few applies looked like, and
+// unpruned it stopped answering that: the router accumulated dozens over June, and
+// at the twelve applies an hour it was doing before LOT-1b was fixed it would have
+// grown by nearly three hundred a day.
+func TestPruneKeepsOnlyTheNewestBackups(t *testing.T) {
+	dir := t.TempDir()
+	r := &Reconciler{BackupDir: dir, Log: slog.New(slog.NewTextHandler(io.Discard, nil))}
+	// Names carry a sortable timestamp, so "newest" is the tail of a sorted list.
+	var want []string
+	for i := 0; i < keepBackups+5; i++ {
+		name := filepath.Join(dir, fmt.Sprintf("config.json.20260811-%06d", i))
+		if err := os.WriteFile(name, []byte("{}"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if i >= 5 {
+			want = append(want, name)
+		}
+	}
+	// An unrelated file in the same directory must survive: the glob is the contract.
+	other := filepath.Join(dir, "singbox.json")
+	if err := os.WriteFile(other, []byte("{}"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	r.pruneBackups()
+
+	left, err := filepath.Glob(filepath.Join(dir, "config.json.*"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	sort.Strings(left)
+	if len(left) != keepBackups {
+		t.Fatalf("kept %d backups, want %d", len(left), keepBackups)
+	}
+	for i := range want {
+		if left[i] != want[i] {
+			t.Errorf("kept %q at %d, want %q — the OLDEST were deleted, not the newest", left[i], i, want[i])
+		}
+	}
+	if _, err := os.Stat(other); err != nil {
+		t.Errorf("pruning deleted a file that is not a backup: %v", err)
+	}
+}
+
+// Fewer than the limit must be left alone — the common case, and the one where a
+// stray delete would throw away the only copy there is.
+func TestPruneLeavesAShortHistoryAlone(t *testing.T) {
+	dir := t.TempDir()
+	r := &Reconciler{BackupDir: dir, Log: slog.New(slog.NewTextHandler(io.Discard, nil))}
+	for i := 0; i < 3; i++ {
+		if err := os.WriteFile(filepath.Join(dir, fmt.Sprintf("config.json.2026081%d-000000", i)), []byte("{}"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	r.pruneBackups()
+	left, _ := filepath.Glob(filepath.Join(dir, "config.json.*"))
+	if len(left) != 3 {
+		t.Errorf("kept %d of 3 backups", len(left))
+	}
 }
