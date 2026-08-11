@@ -260,9 +260,9 @@ func TestDeadQUICFlowsByPort(t *testing.T) {
 	}
 }
 
-// LOT-43: a flow whose bytes don't advance between passes, stuck at a small total,
-// is "frozen" (TSPU throttle signature). Tiny idle flows and big completed transfers
-// are excluded by the [stuckMin, stuckMax] window.
+// LOT-43: a flow whose bytes do not advance is "frozen" (TSPU throttle
+// signature). LOT-52 made that require a STREAK: one motionless sample is not
+// evidence, because a keep-alive is motionless by design.
 func TestStallDetection(t *testing.T) {
 	conns := []Conn{
 		{ID: "a", Chains: []string{"sel-youtube"}, Host: "a.googlevideo.com", DestIP: "1.1.1.1", Network: "tcp", Download: 4000, Upload: 1000}, // 5KB stuck → frozen
@@ -271,12 +271,18 @@ func TestStallDetection(t *testing.T) {
 		{ID: "d", Chains: []string{"sel-youtube"}, Host: "d.googlevideo.com", DestIP: "1.1.1.4", Network: "tcp", Download: 200000, Upload: 9},  // 200KB → completed, not stuck
 	}
 	eye := New(fakeSource{conns}, testRegistry())
-	if _, err := eye.Observe(context.Background()); err != nil { // pass 1 seeds prev, no frozen yet
-		t.Fatal(err)
-	}
-	snap, err := eye.Observe(context.Background()) // pass 2: identical bytes → a,b frozen
-	if err != nil {
-		t.Fatal(err)
+	// Pass 1 is the baseline; each pass after it that shows no progress adds one to
+	// the streak, and the verdict lands when the streak reaches frozenPasses.
+	var snap Snapshot
+	for i := 0; i < frozenPasses+1; i++ {
+		var err error
+		snap, err = eye.Observe(context.Background())
+		if err != nil {
+			t.Fatal(err)
+		}
+		if i < frozenPasses && snap.Services["youtube"].FrozenFlows != 0 {
+			t.Fatalf("pass %d called a flow frozen before the streak was up: %d", i+1, snap.Services["youtube"].FrozenFlows)
+		}
 	}
 	yt := snap.Services["youtube"]
 	if yt.FrozenFlows != 2 {
@@ -284,6 +290,32 @@ func TestStallDetection(t *testing.T) {
 	}
 	if got := yt.StalledRatio; got != 0.5 {
 		t.Errorf("StalledRatio=%v, want 0.5 (2 frozen / 4 flows)", got)
+	}
+}
+
+// The case that cost nine minutes of false verdicts on the R5S (LOT-52).
+// Instagram's push gateway is a long-lived socket that moves a few KB and then
+// waits for notifications. It sat at 6 600 and 8 548 bytes — three times over
+// stuckMinBytes, deep inside the band meant to exclude keep-alives — and `social`
+// was reported TSPU-throttled while Instagram served 392 KiB through the same
+// path. What tells the two apart is not the total but whether the quiet lasts:
+// the gateway wakes up, the throttled flow does not.
+func TestPushGatewayIsNotAFreeze(t *testing.T) {
+	gw := func(dl int64) []Conn {
+		return []Conn{{ID: "push", Chains: []string{"sel-social"}, Host: "z-m-gateway.facebook.com",
+			DestIP: "1.2.3.4", Network: "tcp", Download: dl, Upload: 2655}}
+	}
+	// Quiet, quiet, then a notification arrives — under the old one-pass rule every
+	// quiet sample was already a verdict.
+	eye := New(&seqSource{passes: [][]Conn{gw(3945), gw(3945), gw(3945), gw(4600), gw(4600)}}, testRegistry())
+	for i := 0; i < 5; i++ {
+		snap, err := eye.Observe(context.Background())
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := snap.Services["social"].FrozenFlows; got != 0 {
+			t.Fatalf("pass %d: a push gateway was called frozen (%d)", i+1, got)
+		}
 	}
 }
 

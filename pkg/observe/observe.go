@@ -210,6 +210,22 @@ const (
 	frozenDeltaMax int64 = 256    // <this many bytes of progress between passes = "not advancing"
 	stuckMinBytes  int64 = 2048   // past the handshake (it WAS transferring), so not just an idle keepalive
 	stuckMaxBytes  int64 = 131072 // under a real sustained transfer (a completed/large download is not "stuck")
+
+	// frozenPasses is how many CONSECUTIVE passes a flow must fail to advance
+	// before it counts as frozen. One pass was not evidence: `social` was declared
+	// TSPU-throttled for nine minutes while Instagram served 392 KiB through the
+	// same path, because Instagram's push gateway is a long-lived socket that moves
+	// a few KB and then waits for notifications — motionless is its JOB, and at
+	// 6 600 bytes it sits three times over stuckMinBytes, deep inside the band that
+	// was supposed to exclude keep-alives (LOT-52).
+	//
+	// Three passes ≈ 90 seconds of not one byte. A push channel that receives
+	// anything at all in that window drops out; the TSPU freeze holds its
+	// connection until timeout, which is minutes, so the signature this detector
+	// exists for still lands. It is a stricter reading of the same evidence rather
+	// than a different signal — which is why it cannot miss a freeze that a single
+	// pass would have caught, only delay it by a minute.
+	frozenPasses = 3
 )
 
 // Eye computes observed metrics from the live connection table.
@@ -217,7 +233,7 @@ type Eye struct {
 	mu       sync.Mutex
 	src      Source
 	matchers []matcher
-	prev     map[string]int64 // connID -> cumulative bytes last pass, for stall/freeze detection (LOT-43)
+	prev     map[string]flowSeen // connID -> bytes last pass + how long it has not advanced (LOT-43/LOT-52)
 }
 
 // New builds an Eye over a connection source and the service registry. Every
@@ -227,7 +243,7 @@ type Eye struct {
 // Domains/IPs cannot see (LOT-20). Domains (suffix) and IPs (CIDR) remain as the
 // heuristic fallback for direct/final flows that carry no selector route.
 func New(src Source, reg *registry.Registry) *Eye {
-	e := &Eye{src: src, prev: map[string]int64{}}
+	e := &Eye{src: src, prev: map[string]flowSeen{}}
 	for _, svc := range reg.Services {
 		m := matcher{svc: svc, routeFrag: "route(" + registry.SelectorTag(svc.Name) + ")"}
 		for _, d := range svc.Domains {
@@ -263,7 +279,7 @@ func (e *Eye) Observe(ctx context.Context) (Snapshot, error) {
 	}
 	e.mu.Lock()
 	defer e.mu.Unlock()
-	cur := make(map[string]int64, len(conns)) // this pass's per-conn bytes; becomes prev for stall detection
+	cur := make(map[string]flowSeen, len(conns)) // this pass's per-conn bytes + stall streak; becomes prev
 	snap := Snapshot{Services: map[string]ServiceMetrics{}}
 	// seenIP dedups destination IPs per service within this pass, so DestIPs holds
 	// each distinct address once even when many flows share a CDN edge.
@@ -328,12 +344,18 @@ func (e *Eye) Observe(ctx context.Context) (Snapshot, error) {
 		// did not advance since last pass = the TSPU IP-throttle freeze.
 		if c.ID != "" {
 			total := c.Upload + c.Download
-			cur[c.ID] = total
+			now := flowSeen{total: total}
 			if p, seen := e.prev[c.ID]; seen {
-				if d := total - p; d < frozenDeltaMax && d > -frozenDeltaMax && total >= stuckMinBytes && total <= stuckMaxBytes {
+				if d := total - p.total; d < frozenDeltaMax && d > -frozenDeltaMax {
+					now.still = p.still + 1
+				}
+				// Any real progress resets the streak: this is about a flow that STOPPED
+				// and stayed stopped, not one that is merely quiet right now.
+				if now.still >= frozenPasses && total >= stuckMinBytes && total <= stuckMaxBytes {
 					sm.FrozenFlows++
 				}
 			}
+			cur[c.ID] = now
 		}
 		snap.Services[hit.svc.Name] = sm
 	}
@@ -355,4 +377,13 @@ func (e *Eye) Observe(ctx context.Context) (Snapshot, error) {
 
 func isUDP(network string) bool {
 	return strings.EqualFold(strings.TrimSpace(network), "udp")
+}
+
+// flowSeen is what the eye remembers about one connection between passes: where
+// its byte counter stood, and how many consecutive passes it has failed to move.
+// The streak is the part that distinguishes a throttled flow from a keep-alive —
+// both are motionless in any single sample, and only one of them stays that way.
+type flowSeen struct {
+	total int64 // cumulative bytes at the last pass
+	still int   // consecutive passes with no meaningful progress
 }
