@@ -232,13 +232,21 @@ func (v *VPN) target(service, pool string) string {
 
 // Enable re-asserts on every tick BY DESIGN, and must not grow a
 // `if current == target { return nil }` short-circuit like ScriptSwitcher's.
-// Two things would break. The target is recomputed here from bestNode, whose
-// advice moves as the ranker measures — caching would freeze a service on the
-// node it happened to get and silence the ranker until the next state change.
-// And this call is what heals drift: the desync executor's applyNow writes
-// "direct" into the same selector, and every sing-box respawn rebuilds the whole
-// selector table, so something else moves it regularly. The cost is ~11 requests
-// per tick to 127.0.0.1, which is not worth trading a self-healing property for.
+//
+// The reason that always holds is drift: the desync executor's applyNow writes
+// "direct" into this same selector, and every sing-box respawn rebuilds the whole
+// selector table, so something else moves it regularly and this call is what puts
+// it back. The cost is ~11 requests per tick to 127.0.0.1, which is not worth
+// trading a self-healing property for.
+//
+// The second reason holds only where a ranker is wired: target is recomputed from
+// bestNode, whose advice moves as it measures, so caching would freeze a service
+// on the node it first got. On the DESKTOP CLIENT that does not apply today —
+// WithBestNode is called from cmd/lotsmand and nowhere else, so bestNode is nil
+// there and the target is always the pool. That is its own defect, not a reason
+// to cache: it means the laptop picks exits by url-test latency alone, which
+// under a TSPU volume freeze crowns the node that answers fastest and carries
+// nothing.
 func (v *VPN) Enable(ctx context.Context, service, strategyID string) error {
 	selector := registry.SelectorTag(service)
 	pool := strategyID // VPN strategy IDs name the pool to select
