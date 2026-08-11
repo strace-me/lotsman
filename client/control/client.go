@@ -199,7 +199,7 @@ func explainDial(path string, err error) error {
 	case errors.Is(err, fs.ErrPermission):
 		return fmt.Errorf("%w — a service IS listening at %s but this session may not reach it. If Lotsman was just installed as a system service, this session predates the lotsman group. Logging out is NOT enough (systemd --user survives it and keeps the old groups): run `loginctl terminate-user $USER` from a text console, or reboot", err, path)
 	case errors.Is(err, fs.ErrNotExist):
-		return fmt.Errorf("%w — nothing is listening at %s (is the lotsman-client service running?)", err, path)
+		return fmt.Errorf("%w — nothing is listening at %s (is the lotsman service running?)", err, path)
 	}
 	return err
 }

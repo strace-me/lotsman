@@ -7,18 +7,18 @@
   not the privileged whole-system tunnel the Linux unit provides.
 
   Install (per-user):
-    cp examples/lotsman-client.plist ~/Library/LaunchAgents/com.lotsman.client.plist
+    cp examples/lotsman.plist ~/Library/LaunchAgents/com.lotsman.plist
     # edit the paths below to your binary and config, then:
-    launchctl load ~/Library/LaunchAgents/com.lotsman.client.plist
-    launchctl start com.lotsman.client
+    launchctl load ~/Library/LaunchAgents/com.lotsman.plist
+    launchctl start com.lotsman
 -->
 <plist version="1.0">
 <dict>
 	<key>Label</key>
-	<string>com.lotsman.client</string>
+	<string>com.lotsman</string>
 	<key>ProgramArguments</key>
 	<array>
-		<string>/usr/local/bin/lotsman-client</string>
+		<string>/usr/local/bin/lotsman</string>
 		<string>-config</string>
 		<string>/Users/YOU/.config/lotsman/client.yaml</string>
 		<string>-proxy</string>
@@ -40,8 +40,8 @@
 		<false/>
 	</dict>
 	<key>StandardOutPath</key>
-	<string>/tmp/lotsman-client.log</string>
+	<string>/tmp/lotsman.log</string>
 	<key>StandardErrorPath</key>
-	<string>/tmp/lotsman-client.log</string>
+	<string>/tmp/lotsman.log</string>
 </dict>
 </plist>

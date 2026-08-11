@@ -2,7 +2,7 @@
 /bin/
 /lotsmand
 /lotsmanctl
-/lotsman-client
+/lotsman
 *.elf
 *.bin
 # ...except the desync fake payloads, which are DATA, not build output: recorded

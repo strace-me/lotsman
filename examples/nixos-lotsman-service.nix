@@ -29,7 +29,7 @@ let
   # user can traverse — putting them in the state dir makes the app launcher stop
   # working the moment the service first starts.
   binDir = "/var/lib/lotsman-bin";
-  bin = "${binDir}/lotsman-client";
+  bin = "${binDir}/lotsman";
 
   # Fake payloads for the desync. NOT the store path directly: nixpkgs' zapret ships
   # only upstream's payloads, and 11 of the 67 catalog recipes need Flowseal-derived
@@ -75,7 +75,7 @@ in
     "d ${payloadDir} 0755 root root -"
   ];
 
-  systemd.services.lotsman-client = {
+  systemd.services.lotsman = {
     description = "Lotsman — self-healing censorship bypass (tun + desync)";
     wantedBy = [ "multi-user.target" ];
     after = [ "network-online.target" ];
@@ -139,7 +139,7 @@ in
   security.polkit.extraConfig = ''
     polkit.addRule(function(action, subject) {
       if (action.id == "org.freedesktop.systemd1.manage-units" &&
-          action.lookup("unit") == "lotsman-client.service" &&
+          action.lookup("unit") == "lotsman.service" &&
           subject.isInGroup("lotsman")) {
         return polkit.Result.YES;
       }

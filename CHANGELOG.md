@@ -6,6 +6,24 @@ older sections carry working dates rather than release dates.
 
 ## [Unreleased] — v7.1
 
+### The desktop half is called `lotsman`, like everything else
+
+- The binary, the systemd unit and the install templates were `lotsman-client`
+  while the router's service has always been `lotsman`. Two names for one program
+  is what the unification decision of 2026-08-09 rules out, and it also meant
+  typing `journalctl -u lotsman-client` several times an evening.
+- Renamed in the repository: the build output, `examples/lotsman.{service,rules,plist,env}`
+  (the polkit drop-in is `49-lotsman.rules` now), `examples/nixos-lotsman-service.nix`,
+  the live-test harness and the docs. The GUI and the tray keep their suffixes —
+  they are separate programs, and a bare `gui` in `$PATH` means nothing.
+- **The installed unit is declared outside this repository** (on the ThinkPad, in
+  `/etc/nixos/lotsman-service.nix`), so the rename is only complete once that file
+  and `/etc/nixos/net-mode.nix` — which holds the `NOPASSWD` sudo rules naming the
+  unit — are changed together and rebuilt. Split them and `net-mode`, the emergency
+  switch, stops working.
+- Historical entries in this file and in superseded handoffs keep the old name on
+  purpose: they describe what was true when they were written.
+
 ### A rule on VPN can finally come back to its desync rung
 
 - YouTube sat on VPN at the last rung with `fails=0` while the sandbox had, four

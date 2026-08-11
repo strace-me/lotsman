@@ -93,7 +93,7 @@ if [ "$MODE" = client ]; then
   done
   CGO_ENABLED=0 GOOS=linux GOARCH=$goarch go test -c ./pkg/config -o dist/config.test >/dev/null
   $SSH "mkdir -p $REMOTE" </dev/null
-  for f in dist/lotsman-client dist/core.test dist/hostdns.test dist/netid.test dist/config.test; do
+  for f in dist/lotsman dist/core.test dist/hostdns.test dist/netid.test dist/config.test; do
     $SSH "cat > $REMOTE/$(basename "$f") && chmod +x $REMOTE/$(basename "$f")" < "$f"
   done
   # pkg/config's suite parses the repo's own example config through a repo-relative
@@ -107,8 +107,8 @@ if [ "$MODE" = client ]; then
   # version assumed a laptop with the system sing-box up and Lotsman not
   # installed; the moment Lotsman became a service that assumption was wrong and
   # the case failed for the very outcome it was written to celebrate.
-  $SSH "{ systemctl is-active sing-box; systemctl is-active lotsman-client; } > $REMOTE/before.state 2>&1" </dev/null
-  echo "   staged lotsman-client + 4 test binaries + the example config"
+  $SSH "{ systemctl is-active sing-box; systemctl is-active lotsman; } > $REMOTE/before.state 2>&1" </dev/null
+  echo "   staged lotsman + 4 test binaries + the example config"
 else
 
 GOOS=linux GOARCH=$goarch ./scripts/build.sh lotsmand >/dev/null
@@ -287,7 +287,7 @@ LC=/tmp/lotsman-live-client
 
 CASE=C1; if wanted "$@"; then
 say "$CASE  the client knows what it is"
-  out=$($SSH "$REMOTE/lotsman-client -config /dev/null 2>&1 | head -2" </dev/null)
+  out=$($SSH "$REMOTE/lotsman -config /dev/null 2>&1 | head -2" </dev/null)
   case "$out" in
     *'version="v'*) ok "$(echo "$out" | sed 's/.*version="\([^"]*\)".*/\1/' | head -1)" ;;
     *version=dev*)  bad "reports 'dev' — the build did not stamp a version" ;;
@@ -335,7 +335,7 @@ client_run() {
   $SSH "bash -s" </dev/null <<REMOTECMD >/dev/null 2>&1
 set -uo pipefail
 cd $LC
-$REMOTE/lotsman-client -config $LC/config.yaml -singbox-config $LC/singbox.json \\
+$REMOTE/lotsman -config $LC/config.yaml -singbox-config $LC/singbox.json \\
   -proxy 127.0.0.1:11089 -clash 127.0.0.1:19099 -control-socket $LC/ctl.sock \\
   -interval 10s -refresh-interval 0 > $LC/out.log 2>&1 &
 PID=\$!
@@ -404,7 +404,7 @@ say "$CASE  a network change swaps the knowledge base (in a namespace, not on yo
       ip netns exec lotsman-roam ip route add default via 10.77.0.1
       ip netns exec lotsman-roam ip neigh replace 10.77.0.1 lladdr 02:00:00:00:00:aa dev veth-lr-ns nud permanent
       rm -rf $LC/kb; mkdir -p $LC/kb
-      ip netns exec lotsman-roam $REMOTE/lotsman-client -config $LC/config.yaml \
+      ip netns exec lotsman-roam $REMOTE/lotsman -config $LC/config.yaml \
         -singbox-config $LC/roam.json -proxy 127.0.0.1:11090 -clash 127.0.0.1:19100 \
         -control-socket $LC/roam.sock -kb-dir $LC/kb -roam-interval 3s \
         -interval 30s -refresh-interval 0 > $LC/roam.log 2>&1 &
@@ -443,7 +443,7 @@ say "$CASE  the client survives suspend/resume"
     # Detached, because the SSH connection cannot survive the suspend and a
     # foreground run would abandon a live client on a sleeping box.
     asroot "cd $LC && setsid sh -c '
-      $REMOTE/lotsman-client -config $LC/config.yaml -singbox-config $LC/susp.json \
+      $REMOTE/lotsman -config $LC/config.yaml -singbox-config $LC/susp.json \
         -proxy 127.0.0.1:11091 -clash 127.0.0.1:19101 -control-socket $LC/susp.sock \
         -interval 5s -refresh-interval 0 > $LC/suspend.log 2>&1 &
       P=\$!
@@ -500,8 +500,8 @@ say "$CASE  the NixOS module evaluates (without activating anything)"
       bad "the module will not parse: $($SSH "head -2 $LC/nix.err" </dev/null | tr '\n' ' ')"
     fi
     if $SSH "test -f /etc/nixos/lotsman-service.nix" </dev/null 2>/dev/null; then
-      $SSH "systemctl cat lotsman-client >/dev/null 2>&1" </dev/null \
-        && ok "the unit is installed on the box ($($SSH 'systemctl is-active lotsman-client' </dev/null))" \
+      $SSH "systemctl cat lotsman >/dev/null 2>&1" </dev/null \
+        && ok "the unit is installed on the box ($($SSH 'systemctl is-active lotsman' </dev/null))" \
         || meh "the module file is in /etc/nixos but the unit is not built — it is not imported"
     else
       meh "the module is not in /etc/nixos yet — activation is still a human step"
@@ -520,14 +520,14 @@ say "$CASE  the laptop is exactly as we found it"
   $SSH "test -e $LC" </dev/null 2>/dev/null \
     && bad "could not remove $LC — root-owned leftovers from C5" || ok "scratch dir removed"
   before=$($SSH "cat $REMOTE/before.state 2>/dev/null" </dev/null)
-  after=$($SSH "{ systemctl is-active sing-box; systemctl is-active lotsman-client; } 2>&1" </dev/null)
+  after=$($SSH "{ systemctl is-active sing-box; systemctl is-active lotsman; } 2>&1" </dev/null)
   if [ "$before" = "$after" ]; then
     ok "the services are as we found them ($(echo "$after" | tr '\n' '/'))"
   else
     bad "the run changed what is running: [$(echo "$before" | tr '\n' '/')] -> [$(echo "$after" | tr '\n' '/')]"
   fi
   # Count by the EXECUTABLE, not the process name. Once Lotsman is installed as a
-  # service there is always a lotsman-client running and it is not ours — matching
+  # service there is always a lotsman running and it is not ours — matching
   # by name made this case fail permanently on exactly the box where the install
   # succeeded. /proc/<pid>/exe says which binary a process actually is, and only
   # the staged one under $REMOTE belongs to this run.
@@ -535,7 +535,7 @@ say "$CASE  the laptop is exactly as we found it"
   # Read as root where we can: C5 and C6 launch the staged binary as root, and an
   # unprivileged readlink on a root process's exe is denied — which would hide the
   # very leak this is looking for.
-  strayCmd="for p in \$(pgrep -x lotsman-client 2>/dev/null); do readlink -f /proc/\$p/exe 2>/dev/null; done | grep -c '^$REMOTE/' || true"
+  strayCmd="for p in \$(pgrep -x lotsman 2>/dev/null); do readlink -f /proc/\$p/exe 2>/dev/null; done | grep -c '^$REMOTE/' || true"
   if haveroot; then left=$(asroot "$strayCmd" | head -1); else left=$($SSH "$strayCmd" </dev/null | head -1); fi
   [ "${left:-0}" = 0 ] && ok "no test process left behind" || bad "$left stray process(es) from this run"
 fi

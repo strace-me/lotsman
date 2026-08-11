@@ -1,4 +1,4 @@
-// Command lotsman-client is the headless desktop client (Linux/Windows): it
+// Command lotsman is the headless desktop client (Linux/Windows): it
 // loads a config, generates a sing-box config with a random Clash-API secret,
 // brings a local sing-box up, and runs the autonomy loop — the one-button "make
 // it work" core that steers nodes/selectors itself, before the Wails UI lands.
@@ -121,7 +121,7 @@ func main() {
 	}
 
 	log := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelInfo}))
-	log.Info("lotsman-client starting", "version", version.String())
+	log.Info("lotsman starting", "version", version.String())
 
 	if *initConfig {
 		if err := writeStarter(*configPath, *subURLs, *recommended); err != nil {

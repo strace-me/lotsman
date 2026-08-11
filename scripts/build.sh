@@ -77,7 +77,7 @@ for t in $targets; do
     all)
       build lotsmand      ./cmd/lotsmand
       build lotsmanctl    ./cmd/lotsmanctl
-      build lotsman-client ./client/desktop
+      build lotsman       ./client/desktop
       # The tray is its own module (fyne/systray pulls a UI graph the service
       # must never link) and only cross-compiles cleanly for the host.
       if [ "$goos" = "$hostos" ] && [ "$goarch" = "$hostarch" ]; then
@@ -93,7 +93,7 @@ for t in $targets; do
       ;;
     lotsmand)       build lotsmand ./cmd/lotsmand ;;
     lotsmanctl)     build lotsmanctl ./cmd/lotsmanctl ;;
-    client)         build lotsman-client ./client/desktop ;;
+    client)         build lotsman ./client/desktop ;;
     tray)           build lotsman-tray . client/tray 1 ;;
     gui)            build_gui ;;
     *) echo "unknown target: $t" >&2; exit 2 ;;
