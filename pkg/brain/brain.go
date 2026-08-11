@@ -88,10 +88,13 @@ type Recommender interface {
 }
 
 type runtime struct {
-	svc                registry.Service
-	position           int
-	failsCurrent       int
-	recSuccesses       map[int]int // lower position -> consecutive silent successes
+	svc          registry.Service
+	position     int
+	failsCurrent int
+	// recWindow holds the most recent silent-probe outcomes per lower position,
+	// newest last, capped at recoverAt+recWindowSlack. Recovery asks for a
+	// MAJORITY of that window rather than a consecutive run — see recoverWindow.
+	recWindow          map[int][]bool
 	settlingUntil      time.Time
 	broken             bool
 	currentStrategy    string // resolved strategy id of the active step
@@ -136,11 +139,11 @@ func New(bus *events.Bus, reg *registry.Registry, kb Recommender, cfg Config, re
 	rts := make(map[string]*runtime, len(reg.Services))
 	for name, svc := range reg.Services {
 		rts[name] = &runtime{
-			svc:          svc,
-			position:     0,
-			recSuccesses: map[int]int{},
-			desiredPos:   0,
-			actualPos:    -1,
+			svc:        svc,
+			position:   0,
+			recWindow:  map[int][]bool{},
+			desiredPos: 0,
+			actualPos:  -1,
 		}
 	}
 	return &Brain{bus: bus, kb: kb, cfg: cfg, audit: rec, log: log, runtimes: rts}
@@ -393,9 +396,7 @@ func (b *Brain) onVerdict(v events.ProductionVerdict) {
 
 	// Silent recovery probe of a lower (more preferred) position.
 	if v.Position < rt.position {
-		if v.OK {
-			n := rt.recSuccesses[v.Position] + 1
-			rt.recSuccesses[v.Position] = n
+		{
 			recoverAt := b.cfg.RecoverSuccess
 			if rt.svc.RecoverAfter > 0 {
 				recoverAt = rt.svc.RecoverAfter
@@ -412,17 +413,34 @@ func (b *Brain) onVerdict(v events.ProductionVerdict) {
 			if rt.broken {
 				recoverAt = 1
 			}
+			// A MAJORITY of the recent window, not a consecutive run. "Consecutive" is
+			// the right shape only when the noise is small next to the signal, and here
+			// it is not: one recipe measured 42–221 KiB/s across six runs of the same
+			// candidate in twenty minutes, because what varied between runs was the
+			// congestion on the link, not the recipe. A single sample below an arbitrary
+			// line then wiped a streak that needs ~30 minutes to rebuild, so the rule
+			// never came back at all. A rung that honestly fails still cannot recover:
+			// the failures outnumber the successes and the majority is never reached.
+			win := recoverWindow(recoverAt)
+			w := append(rt.recWindow[v.Position], v.OK)
+			if len(w) > win {
+				w = w[len(w)-win:]
+			}
+			rt.recWindow[v.Position] = w
+			ok := 0
+			for _, r := range w {
+				if r {
+					ok++
+				}
+			}
 			b.log.Info("silent recovery progress",
 				"service", v.Service, "probed_position", v.Position,
-				"current_position", rt.position, "successes", n, "recover_at", recoverAt,
+				"current_position", rt.position, "successes", ok, "of_last", len(w),
+				"recover_at", recoverAt, "window", win,
 				"current_rung_broken", rt.broken)
-			if n >= recoverAt {
+			if ok >= recoverAt {
 				b.recoverToLocked(rt, v.Position)
 			}
-		} else if rt.recSuccesses[v.Position] > 0 {
-			b.log.Info("silent recovery reset (probe failed)",
-				"service", v.Service, "probed_position", v.Position)
-			rt.recSuccesses[v.Position] = 0
 		}
 	}
 }
@@ -559,7 +577,7 @@ func (b *Brain) recoverToLocked(rt *runtime, pos int) {
 	rt.position = pos
 	rt.failsCurrent = 0
 	rt.broken = false
-	rt.recSuccesses = map[int]int{}
+	rt.recWindow = map[int][]bool{}
 	b.emitDesiredLocked(rt, "silent_recovery")
 }
 
@@ -646,4 +664,23 @@ func preferBlockType(ids []string, blockType string, lookup func(string) []strin
 		}
 	}
 	return append(match, rest...)
+}
+
+// recWindowSlack is how much room the recovery window leaves for noise: a
+// threshold of five is judged over the last seven probes, so one bad measurement
+// costs a place in the window instead of the whole streak. Two is deliberate
+// rather than tuned — it is the smallest slack that survives a single outlier,
+// and the failure mode of more slack is a rule dragged back onto a rung that only
+// works half the time.
+const recWindowSlack = 2
+
+// recoverWindow is how many recent probes the majority is taken over. A threshold
+// of one (a BROKEN rung, where the first measured success wins) keeps a window of
+// one: there is no working service to protect, so there is nothing to be cautious
+// with.
+func recoverWindow(recoverAt int) int {
+	if recoverAt <= 1 {
+		return 1
+	}
+	return recoverAt + recWindowSlack
 }

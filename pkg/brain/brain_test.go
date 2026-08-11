@@ -644,3 +644,70 @@ func TestHealthyServiceStillNeedsTheFullThreshold(t *testing.T) {
 	case <-time.After(100 * time.Millisecond):
 	}
 }
+
+// escalateToVPN drives a service off position 0 down to the VPN rung so the
+// silent-recovery path becomes the only road back.
+func escalateToVPN(t *testing.T, bus *events.Bus) {
+	t.Helper()
+	readDesired(t, bus) // init at pos 0
+	for i := 0; i < 3; i++ {
+		sendVerdict(bus, 0, false)
+	}
+	readDesired(t, bus) // -> pos 1
+	for i := 0; i < 3; i++ {
+		sendVerdict(bus, 1, false)
+	}
+	readDesired(t, bus) // -> pos 2
+}
+
+// One bad measurement must not throw away the whole streak. Measured on the
+// ThinkPad 2026-08-10: the SAME candidate for youtube was measured six times in
+// twenty minutes at 139, 221, 103, 42, 117 and 164 KiB/s — what varied between
+// runs was congestion on the link, not the recipe. Under consecutive-counting the
+// single 42 reset a counter that needs about half an hour to rebuild, so the rule
+// never returned to desync at all.
+func TestRecoveryToleratesOneBadMeasurementInTheWindow(t *testing.T) {
+	bus := events.NewBus()
+	b := New(bus, registry.Builtin(), fakeKB{alt: "alt10"},
+		Config{EscalateFails: 3, RecoverSuccess: 5, SettlingWindow: 0}, nil, discardLogger())
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go b.Run(ctx)
+	escalateToVPN(t, bus)
+
+	// success, success, FAILURE, success, success, success — five of the last six.
+	for _, ok := range []bool{true, true, false, true, true} {
+		sendVerdict(bus, 0, ok)
+	}
+	select {
+	case d := <-bus.DesiredState:
+		t.Fatalf("recovered on four successes: pos=%d", d.Position)
+	case <-time.After(100 * time.Millisecond):
+	}
+	sendVerdict(bus, 0, true) // fifth success within a window of seven
+	if d := readDesired(t, bus); d.Position != 0 || d.State != registry.StatePreferred {
+		t.Fatalf("one outlier blocked recovery: got pos=%d state=%s", d.Position, d.State)
+	}
+}
+
+// The other direction, which is what "majority" has to keep buying: a rung that
+// genuinely does not work must never be recovered onto, however long it is
+// probed. Alternating outcomes never reach five in a window of seven.
+func TestRecoveryRefusesARungThatFailsHalfTheTime(t *testing.T) {
+	bus := events.NewBus()
+	b := New(bus, registry.Builtin(), fakeKB{alt: "alt10"},
+		Config{EscalateFails: 3, RecoverSuccess: 5, SettlingWindow: 0}, nil, discardLogger())
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go b.Run(ctx)
+	escalateToVPN(t, bus)
+
+	for i := 0; i < 20; i++ {
+		sendVerdict(bus, 0, i%2 == 0)
+	}
+	select {
+	case d := <-bus.DesiredState:
+		t.Fatalf("recovered onto a rung that works half the time: pos=%d", d.Position)
+	case <-time.After(150 * time.Millisecond):
+	}
+}
