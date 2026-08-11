@@ -58,6 +58,7 @@ import (
 	"github.com/strace-me/lotsman/pkg/kb"
 	"github.com/strace-me/lotsman/pkg/metrics"
 	"github.com/strace-me/lotsman/pkg/misroute"
+	"github.com/strace-me/lotsman/pkg/nodepass"
 	"github.com/strace-me/lotsman/pkg/noderank"
 	"github.com/strace-me/lotsman/pkg/observe"
 	"github.com/strace-me/lotsman/pkg/pathhealth"
@@ -664,7 +665,7 @@ func main() {
 				// rankNodes nudges Brain per service as each one's advice lands, so
 				// a fast pool (e.g. the 2-node UDP pool) applies immediately instead
 				// of waiting for a slow 50-node pool later in the pass.
-				return rankNodes(c, conf, reg, ranker, br.ReassertService, log)
+				return nodepass.Run(c, conf, reg, ranker, br.ReassertService, log)
 			}})
 			log.Info("per-service node ranker enabled (advisory)", "dry_run", *dryRun)
 		}
@@ -1503,69 +1504,6 @@ func logUserinfo(log *slog.Logger, infos map[string]subscription.Userinfo) {
 			log.Info("subscription userinfo", attrs...)
 		}
 	}
-}
-
-// rankNodes runs one per-service node-ranking cycle: for every service that has
-// an HTTP probe target and a non-empty VPN pool, it ranks that pool's concrete
-// nodes by probing each THROUGH the service's own URL and pins sel-<svc> to the
-// winner. Candidates come from the pool membership, which is already
-// country-filtered (pools' countries_exclude), so a blocked service never lands
-// on a RU exit even if its ping is lowest — the failure mode of Hiddify/url-test
-// this whole feature exists to fix. Per-cycle subscription reload mirrors
-// loadPools; a single bad service is logged, not fatal.
-func rankNodes(ctx context.Context, conf *config.Config, reg *registry.Registry, ranker *noderank.Ranker, nudge func(string), log *slog.Logger) error {
-	if len(conf.Subscriptions) == 0 {
-		return nil
-	}
-	mgr := subscription.NewManager(subscription.NewHTTPFetcher())
-	nodes, errs := mgr.Load(ctx, conf.Subscriptions)
-	for _, e := range errs {
-		log.Warn("noderank: subscription load issue", "err", e)
-	}
-	memberships := conf.Pools.Memberships(nodes)
-	for _, svc := range reg.Services {
-		if svc.ProbeType != "" && svc.ProbeType != "http" {
-			continue // Clash /delay is an HTTP GET; tcp/stun services are not rankable this way
-		}
-		if svc.ProbeTarget == "" || (len(svc.RuleSets) == 0 && len(svc.Domains) == 0 && len(svc.IPs) == 0) {
-			continue
-		}
-		pool := svc.VPNPool()
-		if pool == "" {
-			continue
-		}
-		members := memberships[pool]
-		cands := make([]noderank.Candidate, 0, len(members))
-		for _, m := range members {
-			if tag, ok := singbox.NodeTag(m); ok {
-				cands = append(cands, noderank.Candidate{Tag: tag, Country: m.Country})
-			}
-		}
-		if len(cands) == 0 {
-			continue
-		}
-		prof := svc.Profile
-		if prof == "" {
-			prof = svc.Category
-		}
-		ns := noderank.Service{
-			Name:     svc.Name,
-			Selector: registry.SelectorTag(svc.Name),
-			ProbeURL: svc.ProbeTarget,
-			Weights:  balancer.ProfileFor(prof),
-			Sticky:   svc.Sticky, // LOT-12: honor the declared sticky flag (was a no-op)
-		}
-		if _, err := ranker.Pick(ctx, ns, cands); err != nil {
-			log.Warn("noderank: pick failed", "service", svc.Name, "err", err.Error())
-			continue
-		}
-		// Apply this service's fresh advice now, rather than waiting for the whole
-		// (potentially minutes-long) pass over every pool to finish.
-		if nudge != nil {
-			nudge(svc.Name)
-		}
-	}
-	return nil
 }
 
 // demoTimeline scripts probe outcomes to exercise the full loop without

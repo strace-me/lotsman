@@ -34,6 +34,8 @@ import (
 	"github.com/strace-me/lotsman/pkg/faillog"
 	"github.com/strace-me/lotsman/pkg/kb"
 	"github.com/strace-me/lotsman/pkg/metrics"
+	"github.com/strace-me/lotsman/pkg/nodepass"
+	"github.com/strace-me/lotsman/pkg/noderank"
 	"github.com/strace-me/lotsman/pkg/observe"
 	"github.com/strace-me/lotsman/pkg/probing"
 	"github.com/strace-me/lotsman/pkg/reconcile"
@@ -109,6 +111,7 @@ type Options struct {
 	SingboxBin    string        // sing-box binary, used to decompile rule-sets into domains ("" = "sing-box")
 	SingboxConfig string        // path of the live sing-box config the reconciler swaps
 	StateFile     string        // persists each service's chain position across restarts ("" = start cold every time)
+	NodeRank      bool          // rank a VPN pool's concrete nodes per service and pin the best, instead of riding plain url-test
 	RefreshEvery  time.Duration // how often to re-fetch subscriptions and reconcile (0 = never)
 	RoamInterval  time.Duration // how often to re-fingerprint the network for roaming (0 = default 15s; only in -kb-dir mode)
 	QNum          int           // NFQUEUE queue number (0 = 200, matching the router)
@@ -157,7 +160,8 @@ type Core struct {
 
 	bus    *events.Bus
 	kb     *kb.KB
-	kbFile string // resolved KB path (KBFile, or a per-network file under KBDir); guarded by mu
+	kbFile string           // resolved KB path (KBFile, or a per-network file under KBDir); guarded by mu
+	ranker *noderank.Ranker // per-service node ranker; nil when NodeRank is off or there are no subscriptions
 	clash  *dataplane.ClashClient
 	brain  *brain.Brain
 	eng    *probing.Engine     // probing engine, retained so the UI can force a recheck
@@ -533,8 +537,19 @@ func (c *Core) buildLoop() error {
 	// A fresh bus per loop — a rebuilt loop must not inherit stale in-flight verdicts.
 	c.bus = events.NewBus()
 
+	// The node ranker, wired the same way the daemon wires it (LOT-65). Without it
+	// bestNode is nil, VPN.Enable always points the selector at the pool, and the
+	// exit is chosen by sing-box url-test — i.e. by LATENCY alone, which under the
+	// TSPU volume freeze crowns the node that answers in 40ms and then carries
+	// nothing. The laptop had been picking exits by the one measurement that cannot
+	// tell a working node from a frozen one.
+	vpnEx := executor.NewVPN(c.clash, false, c.log)
+	if c.opts.NodeRank && len(c.conf.Subscriptions) > 0 {
+		c.ranker = noderank.New(c.clash, noderankSamples, false, c.log)
+		vpnEx = vpnEx.WithBestNode(c.ranker.Best)
+	}
 	execs := []executor.StrategyExecutor{
-		executor.NewVPN(c.clash, false, c.log),
+		vpnEx,
 		executor.NewDirect(c.clash, false, c.log),
 	}
 	if z := c.newZapretExec(runCtx); z != nil {
@@ -638,6 +653,9 @@ func (c *Core) buildLoop() error {
 		runners = append(runners, func(rctx context.Context) { c.refreshLoop(rctx, rc, c.opts.RefreshEvery) })
 	}
 	runners = append(runners, c.observeLoop, c.kbDecayLoop)
+	if c.ranker != nil {
+		runners = append(runners, c.noderankLoop)
+	}
 	if len(c.conf.Hostlists) > 0 {
 		runners = append(runners, c.hostlistLoop)
 	}
@@ -936,6 +954,37 @@ const (
 //
 // Decaying also lifts the exploration bonus on strategies nobody has retried lately, so
 // "worked before" gets re-validated instead of trusted forever.
+// noderankSamples is how many delay samples the ranker takes per node; the same
+// value the daemon passes.
+const noderankSamples = 3
+
+// noderankInterval is how often the pool is re-ranked. Slower than the probe: a
+// pass dials every node in every pool, and the point is to follow a node going
+// bad over minutes, not to chase jitter.
+const noderankInterval = 15 * time.Minute
+
+// noderankLoop re-ranks each service's VPN pool and applies the fresh advice.
+// nudge re-asserts one service the moment its own advice lands, rather than
+// waiting for a sweep over every pool to finish.
+func (c *Core) noderankLoop(ctx context.Context) {
+	run := func() {
+		if err := nodepass.Run(ctx, c.conf, c.reg, c.ranker, c.brain.ReassertService, c.log); err != nil {
+			c.log.Warn("noderank pass failed", "err", err)
+		}
+	}
+	run() // at start: the first ranking should not wait a whole interval
+	t := time.NewTicker(noderankInterval)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+			run()
+		}
+	}
+}
+
 func (c *Core) kbDecayLoop(ctx context.Context) {
 	t := time.NewTicker(kbDecayInterval)
 	defer t.Stop()
