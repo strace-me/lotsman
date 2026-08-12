@@ -5,6 +5,7 @@ import (
 	"errors"
 	"io"
 	"log/slog"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -242,3 +243,39 @@ func (f *flappyDirect) Probe(_ context.Context, service string, position int) ev
 	}
 	return events.ProductionVerdict{Service: service, Position: position, OK: ok, RTTms: 50}
 }
+
+// Seen live on the office network: youtube sat at current=2 while the scan read
+// `0:direct:✗ 1:zapret:✗ 2:zapret:✗ 3:vpn:✓`, and the line said "current tier is
+// best working". The rule was on a DEAD rung and the detector had just measured it
+// so. Escalation was right — it asks NextWorking — but a sentence asserting health
+// over a tier marked ✗ is the kind of wrong that survives for months.
+func TestLogSeparatesADeadCurrentTierFromABestOne(t *testing.T) {
+	var lines []string
+	h := &capturingHandler{onMsg: func(m string) { lines = append(lines, m) }}
+	d := &Detector{Log: slog.New(h)}
+
+	d.logPath(PathHealth{Service: "youtube", Current: 2, Steps: []PosHealth{
+		{Position: 0, OK: false}, {Position: 1, OK: false}, {Position: 2, OK: false}, {Position: 3, OK: true},
+	}})
+	if len(lines) != 1 || !strings.Contains(lines[0], "DOWN") {
+		t.Errorf("a dead current tier logged %q; it must not read as healthy", lines)
+	}
+
+	lines = nil
+	d.logPath(PathHealth{Service: "x", Current: 2, Steps: []PosHealth{
+		{Position: 0, OK: false}, {Position: 1, OK: false}, {Position: 2, OK: true},
+	}})
+	if len(lines) != 1 || !strings.Contains(lines[0], "current tier is best working") {
+		t.Errorf("a genuinely-best current tier logged %q", lines)
+	}
+}
+
+type capturingHandler struct{ onMsg func(string) }
+
+func (h *capturingHandler) Enabled(context.Context, slog.Level) bool { return true }
+func (h *capturingHandler) Handle(_ context.Context, r slog.Record) error {
+	h.onMsg(r.Message)
+	return nil
+}
+func (h *capturingHandler) WithAttrs([]slog.Attr) slog.Handler { return h }
+func (h *capturingHandler) WithGroup(string) slog.Handler      { return h }

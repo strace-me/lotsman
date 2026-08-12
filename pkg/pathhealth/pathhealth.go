@@ -283,6 +283,16 @@ func (d *Detector) logPath(p PathHealth) {
 	case best < p.Current:
 		d.Log.Info("path-health: PROPOSE faster tier available (would jump current→best)",
 			"service", p.Service, "current", p.Current, "best", best, "steps", steps)
+	case best > p.Current:
+		// The rung the rule is ON did not answer, and the nearest one that did is
+		// further down the chain. This used to fall into the branch below and print
+		// "current tier is best working" over a tier marked ✗ — an assertion made by
+		// code that had just observed the opposite. Seen on the office network with
+		// youtube at current=2 while steps read 0:direct:✗ 1:zapret:✗ 2:zapret:✗
+		// 3:vpn:✓. Escalation itself was right (it asks NextWorking); only the
+		// sentence was wrong, which is the harder kind to notice.
+		d.Log.Warn("path-health: the current tier is DOWN, the nearest working one is below it",
+			"service", p.Service, "current", p.Current, "best", best, "steps", steps)
 	default:
 		d.Log.Info("path-health: current tier is best working", "service", p.Service, "current", p.Current, "best", best, "steps", steps)
 	}
