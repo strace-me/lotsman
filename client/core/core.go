@@ -1140,16 +1140,43 @@ const noderankSamples = 3
 // bad over minutes, not to chase jitter.
 const noderankInterval = 15 * time.Minute
 
+// noderankRetry is how soon a pass that advised nothing is retried, and
+// noderankWarmup how long the first pass waits for sing-box to answer at all.
+const (
+	noderankRetry  = 30 * time.Second
+	noderankWarmup = 2 * time.Minute
+)
+
 // noderankLoop re-ranks each service's VPN pool and applies the fresh advice.
 // nudge re-asserts one service the moment its own advice lands, rather than
 // waiting for a sweep over every pool to finish.
 func (c *Core) noderankLoop(ctx context.Context) {
-	run := func() {
+	// Do not rank before the data plane can answer. A pass that runs while sing-box
+	// is still binding fails EVERY delay probe, and a node never yet seen good is
+	// marked down on its first failure — so the pass advises nothing, the VPN
+	// executor falls back to the pool url-test, and url-test ranks by latency: the
+	// one measurement that cannot tell a throttled exit from a healthy one. That is
+	// what cost the owner github and youtube for five minutes after a restart on
+	// 2026-08-12, and the next attempt was a full interval away.
+	if !c.waitControlAlive(ctx, noderankWarmup) {
+		return
+	}
+	run := func() bool {
 		if err := nodepass.Run(ctx, c.conf, c.reg, c.ranker, c.brain.ReassertService, c.log); err != nil {
 			c.log.Warn("noderank pass failed", "err", err)
 		}
+		return c.haveNodeAdvice()
 	}
-	run() // at start: the first ranking should not wait a whole interval
+	// A pass that produced no advice at all measured nothing — a hundred exits
+	// across a dozen providers do not fail in the same second. Retry it soon
+	// instead of leaving url-test in charge for the whole interval.
+	for !run() {
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(noderankRetry):
+		}
+	}
 	t := time.NewTicker(noderankInterval)
 	defer t.Stop()
 	for {
@@ -1158,6 +1185,39 @@ func (c *Core) noderankLoop(ctx context.Context) {
 			return
 		case <-t.C:
 			run()
+		}
+	}
+}
+
+// haveNodeAdvice reports whether the ranker currently advises a node for ANY
+// service. All-empty means the last pass measured nothing, not that every exit in
+// the fleet is bad.
+func (c *Core) haveNodeAdvice() bool {
+	for name := range c.reg.Services {
+		if c.ranker.Best(name) != "" {
+			return true
+		}
+	}
+	return false
+}
+
+// waitControlAlive blocks until sing-box answers its control plane, or until the
+// deadline passes. Reports whether it is worth continuing.
+func (c *Core) waitControlAlive(ctx context.Context, within time.Duration) bool {
+	deadline := time.NewTimer(within)
+	defer deadline.Stop()
+	for {
+		if c.controlAlive(ctx) {
+			return true
+		}
+		select {
+		case <-ctx.Done():
+			return false
+		case <-deadline.C:
+			c.log.Warn("noderank: starting without a warm data plane; the first pass may measure nothing",
+				"waited", within.String())
+			return true
+		case <-time.After(2 * time.Second):
 		}
 	}
 }
