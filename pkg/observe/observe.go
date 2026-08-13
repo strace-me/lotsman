@@ -143,6 +143,25 @@ type Snapshot struct {
 	Services  map[string]ServiceMetrics
 	Matched   int
 	Unmatched int
+	// Nodes is bytes CARRIED per exit since the previous pass, keyed by the final
+	// outbound tag (Conn.Chains[0]) — a node tag, or "direct".
+	//
+	// It answers the question node ranking is supposed to ask and could not: the
+	// delay probe is per-node and honest, while the throughput half measured
+	// whatever path the probe proxy happened to take and handed every candidate the
+	// same number, so a throttled exit that answers in 40ms outranked a working one
+	// (LOT-67). Here throughput is an OBSERVATION of the traffic that actually went
+	// through each exit, so it is per-node by construction and costs no probe.
+	//
+	// Blind to exits nobody is using — nothing flows, nothing is measured. That is
+	// the right blindness: the question is which of the exits in play is carrying.
+	Nodes map[string]NodeCarry
+}
+
+// NodeCarry is what one exit moved between two passes.
+type NodeCarry struct {
+	Bytes int64 // sum of per-connection byte deltas over this pass
+	Flows int   // connections seen on this exit
 }
 
 // HasLiveRealtimeUDP reports whether any service currently has a LIVE (non-dead)
@@ -280,11 +299,27 @@ func (e *Eye) Observe(ctx context.Context) (Snapshot, error) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	cur := make(map[string]flowSeen, len(conns)) // this pass's per-conn bytes + stall streak; becomes prev
-	snap := Snapshot{Services: map[string]ServiceMetrics{}}
+	snap := Snapshot{Services: map[string]ServiceMetrics{}, Nodes: map[string]NodeCarry{}}
 	// seenIP dedups destination IPs per service within this pass, so DestIPs holds
 	// each distinct address once even when many flows share a CDN edge.
 	seenIP := map[string]map[string]bool{}
 	for _, c := range conns {
+		// Per-exit carry, counted for EVERY connection — matched or not. The question
+		// "is this exit moving bytes" is about the exit, not about which rule sent
+		// traffic to it, and a node used only by an unmatched flow still proves it
+		// carries. Deltas, not totals: a long-lived connection's cumulative counter
+		// says what it moved since it opened, which for ranking is the wrong window.
+		if len(c.Chains) > 0 && c.ID != "" {
+			node := c.Chains[0]
+			nc := snap.Nodes[node]
+			nc.Flows++
+			if p, seen := e.prev[c.ID]; seen {
+				if d := (c.Upload + c.Download) - p.total; d > 0 {
+					nc.Bytes += d
+				}
+			}
+			snap.Nodes[node] = nc
+		}
 		// Two-tier: sing-box's own route decision (selector) is authoritative; the
 		// host/IP heuristic is the fallback for direct/final flows with no route tag.
 		var hit *matcher

@@ -469,3 +469,40 @@ func TestWedgedOneWayRTC(t *testing.T) {
 		})
 	}
 }
+
+// LOT-67: ranking exits "by what they carry" measured the currently-active path
+// and gave every candidate the same number, so a throttled node that answers a
+// delay probe in 40ms outranked one that actually works. Carry is now observed per
+// exit, from the traffic that went through it.
+func TestNodeCarryIsPerExitAndCountsDeltas(t *testing.T) {
+	mk := func(aDL, bDL int64) []Conn {
+		return []Conn{
+			{ID: "a", Chains: []string{"Node-Fast"}, Host: "a.googlevideo.com", DestIP: "1.1.1.1", Network: "tcp", Download: aDL, Upload: 1000},
+			{ID: "b", Chains: []string{"Node-Throttled"}, Host: "b.googlevideo.com", DestIP: "1.1.1.2", Network: "tcp", Download: bDL, Upload: 1000},
+		}
+	}
+	// Pass 1 seeds the baseline; pass 2 shows one exit moving a megabyte and the
+	// other stuck where it was.
+	eye := New(&seqSource{passes: [][]Conn{mk(10000, 10000), mk(1010000, 10050)}}, testRegistry())
+	if _, err := eye.Observe(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	snap, err := eye.Observe(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	fast, throttled := snap.Nodes["Node-Fast"], snap.Nodes["Node-Throttled"]
+	if fast.Bytes != 1000000 {
+		t.Errorf("fast exit carried %d, want 1000000", fast.Bytes)
+	}
+	if throttled.Bytes != 50 {
+		t.Errorf("throttled exit carried %d, want 50", throttled.Bytes)
+	}
+	// The point of the whole change: the two must not be equal.
+	if fast.Bytes == throttled.Bytes {
+		t.Error("both exits got the same number — this is exactly the defect LOT-67 describes")
+	}
+	if fast.Flows != 1 || throttled.Flows != 1 {
+		t.Errorf("flows: fast=%d throttled=%d, want 1/1", fast.Flows, throttled.Flows)
+	}
+}

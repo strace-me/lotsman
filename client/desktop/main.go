@@ -101,9 +101,10 @@ func main() {
 		proxyListen   = flag.String("proxy", "", "PROXY MODE: run sing-box on this socks address instead of capturing the system with a tun (no root needed, nothing intercepted)")
 		refreshEvery  = flag.Duration("refresh-interval", 5*time.Minute, "how often to re-fetch subscriptions and reconcile the config (0 = never)")
 		roamInterval  = flag.Duration("roam-interval", 15*time.Second, "how often to re-fingerprint the network and swap the KB on a change (only with -kb-dir)")
-		nodeRank      = flag.Bool("noderank", false, "rank a VPN pool's concrete nodes per service and pin the best instead of riding plain url-test. OFF by default until LOT-67: the half that would justify it — ranking by what a node CARRIES — measures the currently-active path and gives every candidate the same number, so today this ranks by LATENCY, which is the one measurement that cannot tell a throttled exit from a healthy one. Until then it is a second blind chooser stacked on url-test's blind choice.")
+		nodeRank      = flag.Bool("noderank", true, "rank a VPN pool's concrete nodes per service and pin the best, instead of riding plain url-test. Ranks by what an exit CARRIES — observed from live flows, not probed — as well as by how fast it answers, because latency alone crowns the deadest exit: a node under the TSPU volume freeze answers in 40ms and then moves nothing.")
 		pathHealth    = flag.Bool("path-health", true, "escalation-v2 DETECT: probe EVERY chain step out-of-band each minute and log which tier works here, instead of discovering it by walking the chain one rung at a time")
 		pathHealthAct = flag.Bool("path-health-act", false, "escalation-v2 ACT: let the brain jump straight to the best WORKING tier instead of escalating one rung at a time. Requires -path-health.")
+		engineHealth  = flag.Bool("engine-health", true, "watch the DESYNC engine and recompose it when a rule is on a zapret rung and the engine is not there. sing-box is not watched here — superviseBox already does that, and on a stricter test.")
 		auditLog      = flag.String("audit-log", "", "append brain state transitions here as JSONL. Empty keeps them in memory only, where they die with the process — and the journald ring on a laptop holds minutes, so an investigation started an hour later has nothing to read.")
 		failLog       = flag.String("fail-log", "", "append probe failures here as JSONL (empty = discarded)")
 		controlSock   = flag.String("control-socket", "", "unix socket for the local control API (empty = default under the runtime dir)")
@@ -197,6 +198,7 @@ func main() {
 		NodeRank:          *nodeRank,
 		PathHealth:        *pathHealth,
 		PathHealthAct:     *pathHealthAct,
+		EngineHealth:      *engineHealth,
 		AuditLog:          *auditLog,
 		FailLog:           *failLog,
 		CanaryGoodputKBps: *canaryGoodput,

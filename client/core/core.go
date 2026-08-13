@@ -115,6 +115,7 @@ type Options struct {
 	NodeRank      bool          // rank a VPN pool's concrete nodes per service and pin the best, instead of riding plain url-test
 	PathHealth    bool          // escalation-v2 DETECT: probe every chain step out-of-band and log which tier works
 	PathHealthAct bool          // escalation-v2 ACT: let the brain jump straight to the best working tier (needs PathHealth)
+	EngineHealth  bool          // watch the desync engine and bring it back when it is wedged while a rule expects it
 	AuditLog      string        // append brain state transitions here as JSONL ("" = memory only, lost on restart)
 	FailLog       string        // append probe failures here as JSONL ("" = discarded)
 	RefreshEvery  time.Duration // how often to re-fetch subscriptions and reconcile (0 = never)
@@ -580,6 +581,13 @@ func (c *Core) buildLoop() error {
 	vpnEx := executor.NewVPN(c.clash, false, c.log)
 	if c.opts.NodeRank && len(c.conf.Subscriptions) > 0 {
 		c.ranker = noderank.New(c.clash, noderankSamples, false, c.log)
+		// Rank by what an exit CARRIES, not only by how fast it answers — the
+		// distinction the daemon's own comment makes and its wiring could not deliver
+		// (LOT-67). Fed from the passive eye rather than a probe, so it measures the
+		// candidate itself and adds no traffic.
+		c.ranker.Goodput = func(_ context.Context, node string) (float64, bool) {
+			return c.nodeGoodputKBps(node)
+		}
 		vpnEx = vpnEx.WithBestNode(c.ranker.Best)
 	}
 	execs := []executor.StrategyExecutor{
@@ -719,6 +727,11 @@ func (c *Core) buildLoop() error {
 	runners = append(runners, c.observeLoop, c.kbDecayLoop)
 	if c.ranker != nil {
 		runners = append(runners, c.noderankLoop)
+	}
+	if c.opts.EngineHealth {
+		runners = append(runners, c.engineHealthLoop)
+		c.log.Info("engine-health: the desync engine is watched and restarted when a rule expects it and it is gone",
+			"interval", desyncHealthInterval.String())
 	}
 	if len(c.conf.Hostlists) > 0 {
 		runners = append(runners, c.hostlistLoop)
@@ -1166,6 +1179,30 @@ func (c *Core) kbDecayLoop(ctx context.Context) {
 // rich /status (always) and the /metrics collector (when served). It never touches
 // escalation — a failed pass (sing-box down, no connections yet) is logged and
 // retried, exactly as the daemon treats it.
+// nodeGoodputKBps reports what an exit CARRIED over the last observe pass, in
+// KiB/s, or ok=false when nothing went through it. It is the honest half of node
+// ranking (LOT-67): the delay probe is per-node and cannot tell a throttled exit
+// from a healthy one, because a node under the TSPU volume freeze answers in 40ms
+// and then moves nothing. This is an observation of bytes that actually crossed
+// that exit, so it is per-node by construction and costs no probe traffic.
+//
+// ok=false for an unused exit is deliberate and is what the ranker wants: no
+// verdict, rather than a zero that would rank an idle node below a busy one.
+func (c *Core) nodeGoodputKBps(node string) (float64, bool) {
+	c.obsMu.Lock()
+	snap := c.obsSnap
+	c.obsMu.Unlock()
+	nc, ok := snap.Nodes[node]
+	if !ok || nc.Bytes <= 0 {
+		return 0, false
+	}
+	secs := c.opts.Interval.Seconds()
+	if secs <= 0 {
+		return 0, false
+	}
+	return float64(nc.Bytes) / 1024 / secs, true
+}
+
 func (c *Core) observeLoop(ctx context.Context) {
 	eye := observe.New(clashObserveSource{c.clash}, c.reg)
 	t := time.NewTicker(c.opts.Interval)
