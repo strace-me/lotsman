@@ -131,8 +131,14 @@ func (c *Core) newReconciler() *reconcile.Reconciler {
 		// need it and must not take it (Reload holds stateMu for its whole body).
 		OnLive: func(nodes []subscription.Node) {
 			c.stateMu.Lock()
-			defer c.stateMu.Unlock()
 			c.recordFleet(nodes)
+			c.stateMu.Unlock()
+			// A set the reconciler made LIVE is by definition one worth starting from
+			// next time: it passed the degraded-fetch guard and sing-box is running on
+			// it. This is where the snapshot behind the startup fallback is kept fresh,
+			// so a machine that has been up all day boots from today's fleet rather
+			// than from whatever it last managed to fetch at boot.
+			c.saveFleet(nodes)
 		},
 	}
 	// Keep the config we are about to replace. The daemon has done this since June

@@ -1857,11 +1857,7 @@ func (c *Core) generate(ctx context.Context) ([]byte, error) {
 	if err := c.ensureRuleSets(ctx); err != nil {
 		return nil, err
 	}
-	mgr := subscription.NewManager(subscription.NewHTTPFetcher())
-	nodes, errs := mgr.Load(ctx, c.conf.Subscriptions)
-	for _, e := range errs {
-		c.log.Warn("subscription load issue", "err", e)
-	}
+	nodes, mgr := c.loadNodes(ctx)
 	// Capture the quota/expiry the fetch just parsed from the Subscription-Userinfo
 	// header before mgr is discarded, so /status can report it (the mgr itself is
 	// throwaway — only this snapshot is retained).
