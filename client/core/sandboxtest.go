@@ -52,6 +52,15 @@ const sandboxCandidates = 3
 // would otherwise silently pin every rule to the tunnel forever, which is a much
 // worse failure than the one the gate prevents.
 func (c *Core) testRecipe(ctx context.Context, svc registry.Service, recipeID string) (ok, measured bool, why string) {
+	// The lane runs for seconds and a Reload rebuilds the executor underneath it,
+	// so every read of c.zapExec on this path is a race with a teardown. Refuse
+	// with a reason rather than measure against a half-torn loop: an unmeasurable
+	// pass must say it did not measure (measured=false), never that the recipe
+	// failed — that is principle 2, and the crash of 2026-08-13 came from the same
+	// field being read on this path without a guard.
+	if c.zapExec == nil {
+		return false, false, "the desync executor was rebuilt mid-pass — nothing was measured"
+	}
 	// BEFORE the lane goes up, not after. Whether this rule can be judged at all is
 	// knowable from its config, and asking afterwards cost an nft table and an nfqws
 	// start per question: measured on the laptop as 104 sandbox lifts in 2m23s, one
@@ -391,6 +400,19 @@ func (c *Core) provenCandidate(ctx context.Context, svc registry.Service, exclud
 // back, so requiring it to be here already would refuse the only question worth
 // asking.
 func (c *Core) provenCandidateFor(ctx context.Context, svc registry.Service, exclude string, failOpen, steering bool) (cand string, verified, measured bool) {
+	// Take the executor ONCE. A pass runs for seconds, and a Reload tears the loop
+	// down and rebuilds it — core.go sets c.zap and c.zapExec to nil in between —
+	// so re-reading the field mid-pass is a race with a teardown, not a lookup. It
+	// crashed the client on 2026-08-13: the post-measurement re-check below
+	// dereferenced c.zapExec after a rebuild, and a nil-pointer panic in a gate
+	// goroutine takes the whole process, which systemd then left down for eight
+	// minutes. Two guards existed on this path already and this third read had
+	// none, precisely because it happens LATEST — when a teardown is most likely to
+	// have run.
+	zx := c.zapExec
+	if zx == nil {
+		return "", false, false
+	}
 	test := c.testCandidate
 	if test == nil {
 		test = c.testRecipe
@@ -406,7 +428,7 @@ func (c *Core) provenCandidateFor(ctx context.Context, svc registry.Service, exc
 	base := c.baseline(ctx, svc)
 	anyMeasured := false
 	for _, cand := range cands {
-		if steering && !c.zapExec.stillOnRung(svc.Name) {
+		if steering && !zx.stillOnRung(svc.Name) {
 			return "", false, anyMeasured // the brain moved it; the rung is not ours to steer
 		}
 		ok, measured, why := test(ctx, svc, cand)
@@ -420,7 +442,7 @@ func (c *Core) provenCandidateFor(ctx context.Context, svc registry.Service, exc
 		// Re-checked AFTER too: a measurement takes seconds and the brain moves on
 		// its own tick, so the rung was ours when we asked and may not be when we
 		// answer. Exactly the in-flight race the rung prober had.
-		if steering && !c.zapExec.stillOnRung(svc.Name) {
+		if steering && !zx.stillOnRung(svc.Name) {
 			c.log.Info("rule left the desync rung mid-measurement, not applying the candidate",
 				"service", svc.Name, "candidate", cand)
 			return "", false, anyMeasured
@@ -499,6 +521,15 @@ func (c *Core) applyCandidate(ctx context.Context, service, cand string, verifie
 		"service", service, "recipe", cand, "verified", verified, "replacing", replacing)
 	apply := c.applyForTest
 	if apply == nil {
+		// Same teardown race as provenCandidateFor: this runs at the END of a pass
+		// that took seconds, and a Reload may have rebuilt the loop meanwhile. Saying
+		// so rather than returning silently — a candidate that was proven and then not
+		// applied is exactly the kind of thing that must not vanish from the record.
+		if c.zapExec == nil {
+			c.log.Warn("desync executor was rebuilt mid-pass; the proven candidate is not applied",
+				"service", service, "recipe", cand)
+			return
+		}
 		apply = c.zapExec.applyNow
 	}
 	if err := apply(ctx, service, cand); err != nil {
@@ -511,8 +542,8 @@ func (c *Core) applyCandidate(ctx context.Context, service, cand string, verifie
 // production would have tried, in the same order.
 func (c *Core) rankedCandidates(service, exclude string, n int) []string {
 	svc, ok := c.reg.Services[service]
-	if !ok {
-		return nil
+	if !ok || c.zapExec == nil {
+		return nil // no executor: an empty list is already how "nothing to try" is said here
 	}
 	// One bundle serves every rule, so there is exactly one thing to try and
 	// nothing to rank. Offering the catalogue here would let the lane crown a
