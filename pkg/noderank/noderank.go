@@ -118,6 +118,17 @@ type Ranker struct {
 	// and a stale ranking for one interval is cheaper than a spoiled game.
 	Goodput func(ctx context.Context, node string) (kbps float64, ok bool)
 
+	// MinGoodputKBps demotes an exit MEASURED carrying less than this. A floor, not
+	// a weight: an exit that carries well earns no bonus, because only the exit
+	// currently in use has passive evidence and rewarding it would make the
+	// incumbent unbeatable by construction. Promotion on measured throughput needs
+	// a canary for the challenger — docs/DESIGN-node-selection.md.
+	//
+	// 0 disables it. A measurement counts only when GoodputKnown and not Short:
+	// youtube's probe target is a 204 with no body, and reading its 0 KiB/s as a
+	// verdict once demoted every strategy ever tried.
+	MinGoodputKBps float64
+
 	// SwitchMargin is the minimum score advantage (in [0,1]) a new top node
 	// must have over the currently-advised node before advice flips. While the
 	// advised node stays healthy and within this margin, it is kept (stickiness).
@@ -186,6 +197,17 @@ func (r *Ranker) observe(tag string, q quality.Quality) (eff quality.Quality, he
 	if h == nil {
 		h = &nodeHealth{}
 		r.health[tag] = h
+	}
+	// An exit that ANSWERS but does not CARRY is down, and it is down on the
+	// observation rather than after a streak: this is the TSPU volume freeze, where
+	// a node replies to a delay probe in 40ms and then moves nothing. Latency,
+	// jitter and loss all read healthy through it — that is the whole reason this
+	// dimension exists (LOT-67).
+	if r.MinGoodputKBps > 0 && q.GoodputKnown && !q.Short && q.GoodputKBps < r.MinGoodputKBps {
+		h.consecFail++
+		r.log.Warn("noderank: exit answers but carries nothing — demoted",
+			"node", tag, "kbps", q.GoodputKBps, "floor", r.MinGoodputKBps, "p95ms", q.P95ms)
+		return q, false, true
 	}
 	if q.Loss < 1 { // at least one probe attempt succeeded
 		h.consecFail = 0
@@ -396,6 +418,7 @@ func (r *Ranker) probe(ctx context.Context, node, testURL string) quality.Qualit
 	if r.Goodput != nil && q.Samples > 0 && q.Loss < 1 {
 		if kbps, ok := r.Goodput(ctx, node); ok {
 			q.GoodputKBps = kbps
+			q.GoodputKnown = true
 		}
 	}
 	return q

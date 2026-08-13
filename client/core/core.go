@@ -588,6 +588,19 @@ func (c *Core) buildLoop() error {
 		c.ranker.Goodput = func(_ context.Context, node string) (float64, bool) {
 			return c.nodeGoodputKBps(node)
 		}
+		// The carry FLOOR is deliberately left at 0 — i.e. off — even though the
+		// mechanism exists and is tested (Ranker.MinGoodputKBps). Passive observation
+		// cannot tell "carried little because the service was idle" from "carried
+		// little because the exit is throttled", and demoting on the first reading is
+		// exactly the mistake LOT-52 cost nine minutes of false verdicts to learn:
+		// social was declared TSPU-throttled while Instagram served 392 KiB, because
+		// an idle-looking measurement was read as a verdict about the path.
+		//
+		// It is switched on by the measurement, not by a decision: once a challenger
+		// canary pulls a known volume through a chosen exit
+		// (docs/DESIGN-node-selection.md), a low number means the path and the floor
+		// becomes admissible. Until then the ranker keeps hysteresis, stickiness and
+		// country exclusion, and ranks by latency — which is what it did anyway.
 		vpnEx = vpnEx.WithBestNode(c.ranker.Best)
 	}
 	execs := []executor.StrategyExecutor{

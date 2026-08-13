@@ -24,6 +24,14 @@ type Quality struct {
 	// IP-volume-freeze, where a path connects with LOW loss but GOODPUT collapses
 	// after ~16KB — invisible to loss/latency alone.
 	GoodputKBps float64 // sustained download rate over the read, KiB/s
+	// GoodputKnown says a throughput measurement actually HAPPENED and may be read
+	// as a verdict. Zero is ambiguous on its own — it is both "never measured" and
+	// "measured, carried nothing" — and the two must never be confused: treating
+	// "unmeasured" as "carries nothing" is how a cold start would demote a whole
+	// fleet, and treating "carries nothing" as "unknown" is the blindness this
+	// dimension exists to remove. Read it together with Short, which says the
+	// measurement was about a small file rather than about the path.
+	GoodputKnown bool
 	Bytes       int64   // total bytes pulled (0 = froze from the first byte)
 	// Short means the ENDPOINT ran out before the requested volume — every read
 	// reached end-of-body rather than being cut off by the deadline. A low goodput

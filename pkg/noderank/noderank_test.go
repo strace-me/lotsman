@@ -407,3 +407,48 @@ func TestHealthSnapshot(t *testing.T) {
 		t.Errorf("b = %q, want down (dead on the service URL, never good)", state["b"])
 	}
 }
+
+// docs/DESIGN-node-selection.md, acceptance #1 and #6: an exit that answers
+// quickly and carries nothing must not be chosen, and must lose its place on the
+// OBSERVATION rather than after a streak. This is the TSPU volume freeze — 40ms to
+// a delay probe, nothing afterwards — and loss, latency and jitter all read
+// healthy through it.
+func TestAnExitThatAnswersFastAndCarriesNothingLoses(t *testing.T) {
+	const svcURL = "http://probe/"
+	api := newFake("fast", []string{"fast", "slow", "direct"}, map[string]map[string]int{
+		"fast": {svcURL: 40}, // answers in 40ms and carries nothing
+		"slow": {svcURL: 300},
+	})
+	r := New(api, 1, false, quietLog())
+	r.MinGoodputKBps = 64
+	r.Goodput = func(_ context.Context, node string) (float64, bool) {
+		if node == "fast" {
+			return 0, true // measured, and it moved nothing
+		}
+		return 900, true
+	}
+	svc := Service{Name: "x", Selector: "sel-x", ProbeURL: svcURL, Weights: balancer.ProfileFor("general")}
+	got, err := r.Pick(context.Background(), svc, []Candidate{{"fast", ""}, {"slow", ""}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != "slow" {
+		t.Errorf("chose %q; the 40ms exit carries nothing and the 300ms one carries 900 KiB/s", got)
+	}
+}
+
+// The mirror, and the one that would burn a whole fleet if got wrong: an exit
+// nobody has measured is UNKNOWN, not empty. Passive observation only ever sees
+// the exit currently in use, so at a cold start every candidate is unmeasured —
+// demoting them all would leave nothing to choose from.
+func TestAnUnmeasuredExitIsNotDemoted(t *testing.T) {
+	const svcURL = "http://probe/"
+	api := newFake("a", []string{"a", "direct"}, map[string]map[string]int{"a": {svcURL: 50}})
+	r := New(api, 1, false, quietLog())
+	r.MinGoodputKBps = 64
+	r.Goodput = func(context.Context, string) (float64, bool) { return 0, false } // no measurement
+	svc := Service{Name: "x", Selector: "sel-x", ProbeURL: svcURL, Weights: balancer.ProfileFor("general")}
+	if got, _ := r.Pick(context.Background(), svc, []Candidate{{"a", ""}}); got != "a" {
+		t.Errorf("an unmeasured exit was dropped (%q) — unknown must not read as bad", got)
+	}
+}
