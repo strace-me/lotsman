@@ -126,3 +126,37 @@ func (r *RingRecorder) Snapshot(limit int, service string) []Transition {
 	}
 	return out
 }
+
+// Multi fans one transition out to several recorders. It exists because the
+// desktop client needs both at once and the daemon's pattern — pick a file
+// recorder OR the nop — cannot express that: the ring feeds the UI's Events tab
+// and lives only in memory, so a client wired that way keeps its history exactly
+// as long as the process, and the evidence for anything worth investigating is
+// gone by the time you go looking. Two days of hunting on the ThinkPad ran on a
+// journald ring that holds about six minutes, and twice the evidence was
+// destroyed before it was read.
+//
+// A nil or empty list is a valid Nop, so a caller need not branch.
+func Multi(recorders ...Recorder) Recorder {
+	kept := make([]Recorder, 0, len(recorders))
+	for _, r := range recorders {
+		if r != nil {
+			kept = append(kept, r)
+		}
+	}
+	if len(kept) == 0 {
+		return Nop{}
+	}
+	if len(kept) == 1 {
+		return kept[0]
+	}
+	return multi(kept)
+}
+
+type multi []Recorder
+
+func (m multi) Record(t Transition) {
+	for _, r := range m {
+		r.Record(t)
+	}
+}

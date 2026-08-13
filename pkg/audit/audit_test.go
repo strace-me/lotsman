@@ -137,3 +137,22 @@ func TestRecordConcurrent(t *testing.T) {
 		t.Errorf("wrote %d lines, want %d", n, goroutines*perG)
 	}
 }
+
+// The client needs the ring (for the UI) and a file (for anything investigated
+// later) at the same time; the daemon's either/or could not say that.
+func TestMultiFansOutAndTolerdatesNilAndEmpty(t *testing.T) {
+	a, b := NewRingRecorder(8), NewRingRecorder(8)
+	Multi(a, nil, b).Record(Transition{Service: "youtube"})
+	for i, r := range []*RingRecorder{a, b} {
+		if got := r.Snapshot(10, ""); len(got) != 1 || got[0].Service != "youtube" {
+			t.Errorf("recorder %d got %v", i, got)
+		}
+	}
+	// Empty and all-nil must be usable without a branch at the call site.
+	Multi().Record(Transition{Service: "x"})
+	Multi(nil, nil).Record(Transition{Service: "x"})
+	// One recorder is returned unwrapped — no allocation for the common case.
+	if _, wrapped := Multi(a).(multi); wrapped {
+		t.Error("Multi wrapped a single recorder")
+	}
+}

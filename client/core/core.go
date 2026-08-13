@@ -115,6 +115,8 @@ type Options struct {
 	NodeRank      bool          // rank a VPN pool's concrete nodes per service and pin the best, instead of riding plain url-test
 	PathHealth    bool          // escalation-v2 DETECT: probe every chain step out-of-band and log which tier works
 	PathHealthAct bool          // escalation-v2 ACT: let the brain jump straight to the best working tier (needs PathHealth)
+	AuditLog      string        // append brain state transitions here as JSONL ("" = memory only, lost on restart)
+	FailLog       string        // append probe failures here as JSONL ("" = discarded)
 	RefreshEvery  time.Duration // how often to re-fetch subscriptions and reconcile (0 = never)
 	RoamInterval  time.Duration // how often to re-fingerprint the network for roaming (0 = default 15s; only in -kb-dir mode)
 	QNum          int           // NFQUEUE queue number (0 = 200, matching the router)
@@ -170,6 +172,10 @@ type Core struct {
 	brain      *brain.Brain
 	eng        *probing.Engine     // probing engine, retained so the UI can force a recheck
 	events     *audit.RingRecorder // in-memory brain-transition history for the UI
+	rec        audit.Recorder      // where transitions go: the ring, plus a file when one is configured
+	auditFile  *audit.FileRecorder // kept for Close
+	fails      faillog.Recorder    // where probe failures go ("" flag = Nop)
+	failFile   *faillog.FileRecorder
 	secret     string
 
 	// Roaming: re-detect the network on an interval and swap the KB when it changes.
@@ -455,6 +461,30 @@ func (c *Core) Start(ctx context.Context) error {
 	// (under stateMu), so a rebuilt loop is reflected without re-creating the collector
 	// or the metrics server below.
 	c.events = audit.NewRingRecorder(0)
+	// The ring feeds the UI and dies with the process. A file keeps what an
+	// investigation needs: two days of hunting on this laptop ran on a journald
+	// ring that holds about six minutes, and twice it erased the evidence for the
+	// bug being chased. Both, not either — see audit.Multi.
+	c.rec = c.events
+	if c.opts.AuditLog != "" {
+		if fr, err := audit.NewFileRecorder(c.opts.AuditLog, c.log); err != nil {
+			c.log.Error("audit log could not be opened; transitions stay in memory only", "path", c.opts.AuditLog, "err", err)
+		} else {
+			c.auditFile = fr
+			c.rec = audit.Multi(c.events, fr)
+			c.log.Info("audit log enabled", "path", c.opts.AuditLog)
+		}
+	}
+	c.fails = faillog.Nop{}
+	if c.opts.FailLog != "" {
+		if ff, err := faillog.NewFileRecorder(c.opts.FailLog); err != nil {
+			c.log.Error("fail log could not be opened; probe failures are discarded", "path", c.opts.FailLog, "err", err)
+		} else {
+			c.failFile = ff
+			c.fails = ff
+			c.log.Info("fail log enabled", "path", c.opts.FailLog)
+		}
+	}
 	c.metrics = metrics.New(
 		func() []brain.ServiceState {
 			c.stateMu.Lock()
@@ -565,7 +595,7 @@ func (c *Core) buildLoop() error {
 	// The brain asks the knowledge base which zapret strategy to use; the client
 	// narrows that to the ones it can actually render, so it cannot name an id the
 	// executor will silently replace (see renderableRecommender).
-	c.brain = brain.New(c.bus, c.reg, c.renderableKB(), brain.DefaultConfig(), c.events, c.log)
+	c.brain = brain.New(c.bus, c.reg, c.renderableKB(), brain.DefaultConfig(), c.rec, c.log)
 	c.brain.SetReassert(c.opts.Interval)
 	if c.opts.StateFile != "" {
 		c.bindStateStore(c.currentNetID)
@@ -639,7 +669,7 @@ func (c *Core) buildLoop() error {
 		}
 	}
 	c.prober = rp
-	eng := probing.New(c.bus, rp, c.brain, c.reg, c.kb, c, faillog.Nop{}, c.opts.Interval, c.log)
+	eng := probing.New(c.bus, rp, c.brain, c.reg, c.kb, c, c.fails, c.opts.Interval, c.log)
 	// Let the desync canary fail an otherwise-healthy probe. The active probe pulls
 	// a couple of hundred bytes, so a recipe that establishes and then carries
 	// nothing reads as perfect health; the canary measures goodput and sees the
@@ -1204,6 +1234,16 @@ func (c *Core) Stop() error {
 	// candidate engine holds that queue against the next run. Either way the next
 	// measurement would describe the wreckage rather than the strategy.
 	c.closeSandbox(context.Background())
+	// Flush the investigation logs before the process goes: a buffered tail lost on
+	// shutdown is exactly the part describing what happened just before it.
+	if c.auditFile != nil {
+		c.auditFile.Close()
+		c.auditFile = nil
+	}
+	if c.failFile != nil {
+		c.failFile.Close()
+		c.failFile = nil
+	}
 	if c.metricsSrv != nil {
 		c.metricsSrv.Close()
 	}
