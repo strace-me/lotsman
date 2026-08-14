@@ -114,6 +114,8 @@ func (s *ControlServer) Serve(path string) error {
 	mux.HandleFunc("GET /config", s.handleGetConfig)
 	mux.HandleFunc("POST /config", s.handleSetConfig)
 	mux.HandleFunc("POST /config/validate", s.handleValidateConfig)
+	mux.HandleFunc("POST /subscriptions/refresh", s.handleRefreshSubs)
+	mux.HandleFunc("POST /subscriptions/{name}/refresh", s.handleRefreshSubs)
 
 	s.ln = ln
 	s.srv = &http.Server{Handler: mux, ReadHeaderTimeout: 5 * time.Second}
@@ -208,6 +210,36 @@ func (s *ControlServer) handleRecheck(w http.ResponseWriter, r *http.Request) {
 	}
 	w.WriteHeader(http.StatusAccepted)
 	w.Write([]byte(`{"rechecking":true}`))
+}
+
+// handleRefreshSubs re-fetches subscriptions and applies them — the UI's "refresh"
+// button, per row and for all of them.
+//
+// It answers with what each subscription YIELDED rather than a bare ok, because
+// the question an operator actually has is "why did the one I just added give me
+// nothing", and until now the only answer lived in a journald ring that holds six
+// minutes. A 200 with `{"name":"DemoVPN","nodes":0,"err":"..."}` is the whole
+// feature.
+func (s *ControlServer) handleRefreshSubs(w http.ResponseWriter, r *http.Request) {
+	res, err := s.core.RefreshSubscriptions(r.Context(), r.PathValue("name"))
+	if err != nil && res == nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	if err != nil {
+		// Partial: the fetch happened and its per-subscription results are worth
+		// having even though applying them did not work.
+		w.WriteHeader(http.StatusAccepted)
+	}
+	json.NewEncoder(w).Encode(map[string]any{"subscriptions": res, "apply_error": errText(err)})
+}
+
+func errText(err error) string {
+	if err == nil {
+		return ""
+	}
+	return err.Error()
 }
 
 // handleSetEnabled switches one service on or off — the tile toggle. It is a

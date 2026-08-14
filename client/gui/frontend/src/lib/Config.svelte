@@ -122,7 +122,7 @@
         {/each}
       </div>
       {#if section === 'subs'}
-        <SubsEdit {doc} {touch} />
+        <SubsEdit {doc} {touch} {backend} />
       {:else if section === 'pools'}
         <PoolsEdit {doc} {touch} />
       {:else if section === 'hostlists'}

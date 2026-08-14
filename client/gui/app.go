@@ -59,6 +59,17 @@ func (a *App) SetServiceEnabled(service string, enabled bool) error {
 // Stop is the master OFF: it tears the service down.
 func (a *App) Stop() error { return a.client.Stop(a.ctx) }
 
+// RefreshSubscriptions re-fetches subscriptions and applies the result; an empty
+// name does all of them. It returns what EACH one yielded, because "why did the
+// one I just added give me nothing" is the question the button exists to answer —
+// and until now the answer lived only in a log that rotates in six minutes.
+//
+// Not SetConfig: that rebuilds the whole autonomy loop to re-read a file that has
+// not changed. This runs the same reconcile the refresh timer runs.
+func (a *App) RefreshSubscriptions(name string) ([]control.SubRefresh, error) {
+	return a.client.RefreshSubscriptions(a.ctx, name)
+}
+
 // Config returns the service's current config file (raw YAML + its path).
 func (a *App) Config() (control.ConfigDoc, error) { return a.client.Config(a.ctx) }
 

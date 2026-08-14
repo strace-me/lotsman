@@ -244,6 +244,42 @@ func (c *Client) SetServiceEnabled(ctx context.Context, service string, enabled 
 }
 
 // Stop is the master OFF: it tears the service down and the process exits.
+// SubRefresh is what one subscription yielded when it was re-fetched.
+type SubRefresh struct {
+	Name  string `json:"name"`
+	Nodes int    `json:"nodes"`
+	Err   string `json:"err,omitempty"`
+}
+
+// RefreshSubscriptions re-fetches subscriptions and applies the result. An empty
+// name refreshes all of them.
+//
+// It returns what EACH one yielded, including the reason one produced nothing —
+// the question this exists to answer. On 2026-08-12 a freshly added subscription
+// contributed zero nodes and there was no way to ask why; the answer had already
+// rotated out of a six-minute journald ring.
+//
+// Unlike SetConfig it does not rebuild the autonomy loop: it runs the same
+// reconcile the refresh timer runs, so the tunnel is not torn down to ask a
+// provider for its node list.
+func (c *Client) RefreshSubscriptions(ctx context.Context, name string) ([]SubRefresh, error) {
+	path := "/subscriptions/refresh"
+	if name != "" {
+		path = "/subscriptions/" + url.PathEscape(name) + "/refresh"
+	}
+	var out struct {
+		Subscriptions []SubRefresh `json:"subscriptions"`
+		ApplyError    string       `json:"apply_error"`
+	}
+	if err := c.postJSONInto(ctx, path, nil, &out); err != nil {
+		return nil, err
+	}
+	if out.ApplyError != "" {
+		return out.Subscriptions, errors.New(out.ApplyError)
+	}
+	return out.Subscriptions, nil
+}
+
 func (c *Client) Stop(ctx context.Context) error {
 	return c.post(ctx, "/stop")
 }
@@ -313,6 +349,33 @@ func (c *Client) post(ctx context.Context, path string) error {
 		return statusError("POST", path, resp)
 	}
 	return nil
+}
+
+// postJSONInto is postJSON that also decodes the answer. It exists because a POST
+// that returns data is a real shape here: "refresh this subscription" is only
+// useful if it says what came back.
+func (c *Client) postJSONInto(ctx context.Context, path string, body, out any) error {
+	b, err := json.Marshal(body)
+	if err != nil {
+		return err
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, "http://unix"+path, bytes.NewReader(b))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := c.http.Do(req)
+	if err != nil {
+		return fmt.Errorf("control: POST %s: %w", path, err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusAccepted {
+		return statusError("POST", path, resp)
+	}
+	if out == nil {
+		return nil
+	}
+	return json.NewDecoder(resp.Body).Decode(out)
 }
 
 func (c *Client) postJSON(ctx context.Context, path string, body any) error {
