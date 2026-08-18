@@ -352,6 +352,21 @@ func (c *Core) Start(ctx context.Context) error {
 		catalog.Add(d)
 	}
 	c.kb.SetZapretSeed(catalog.ZapretIDs())
+	// Wait for a network before deciding anything that depends on one. A laptop
+	// boots faster than its Wi-Fi associates, and everything downstream of here
+	// takes the absence of a network as a FACT about the world rather than as "not
+	// yet": the knowledge base keys on `default` instead of this network, the tun's
+	// route excludes are computed for no subnets at all, and the desync rung comes
+	// up with wan="" — all of it recorded on 2026-08-18, when the excludes then
+	// swallowed the office resolvers and the machine could not fetch well enough to
+	// be allowed to repair itself.
+	//
+	// Bounded, and it proceeds anyway when the deadline passes: a machine that is
+	// genuinely offline must still start, or the control socket never comes up and
+	// the UI cannot say why. The repair path covers that case now (reconcile
+	// regenerates from the fleet already in force rather than skipping), so waiting
+	// is an optimisation of the common case, not the only defence.
+	c.waitForNetwork(ctx, networkWaitAtStart)
 	c.resolveKBPath(ctx)
 	// A rich /status wants the current network in every mode; resolveKBPath only
 	// fingerprints it in per-network (KBDir) mode, so detect once here otherwise.
@@ -1293,6 +1308,59 @@ func (c *Core) observeLoop(ctx context.Context) {
 			c.obsMu.Lock()
 			c.obsSnap = s
 			c.obsMu.Unlock()
+		}
+	}
+}
+
+// networkWaitAtStart bounds how long Start waits for a default route to exist.
+// The cost of proceeding too early is a whole session on a config built for the
+// wrong world; the cost of waiting is a delayed start on a machine that has
+// nothing to route yet anyway. So: generous, but with margin.
+//
+// 60s and not 90: the unit's TimeoutStartUSec is 90s, and while Type=simple means
+// systemd counts the service started at exec and does not enforce that on us
+// today, sitting exactly on another component's deadline is how a Type change
+// three months from now turns into a start that is killed halfway. Wi-Fi
+// association after a cold boot is seconds, not a minute — this is already far
+// past the case it covers.
+const networkWaitAtStart = 60 * time.Second
+
+// waitForNetwork blocks until a default route exists, the deadline passes, or the
+// context is cancelled. It reports what it settled on.
+//
+// It polls rather than subscribing to link events on purpose: netid.Detect is the
+// same reader every other part of this code uses to answer "which network is
+// this", so waiting on it guarantees that whatever Start sees next is what the
+// detector will keep saying. A second source of truth about the network is how
+// two components end up disagreeing.
+func (c *Core) waitForNetwork(ctx context.Context, within time.Duration) netid.Network {
+	deadline := time.NewTimer(within)
+	defer deadline.Stop()
+	waited := false
+	for {
+		net := c.detect(ctx)
+		if net.Id != netid.Fallback {
+			if waited {
+				c.log.Info("network is up — starting", "network", net.Id, "iface", net.IFace, "gateway", net.Gateway)
+			}
+			return net
+		}
+		if !waited {
+			c.log.Info("no default route yet — waiting for the network before building a config for it",
+				"up_to", within.String())
+			waited = true
+		}
+		select {
+		case <-ctx.Done():
+			return net
+		case <-deadline.C:
+			// Not an error: offline is a legitimate state, and the client still has to
+			// come up so a UI can attach. Said loudly because everything built from here
+			// describes a machine with no egress, and the roam has to repair it later.
+			c.log.Warn("still no default route — starting anyway; the config will be built for a machine with no egress and repaired when a network appears",
+				"waited", within.String())
+			return net
+		case <-time.After(2 * time.Second):
 		}
 	}
 }
