@@ -40,7 +40,6 @@ import (
 	"github.com/strace-me/lotsman/pkg/audit"
 	"github.com/strace-me/lotsman/pkg/balancer"
 	"github.com/strace-me/lotsman/pkg/brain"
-	"github.com/strace-me/lotsman/pkg/burstprobe"
 	"github.com/strace-me/lotsman/pkg/bypasslearn"
 	"github.com/strace-me/lotsman/pkg/capture"
 	"github.com/strace-me/lotsman/pkg/config"
@@ -141,7 +140,7 @@ func main() {
 		prospectQNum       = flag.Int("prospect-qnum", 201, "NFQUEUE the sandbox engine binds; must differ from the production queue")
 		prospectInterval   = flag.Duration("prospect-interval", 30*time.Minute, "how often a prospecting pass is CONSIDERED; the gate and the idle check decide whether one actually runs")
 		nodeGoodputKBps    = flag.Float64("node-goodput", 1, "measure node THROUGHPUT while ranking, not just latency (a frozen node answers fast and carries nothing). 0 disables; probes are skipped whenever a live UDP session is on the link.")
-		nodeGoodputURL     = flag.String("node-goodput-url", "http://www.gstatic.com/generate_204", "URL the throughput measurement pulls from")
+		nodeGoodputURL     = flag.String("node-goodput-url", "", "DEPRECATED, ignored: throughput is now OBSERVED per exit from the connection table instead of pulled from a URL (LOT-67). Still accepted so an init script passing it does not fail to start.")
 		flowsealCanaryQNum = flag.Int("flowseal-canary-qnum", 299, "NFQUEUE the bundle canary binds; must be one no nft rule diverts to, so the canary sees no traffic")
 		flowsealUpdate     = flag.Bool("flowseal-update", true, "auto-install new Flowseal releases. This has no off switch before now, and an unvalidated bundle swap has stopped the desync engine three times; set false to pin the bundle and update it by hand.")
 		reconcileSB        = flag.Bool("reconcile", false, "daemon owns the sing-box config: regenerate from config+subs and apply on structural change (needs -singbox-config + a config with subscriptions; -dry-run gates whether it actually applies)")
@@ -278,6 +277,19 @@ func main() {
 	// recommendation per service. Brain's applier is the SINGLE writer of the
 	// data plane and reads this recommendation only when it applies a VPN step,
 	// so the ranker can never override a service Brain placed on zapret/direct.
+	// The passive per-exit carry, published by the observe pass below and read by
+	// the ranker's throughput half. Declared here because the two are ~500 lines
+	// apart and the ranker is built first; the zero snapshot simply yields no
+	// verdict until the first pass lands.
+	var eyeMu sync.Mutex
+	var eyeSnap observe.Snapshot
+	nodeCarry := func(node string) (float64, bool) {
+		eyeMu.Lock()
+		snap := eyeSnap
+		eyeMu.Unlock()
+		return snap.NodeGoodputKBps(node, *observeInterval)
+	}
+
 	var ranker *noderank.Ranker
 	var bestNode func(string) string
 	if *nodeRank && conf != nil {
@@ -288,23 +300,33 @@ func main() {
 		// the deadest exit in the pool. This is the measurement that tells them
 		// apart — and it is the honest, in-scope half of the exit-IP question:
 		// we do not classify addresses, we measure nodes.
-		if *nodeGoodputKBps > 0 {
-			ranker.Goodput = func(ctx context.Context, node string) (float64, bool) {
-				// Never mid-session. The probe pulls real bytes down the uplink
-				// it is measuring, so running it while someone is playing both
-				// spoils the game and mismeasures the path.
-				if dataplane.RealtimeActive(ctx, clash) {
-					return 0, false
-				}
-				q := burstprobe.Probe(ctx, dataplane.BurstClient(*probeProxy, 15*time.Second),
-					[]string{*nodeGoodputURL}, 64<<10, 1)
-				if q.Samples == 0 {
-					return 0, false // measurement did not happen; no verdict
-				}
-				return q.GoodputKBps, true
+		if *nodeGoodputKBps > 0 && *observeInterval > 0 {
+			// This used to pull 64 KiB through the probe proxy and IGNORE its own
+			// `node` argument, so every candidate of a pass got one number — the
+			// throughput of whatever path was active — and an identical value cannot
+			// rank anything (LOT-67). It also cost real bytes on the uplink it was
+			// measuring, which is why it had to refuse mid-session.
+			//
+			// The replacement is an observation, not a probe: bytes seen crossing
+			// each exit in the connection table. Per-node by construction, free, and
+			// with no session to spoil.
+			ranker.Goodput = func(_ context.Context, node string) (float64, bool) {
+				return nodeCarry(node)
 			}
-			log.Info("node ranking measures throughput, not just latency",
-				"min_kbps_note", "advisory only", "url", *nodeGoodputURL)
+			// Say what it does and — since neither the floor nor the balancer weight
+			// consumes it yet — what it does NOT do. A log line that reads like a
+			// feature is on is how this defect survived a release (principle 4).
+			log.Info("node ranking: throughput is observed per exit, not probed",
+				"source", "clash /connections byte deltas", "window", observeInterval.String(),
+				"acts_on_ranking", false,
+				"note", "visible in the ranker log; no floor and no balancer weight consumes it yet — docs/DESIGN-node-selection.md")
+			if *nodeGoodputURL != "" {
+				log.Warn("-node-goodput-url is ignored: throughput is observed per exit now, not pulled from a URL",
+					"was", *nodeGoodputURL)
+			}
+		} else if *nodeGoodputKBps > 0 {
+			log.Warn("node ranking: throughput measurement is OFF because -observe-interval is 0; ranking is latency-only",
+				"fix", "set -observe-interval > 0")
 		}
 		bestNode = ranker.Best
 	}
@@ -829,8 +851,8 @@ func main() {
 	if *observeInterval > 0 {
 		op := periodic.New(log)
 		eye := observe.New(clashConnSource{clash}, reg)
-		var eyeMu sync.Mutex
-		var eyeSnap observe.Snapshot
+		// eyeMu/eyeSnap are declared next to the ranker above: its throughput half
+		// reads the same snapshot this pass publishes, so there is exactly one.
 		mc.SetObserveSnapshot(func() observe.Snapshot {
 			eyeMu.Lock()
 			defer eyeMu.Unlock()

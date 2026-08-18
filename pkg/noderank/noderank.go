@@ -21,6 +21,7 @@ import (
 	"context"
 	"log/slog"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -76,6 +77,11 @@ type nodeHealth struct {
 	consecFail int
 	lastGood   quality.Quality
 	hasGood    bool
+	// Last measured carry, kept separately from lastGood because it is recorded
+	// even for a node the probe judged unhealthy — an exit that answers and moves
+	// nothing is precisely the case worth showing, and lastGood would drop it.
+	lastCarry  float64
+	carryKnown bool
 }
 
 // downAfter is how many consecutive failed probes mark a node DOWN (evicted). A
@@ -198,6 +204,12 @@ func (r *Ranker) observe(tag string, q quality.Quality) (eff quality.Quality, he
 		h = &nodeHealth{}
 		r.health[tag] = h
 	}
+	// Record the carry before any verdict below can return early: this is the one
+	// number that distinguishes a working exit from a frozen one, and it must be
+	// visible even — especially — for the node that is about to be demoted.
+	if q.GoodputKnown {
+		h.lastCarry, h.carryKnown = q.GoodputKBps, true
+	}
 	// An exit that ANSWERS but does not CARRY is down, and it is down on the
 	// observation rather than after a streak: this is the TSPU volume freeze, where
 	// a node replies to a delay probe in 40ms and then moves nothing. Latency,
@@ -227,6 +239,12 @@ type NodeHealth struct {
 	Node       string
 	State      string // "healthy" | "degraded" | "down"
 	ConsecFail int
+	// GoodputKBps is what this exit was last MEASURED carrying, and CarryKnown
+	// says whether it was measured at all. The two are separate because "not
+	// measured" and "measured as nothing" both render as 0 and mean opposite
+	// things — the second is a frozen exit, the first is an idle one (LOT-67).
+	GoodputKBps float64
+	CarryKnown  bool
 }
 
 // HealthSnapshot returns the current per-node health noderank already tracks —
@@ -245,7 +263,8 @@ func (r *Ranker) HealthSnapshot() []NodeHealth {
 		case h.consecFail > 0:
 			state = "degraded"
 		}
-		out = append(out, NodeHealth{Node: tag, State: state, ConsecFail: h.consecFail})
+		out = append(out, NodeHealth{Node: tag, State: state, ConsecFail: h.consecFail,
+			GoodputKBps: h.lastCarry, CarryKnown: h.carryKnown})
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Node < out[j].Node })
 	return out
@@ -381,7 +400,30 @@ func (r *Ranker) Pick(ctx context.Context, svc Service, cands []Candidate) (stri
 	// so it can never override a zapret/direct decision.
 	r.setAdvice(svc.Name, best.ID)
 	r.log.Info("noderank: recommend node", "service", svc.Name, "selector", svc.Selector,
-		"now", info.Now, "best", best.ID, "p95ms", best.Q.P95ms, "loss", best.Q.Loss)
+		"now", info.Now, "best", best.ID, "p95ms", best.Q.P95ms, "loss", best.Q.Loss,
+		"kbps", carryOf(best.Q))
+
+	// The ranking is still by latency, so say when the evidence disagrees with it.
+	// On 2026-08-12 the pool grew from 52 to 104 nodes, url-test re-voted on delay,
+	// and youtube/github landed on an exit that answered in 103ms and broke every
+	// TLS handshake — with nothing in any log to contradict the healthy-looking
+	// numbers. This is that missing line. It states a fact and changes no decision:
+	// promoting on it needs a challenger canary, not a louder log
+	// (docs/DESIGN-node-selection.md).
+	if best.Q.GoodputKnown {
+		for _, p := range pool {
+			if !p.cand.Q.GoodputKnown || p.cand.ID == best.ID {
+				continue
+			}
+			if p.cand.Q.GoodputKBps > best.Q.GoodputKBps*carryDisagreement {
+				r.log.Warn("noderank: the chosen exit is not the one carrying most",
+					"service", svc.Name, "chosen", best.ID, "chosen_kbps", best.Q.GoodputKBps,
+					"carrying_most", p.cand.ID, "carrying_most_kbps", p.cand.Q.GoodputKBps,
+					"why", "ranking is by latency; measured volume does not promote yet (LOT-67)")
+				break
+			}
+		}
+	}
 	return best.ID, nil
 }
 
@@ -405,6 +447,22 @@ func (r *Ranker) screen(ctx context.Context, node string) bool {
 // past the first few tens of kilobytes, so a ranking built on RTT crowns the
 // deadest exit in the pool. Goodput, when the caller supplies a way to measure
 // it, is what tells those apart.
+// carryDisagreement is how many times more an unchosen exit must be carrying
+// before the log says the ranking and the evidence disagree. An order of
+// magnitude: smaller gaps are ordinary (the exits carry different services), and
+// a line that fires on noise is a line nobody reads.
+const carryDisagreement = 10
+
+// carryOf renders a node's measured carry for a log line, distinguishing "not
+// measured" from "measured as nothing" — the two read identically as 0 and mean
+// opposite things.
+func carryOf(q quality.Quality) string {
+	if !q.GoodputKnown {
+		return "unmeasured"
+	}
+	return strconv.FormatFloat(q.GoodputKBps, 'f', 1, 64)
+}
+
 func (r *Ranker) probe(ctx context.Context, node, testURL string) quality.Quality {
 	rtts := make([]float64, 0, r.samples)
 	for i := 0; i < r.samples; i++ {

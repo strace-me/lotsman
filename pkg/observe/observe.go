@@ -17,6 +17,7 @@ import (
 	"net"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/strace-me/lotsman/pkg/registry"
 )
@@ -179,6 +180,29 @@ func (s Snapshot) HasLiveRealtimeUDP() (string, bool) {
 		}
 	}
 	return "", false
+}
+
+// NodeGoodputKBps reports what one exit CARRIED over the pass this snapshot
+// covers, in KiB/s, or ok=false when there is no verdict to give. window is the
+// observe interval the deltas in Nodes were accumulated over.
+//
+// This exists so the two composition roots stop each having their own arithmetic
+// for the same question (LOT-65 is what that habit costs). It is also the honest
+// half of node ranking: the delay probe is per-node, but the daemon's throughput
+// half pulled 64 KiB through whatever path the probe proxy happened to take and
+// handed EVERY candidate of a pass the same number, which cannot rank anything
+// (LOT-67). Bytes observed crossing a specific exit are per-node by construction.
+//
+// ok=false for an exit nothing went through is deliberate: no verdict, rather
+// than a zero that would rank an idle exit below a busy one. Distinguishing
+// "carried little because nobody asked" from "carried little because it is
+// throttled" needs Flows, not Bytes — see the callers.
+func (s Snapshot) NodeGoodputKBps(node string, window time.Duration) (float64, bool) {
+	nc, ok := s.Nodes[node]
+	if !ok || nc.Bytes <= 0 || window <= 0 {
+		return 0, false
+	}
+	return float64(nc.Bytes) / 1024 / window.Seconds(), true
 }
 
 // matcher precompiles a service's match inputs: its route-selector target, plus

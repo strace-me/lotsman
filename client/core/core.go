@@ -1327,15 +1327,7 @@ func (c *Core) nodeGoodputKBps(node string) (float64, bool) {
 	c.obsMu.Lock()
 	snap := c.obsSnap
 	c.obsMu.Unlock()
-	nc, ok := snap.Nodes[node]
-	if !ok || nc.Bytes <= 0 {
-		return 0, false
-	}
-	secs := c.opts.Interval.Seconds()
-	if secs <= 0 {
-		return 0, false
-	}
-	return float64(nc.Bytes) / 1024 / secs, true
+	return snap.NodeGoodputKBps(node, c.opts.Interval)
 }
 
 func (c *Core) observeLoop(ctx context.Context) {
