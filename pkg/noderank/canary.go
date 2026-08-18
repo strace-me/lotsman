@@ -154,22 +154,22 @@ func (r *Ranker) promote(service, latencyBest, incumbent string, shortlist []str
 	// passive path could never safely apply, because passive data cannot tell an idle
 	// exit from a throttled one. A canary pulled a volume we chose, so a low number
 	// is about the path.
-	if r.MinGoodputKBps > 0 {
-		if kbps, ok := r.measuredCarry(latencyBest, now); ok && kbps < r.MinGoodputKBps {
+	if r.CanaryFloorKBps > 0 {
+		if kbps, ok := r.measuredCarry(latencyBest, now); ok && kbps < r.CanaryFloorKBps {
 			for _, tag := range shortlist {
 				if tag == latencyBest {
 					continue
 				}
 				alt, ok := r.measuredCarry(tag, now)
-				if ok && alt >= r.MinGoodputKBps {
+				if ok && alt >= r.CanaryFloorKBps {
 					r.log.Warn("noderank: the fastest exit carries nothing — advising a measured one instead",
 						"service", service, "was", latencyBest, "was_kbps", kbps,
-						"now", tag, "now_kbps", alt, "floor", r.MinGoodputKBps)
+						"now", tag, "now_kbps", alt, "floor", r.CanaryFloorKBps)
 					return tag, true
 				}
 			}
 			r.log.Warn("noderank: the fastest exit carries nothing and no measured alternative exists",
-				"service", service, "node", latencyBest, "kbps", kbps, "floor", r.MinGoodputKBps)
+				"service", service, "node", latencyBest, "kbps", kbps, "floor", r.CanaryFloorKBps)
 		}
 	}
 

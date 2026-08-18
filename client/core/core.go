@@ -646,19 +646,27 @@ func (c *Core) buildLoop() error {
 		c.ranker.Goodput = func(_ context.Context, node string) (float64, bool) {
 			return c.nodeGoodputKBps(node)
 		}
-		// The carry FLOOR is deliberately left at 0 — i.e. off — even though the
-		// mechanism exists and is tested (Ranker.MinGoodputKBps). Passive observation
-		// cannot tell "carried little because the service was idle" from "carried
-		// little because the exit is throttled", and demoting on the first reading is
-		// exactly the mistake LOT-52 cost nine minutes of false verdicts to learn:
-		// social was declared TSPU-throttled while Instagram served 392 KiB, because
-		// an idle-looking measurement was read as a verdict about the path.
+		// The active half: pull a volume WE chose through the exit itself. Passive
+		// carry measures demand — an exit nobody asked much of is not a slow exit —
+		// so it can never justify promoting one node over another. This can.
+		c.ranker.Canary = c.canaryNodeKBps
+
+		// And with a canary the carry FLOOR becomes admissible, which it was not
+		// before. Passive observation cannot tell "carried little because the service
+		// was idle" from "carried little because the exit is throttled", and demoting
+		// on that reading is the mistake LOT-52 cost nine minutes of false verdicts to
+		// learn: social was declared TSPU-throttled while Instagram served 392 KiB.
+		// A canary pulled a volume we asked for, so a low number is about the path.
 		//
-		// It is switched on by the measurement, not by a decision: once a challenger
-		// canary pulls a known volume through a chosen exit
-		// (docs/DESIGN-node-selection.md), a low number means the path and the floor
-		// becomes admissible. Until then the ranker keeps hysteresis, stickiness and
-		// country exclusion, and ranks by latency — which is what it did anyway.
+		// The floor only ever fires on a CANARY sample (see Ranker.promote), never on
+		// the passive one, so wiring it here cannot resurrect that mistake.
+		// CanaryFloorKBps, NOT MinGoodputKBps: the latter is the floor for the
+		// PASSIVE hook above, and switching that on would demote an exit for the
+		// crime of being idle. Reuses the desync canary's threshold — it is the same
+		// question ("did real volume get through") asked of a different layer.
+		if c.opts.CanaryGoodputKBps > 0 {
+			c.ranker.CanaryFloorKBps = c.opts.CanaryGoodputKBps
+		}
 		vpnEx = vpnEx.WithBestNode(c.ranker.Best)
 	}
 	execs := []executor.StrategyExecutor{

@@ -239,14 +239,11 @@ func (v *VPN) target(service, pool string) string {
 // it back. The cost is ~11 requests per tick to 127.0.0.1, which is not worth
 // trading a self-healing property for.
 //
-// The second reason holds only where a ranker is wired: target is recomputed from
+// The second reason holds wherever a ranker is wired: target is recomputed from
 // bestNode, whose advice moves as it measures, so caching would freeze a service
-// on the node it first got. On the DESKTOP CLIENT that does not apply today —
-// WithBestNode is called from cmd/lotsmand and nowhere else, so bestNode is nil
-// there and the target is always the pool. That is its own defect, not a reason
-// to cache: it means the laptop picks exits by url-test latency alone, which
-// under a TSPU volume freeze crowns the node that answers fastest and carries
-// nothing.
+// on the node it first got. Both roots wire it now — the client since 71bcded —
+// and since the ranker gained a canary its advice moves on MEASURED capacity, not
+// only on latency, which is exactly the advice that must not be cached.
 func (v *VPN) Enable(ctx context.Context, service, strategyID string) error {
 	selector := registry.SelectorTag(service)
 	pool := strategyID // VPN strategy IDs name the pool to select

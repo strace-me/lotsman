@@ -124,16 +124,27 @@ type Ranker struct {
 	// and a stale ranking for one interval is cheaper than a spoiled game.
 	Goodput func(ctx context.Context, node string) (kbps float64, ok bool)
 
-	// MinGoodputKBps demotes an exit MEASURED carrying less than this. A floor, not
-	// a weight: an exit that carries well earns no bonus, because only the exit
-	// currently in use has passive evidence and rewarding it would make the
-	// incumbent unbeatable by construction. Promotion on measured throughput needs
-	// a canary for the challenger — docs/DESIGN-node-selection.md.
+	// MinGoodputKBps is the floor applied to whatever the Goodput hook reports.
+	//
+	// KEEP IT 0 WHEN Goodput IS PASSIVE. Passive carry measures DEMAND: it cannot
+	// tell "carried little because nobody asked" from "carried little because the
+	// exit is throttled", and demoting on that reading is exactly the mistake LOT-52
+	// cost nine minutes of false verdicts to learn — social was declared
+	// TSPU-throttled while Instagram was serving it 392 KiB. The floor for measured
+	// CAPACITY is CanaryFloorKBps, which acts only on canary samples.
 	//
 	// 0 disables it. A measurement counts only when GoodputKnown and not Short:
 	// youtube's probe target is a 204 with no body, and reading its 0 KiB/s as a
 	// verdict once demoted every strategy ever tried.
 	MinGoodputKBps float64
+
+	// CanaryFloorKBps demotes an exit whose CANARY carried less than this — a
+	// volume we asked for, through a selector we aimed, so a low number is about
+	// the path and not about how busy the operator was. Separate from
+	// MinGoodputKBps on purpose: same shape of number, opposite trustworthiness,
+	// and one knob covering both is how the passive one would get switched on by
+	// accident. 0 disables it.
+	CanaryFloorKBps float64
 
 	// SwitchMargin is the minimum score advantage (in [0,1]) a new top node
 	// must have over the currently-advised node before advice flips. While the
