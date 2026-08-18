@@ -121,11 +121,20 @@ func (c *Core) newReconciler() *reconcile.Reconciler {
 		// network it was built on, and the subnets it must keep out of the tunnel are
 		// whichever ones the machine is attached to now.
 		TunExcludes: tunExcludes,
+		// The fleet this machine last ran on. It turns a degraded fetch from "skip the
+		// whole pass" into "regenerate with what is already in force", which matters
+		// because the pass also carries facts about the LOCAL NETWORK — the tun's
+		// route excludes right above. On 2026-08-18 a boot before Wi-Fi left those
+		// computed for no network, the roam's repair was refused over a failed fetch
+		// it had nothing to do with, and the resulting DNS breakage made every later
+		// fetch fail too: the machine could not fix itself because it was broken.
+		LastGoodNodes: c.loadFleet,
 		// Whoever changes the fleet reports it (LOT-66). The counters behind /status
 		// and /metrics used to be written only by Core.generate, which this path
 		// deliberately bypasses — so a subscription added at runtime landed in the
 		// live config while the interface went on showing the count from startup, and
 		// read as a subscription that had not loaded.
+		//
 		// Under stateMu because this one runs on the refresh goroutine while the
 		// control socket serves /status from another; the startup writer does not
 		// need it and must not take it (Reload holds stateMu for its whole body).

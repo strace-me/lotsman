@@ -799,3 +799,74 @@ func TestOnLiveStaysSilentOnDryRun(t *testing.T) {
 		t.Errorf("dry-run reported %d live sets; it applied none", called)
 	}
 }
+
+// 2026-08-18, the ThinkPad: booted before the Wi-Fi associated, so the tun came up
+// with route excludes computed for NO network. Thirty-eight seconds later the roam
+// detected the real network and regenerated the config for it — and the apply was
+// REFUSED, because the subscription fetch had failed in the same tick and the node
+// set read as degraded. The excludes are a fact about the local network and have
+// nothing to do with the node list, but they ride in the same config. Broken
+// excludes broke DNS, broken DNS broke the next fetch, and the machine could no
+// longer fix itself because it was broken.
+func TestADegradedFetchRegeneratesWithTheFleetAlreadyInForce(t *testing.T) {
+	run := &fakeRunner{}
+	good := []subscription.Node{node(t), node(t), node(t), node(t)}
+	// The fetch collapses to one node AND errors — the shape of a failed DNS lookup.
+	r, cfgPath := testReconciler(t, run, fakeLoader{
+		nodes: []subscription.Node{node(t)},
+		errs:  []error{errors.New("lookup sub.example: no such host")},
+	}, false)
+	r.FetchRetries, r.FetchBackoff = 1, time.Millisecond
+	r.SetBaseline(len(good))
+	r.LastGoodNodes = func() []subscription.Node { return good }
+
+	if err := r.Reconcile(context.Background()); err != nil {
+		t.Fatalf("the pass must apply using the in-force fleet, got: %v", err)
+	}
+	if _, err := os.Stat(cfgPath); err != nil {
+		t.Fatalf("nothing was written, so the stale excludes would have survived: %v", err)
+	}
+}
+
+// Without a fleet to substitute, the old behaviour must stand: skipping is still
+// right when there is nothing better to regenerate from.
+func TestADegradedFetchStillSkipsWithNothingToSubstitute(t *testing.T) {
+	run := &fakeRunner{}
+	r, cfgPath := testReconciler(t, run, fakeLoader{
+		nodes: []subscription.Node{node(t)},
+		errs:  []error{errors.New("lookup sub.example: no such host")},
+	}, false)
+	r.FetchRetries, r.FetchBackoff = 1, time.Millisecond
+	r.SetBaseline(4)
+
+	if err := r.Reconcile(context.Background()); !errors.Is(err, ErrNotApplied) {
+		t.Fatalf("want ErrNotApplied, got %v", err)
+	}
+	if _, err := os.Stat(cfgPath); !os.IsNotExist(err) {
+		t.Error("a skipped pass must not write a config")
+	}
+}
+
+// And it must never DOWNGRADE: a remembered set smaller than the fetch is not a
+// better answer, it is an older one.
+func TestTheInForceFleetIsNotUsedWhenItIsSmallerThanTheFetch(t *testing.T) {
+	run := &fakeRunner{}
+	r, _ := testReconciler(t, run, fakeLoader{
+		nodes: []subscription.Node{node(t), node(t), node(t)},
+		errs:  []error{errors.New("one mirror failed")},
+	}, false)
+	r.FetchRetries, r.FetchBackoff = 1, time.Millisecond
+	r.SetBaseline(4)
+	used := 0
+	r.LastGoodNodes = func() []subscription.Node { used++; return []subscription.Node{node(t)} }
+
+	_ = r.Reconcile(context.Background())
+	if used == 0 {
+		t.Skip("hook not consulted on this path")
+	}
+	// Consulted is fine; substituting a smaller set is not. The pass must have
+	// skipped rather than regenerated from one node.
+	if _, err := os.Stat(r.ConfigPath); err == nil {
+		t.Error("regenerated from a SMALLER remembered set — that is a downgrade, not a repair")
+	}
+}

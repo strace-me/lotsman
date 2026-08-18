@@ -107,6 +107,25 @@ type Reconciler struct {
 	// whoever changed it.
 	OnLive func(nodes []subscription.Node)
 
+	// LastGoodNodes returns the node set this machine last ran on, or nil. It turns
+	// a degraded fetch from "skip the whole pass" into "regenerate with the fleet we
+	// already had", and that distinction cost the owner a working laptop.
+	//
+	// 2026-08-18: booted before the Wi-Fi associated, so the tun came up with route
+	// excludes computed for NO network. The roam detected the real network 38
+	// seconds later and regenerated the config for it — and the apply was refused,
+	// because the subscription fetch had failed in the same tick and the node set
+	// read as degraded. The excludes are a fact about the LOCAL NETWORK and have
+	// nothing to do with the node list, but they travel in the same config, so a
+	// guard protecting the node list blocked a repair that had nothing to do with
+	// it. Broken excludes then broke DNS, which broke the next fetch: the machine
+	// could not fix itself because it was broken.
+	//
+	// Substituting the last-good set cannot churn anything — it is by definition the
+	// set already in force, so the generated config differs only in the parts the
+	// fetch was never about.
+	LastGoodNodes func() []subscription.Node
+
 	// Baseline persists lastNodes across restarts so the anti-churn guard works on
 	// the very first reconcile after a restart (otherwise lastNodes resets to 0 and
 	// a degraded startup fetch is applied wholesale — LOT-29). nil = in-memory only.
@@ -194,6 +213,26 @@ func (r *Reconciler) Reconcile(ctx context.Context) error {
 			nodes, errs = r.Loader.Load(ctx, r.Subs)
 			for _, e := range errs {
 				r.Log.Warn("reconcile: subscription load issue", "err", e)
+			}
+		}
+		if r.degraded(nodes, errs) {
+			// Before skipping: regenerate with the set already in force. Everything in
+			// the config that does NOT come from the subscription — the tun's route
+			// excludes above all — is a fact about the machine's current network, and
+			// refusing the whole pass leaves those stale. That is how a laptop that
+			// booted before its Wi-Fi kept excludes computed for no network at all,
+			// broke its own DNS with them, and could then never fetch well enough to be
+			// allowed to fix itself.
+			//
+			// This is not a weakened guard. The substituted set is the one already
+			// running, so the node half of the config comes out identical and there is
+			// nothing to churn — which is precisely what the guard exists to prevent.
+			if r.LastGoodNodes != nil {
+				if prev := r.LastGoodNodes(); len(prev) > len(nodes) {
+					r.Log.Warn("reconcile: fetch degraded — regenerating with the fleet already in force, so the rest of the config is not left stale",
+						"fetched", len(nodes), "using", len(prev), "fetch_errs", len(errs))
+					nodes = prev
+				}
 			}
 		}
 		if r.degraded(nodes, errs) {
