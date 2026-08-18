@@ -267,6 +267,25 @@ func main() {
 	}
 
 	if err := c.Start(ctx); err != nil {
+		// Being stopped mid-startup is not a start failure (LOT-71). The config check
+		// runs as a subprocess under ctx, so a SIGTERM during it surfaces as
+		// "sing-box check: context canceled" — indistinguishable, from the outside,
+		// from a config sing-box rejected. On 2026-08-18 that cost half an hour of
+		// looking at a config that was fine, and it left the unit sitting in `failed`
+		// after an ordinary `systemctl stop`.
+		//
+		// Test ctx, not the error: the cancellation may be wrapped by any layer it
+		// passed through, and errors.Is on a wrapped-by-fmt chain only works if every
+		// layer used %w. The context itself is unambiguous.
+		if ctx.Err() != nil {
+			log.Info("stopped during startup", "reason", ctx.Err())
+			// Tear down whatever Start DID manage to bring up before it was cancelled —
+			// we are returning normally rather than exiting, so nothing else will.
+			if err := c.Stop(); err != nil {
+				log.Warn("stop", "err", err)
+			}
+			return
+		}
 		// Hold the socket open for a moment before giving up, so a UI that is attached
 		// (or attaches now) can read the failure and push a corrected config, which
 		// re-execs us into a clean process — Core.Start is not re-entrant, so retrying

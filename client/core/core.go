@@ -293,6 +293,49 @@ type Core struct {
 	lifeCancel context.CancelFunc
 	cancel     context.CancelFunc
 	wg         sync.WaitGroup
+	// inflight names the background runners that have not returned yet, so a
+	// shutdown that overruns its budget can say WHO held it up instead of leaving
+	// the next person to re-derive it from a goroutine dump they cannot take on a
+	// machine that has already been SIGKILLed (LOT-70).
+	inflight sync.Map // name -> struct{}
+}
+
+// namedRunner is a background loop plus the name it answers to in the shutdown
+// log. The name is the only reason this type exists: an anonymous closure that
+// fails to exit is indistinguishable from any other.
+type namedRunner struct {
+	name string
+	fn   func(context.Context)
+}
+
+const (
+	// shutdownRunners bounds the wait for the background loops to notice the cancel,
+	// and shutdownTeardown bounds everything that has to happen after them. They are
+	// sized to fit well inside systemd's default 90s stop timer with room to spare —
+	// the goal is not to use the budget but to never reach it, because reaching it
+	// means SIGKILL and no cleanup at all (LOT-70).
+	shutdownRunners  = 2 * time.Second
+	shutdownTeardown = 3 * time.Second
+)
+
+// waitBounded waits for wg for at most d, reporting whether it finished. It leaks
+// one goroutine per timed-out call by design: the alternative is blocking on the
+// very wait we are trying to escape, and a process that has begun shutting down is
+// about to exit anyway.
+func waitBounded(wg *sync.WaitGroup, d time.Duration) bool {
+	if d <= 0 {
+		d = 0
+	}
+	done := make(chan struct{})
+	go func() { wg.Wait(); close(done) }()
+	t := time.NewTimer(d)
+	defer t.Stop()
+	select {
+	case <-done:
+		return true
+	case <-t.C:
+		return false
+	}
 }
 
 // New builds a client Core from a loaded config and a platform ProxyCore.
@@ -722,7 +765,9 @@ func (c *Core) buildLoop() error {
 	eng.SetActivityOracle(c.CarryingReason)
 	c.eng = eng
 
-	runners := []func(context.Context){c.brain.Run, ap.Run, eng.Run, c.superviseBox}
+	runners := []namedRunner{
+		{"brain", c.brain.Run}, {"applier", ap.Run}, {"prober", eng.Run}, {"supervise-box", c.superviseBox},
+	}
 	// escalation-v2 DETECT (E-1) on the client, which had none: the daemon has run
 	// this since June and the laptop walked its chain one rung at a time in both
 	// directions instead (LOT-63). Probing every step out-of-band answers "which
@@ -739,7 +784,7 @@ func (c *Core) buildLoop() error {
 			MaxParallel: 2,
 		}
 		c.pathHealth = det
-		runners = append(runners, func(rctx context.Context) { c.pathHealthLoop(rctx, det) })
+		runners = append(runners, namedRunner{"path-health", func(rctx context.Context) { c.pathHealthLoop(rctx, det) }})
 		if c.opts.PathHealthAct {
 			c.brain.SetPathOracle(det)
 			c.log.Info("path-health ACT: the brain jumps straight to the best working tier", "interval", pathHealthInterval.String())
@@ -750,33 +795,35 @@ func (c *Core) buildLoop() error {
 
 	if c.opts.RefreshEvery > 0 && c.opts.SingboxConfig != "" {
 		rc := c.newReconciler()
-		runners = append(runners, func(rctx context.Context) { c.refreshLoop(rctx, rc, c.opts.RefreshEvery) })
+		runners = append(runners, namedRunner{"refresh", func(rctx context.Context) { c.refreshLoop(rctx, rc, c.opts.RefreshEvery) }})
 	}
-	runners = append(runners, c.observeLoop, c.kbDecayLoop)
+	runners = append(runners, namedRunner{"observe", c.observeLoop}, namedRunner{"kb-decay", c.kbDecayLoop})
 	if c.ranker != nil {
-		runners = append(runners, c.noderankLoop)
+		runners = append(runners, namedRunner{"noderank", c.noderankLoop})
 	}
 	if c.opts.EngineHealth {
-		runners = append(runners, c.engineHealthLoop)
+		runners = append(runners, namedRunner{"engine-health", c.engineHealthLoop})
 		c.log.Info("engine-health: the desync engine is watched and restarted when a rule expects it and it is gone",
 			"interval", desyncHealthInterval.String())
 	}
 	if len(c.conf.Hostlists) > 0 {
-		runners = append(runners, c.hostlistLoop)
+		runners = append(runners, namedRunner{"hostlist", c.hostlistLoop})
 	}
 	if c.zapExec != nil {
-		runners = append(runners, c.desyncReconcileLoop)
+		runners = append(runners, namedRunner{"desync-reconcile", c.desyncReconcileLoop})
 		c.announceVolumeSweep()
-		runners = append(runners, c.volumeLoop)
+		runners = append(runners, namedRunner{"volume", c.volumeLoop})
 	}
 	if c.opts.KBDir != "" {
-		runners = append(runners, c.roamLoop)
+		runners = append(runners, namedRunner{"roam", c.roamLoop})
 	}
 	for _, run := range runners {
 		c.wg.Add(1)
-		go func(fn func(context.Context)) {
+		c.inflight.Store(run.name, struct{}{})
+		go func(r namedRunner) {
 			defer c.wg.Done()
-			fn(runCtx)
+			defer c.inflight.Delete(r.name)
+			r.fn(runCtx)
 		}(run)
 	}
 	return nil
@@ -1391,12 +1438,28 @@ func (c *Core) resolveKBPath(ctx context.Context) {
 }
 
 // Stop cancels the autonomy loop, stops sing-box, and persists the KB.
+//
+// Every wait here is BOUNDED, and that is the whole point (LOT-70). Shutdown used
+// to wait on the runners forever: one loop stuck in a network call meant systemd's
+// 90-second timer fired and SIGKILL took the process before ANY of the cleanup
+// below ran — the audit and fail logs lost their buffered tail (exactly the part
+// describing what happened just before the stop), the sandbox table went on
+// diverting marked packets to a queue with nobody behind it, and the candidate
+// nfqws survived to hold that queue against the next run. The cost of overrunning
+// the budget is one warning; the cost of waiting is losing the cleanup entirely.
+//
+// A runner that misses the budget is NAMED, so the next occurrence is a log line
+// rather than another investigation.
 func (c *Core) Stop() error {
+	deadline := time.Now().Add(shutdownRunners)
 	// Stop the DNS failover loop first so it cannot begin a Reload mid-shutdown; wait
 	// for any Reload it already started to finish before tearing the loop down.
 	if c.failoverCancel != nil {
 		c.failoverCancel()
-		c.failoverWg.Wait()
+		if !waitBounded(&c.failoverWg, time.Until(deadline)) {
+			c.log.Warn("shutdown: the DNS failover loop did not return in time, continuing without it",
+				"waited", shutdownRunners.String())
+		}
 		c.failoverCancel = nil
 	}
 
@@ -1406,12 +1469,30 @@ func (c *Core) Stop() error {
 	if cancel != nil {
 		cancel()
 	}
-	c.wg.Wait()
+	if !waitBounded(&c.wg, time.Until(deadline)) {
+		var stuck []string
+		c.inflight.Range(func(k, _ any) bool {
+			name, _ := k.(string)
+			stuck = append(stuck, name)
+			return true
+		})
+		sort.Strings(stuck)
+		// ERROR, not Warn: this is the defect, and it is the only place it is visible.
+		c.log.Error("shutdown: background runners ignored the cancel — tearing down anyway",
+			"stuck", strings.Join(stuck, ","), "waited", shutdownRunners.String())
+	}
+	// One deadline for everything below, not one per step: these are sequential, and
+	// a per-step timeout would let a bad shutdown add them up into the same overrun
+	// this function exists to prevent. Deliberately NOT the runners' context — that
+	// one is already cancelled, and the teardown is precisely the work that must
+	// still happen after the cancel.
+	tctx, tcancel := context.WithTimeout(context.Background(), shutdownTeardown)
+	defer tcancel()
 	// Before the production engine, and unconditionally: a leftover sandbox table
 	// keeps diverting marked packets to a queue with nobody on it, and an orphaned
 	// candidate engine holds that queue against the next run. Either way the next
 	// measurement would describe the wreckage rather than the strategy.
-	c.closeSandbox(context.Background())
+	c.closeSandbox(tctx)
 	// Flush the investigation logs before the process goes: a buffered tail lost on
 	// shutdown is exactly the part describing what happened just before it.
 	if c.auditFile != nil {
@@ -1426,7 +1507,7 @@ func (c *Core) Stop() error {
 		c.metricsSrv.Close()
 	}
 	if c.zap != nil {
-		if err := c.zap.Stop(context.Background()); err != nil {
+		if err := c.zap.Stop(tctx); err != nil {
 			c.log.Warn("nfqws stop", "err", err)
 		}
 	}
@@ -1437,7 +1518,7 @@ func (c *Core) Stop() error {
 			c.log.Warn("host-dns: restore on stop", "err", err)
 		}
 	}
-	_ = c.box.Stop(context.Background())
+	_ = c.box.Stop(tctx)
 	if c.kbFile != "" && c.kb != nil {
 		if err := c.kb.Save(c.kbFile); err != nil {
 			c.log.Warn("kb save failed", "path", c.kbFile, "err", err)
