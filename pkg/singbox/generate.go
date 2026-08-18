@@ -50,6 +50,13 @@ func PoolOptionsFrom(set *pools.Set) map[string]PoolOptions {
 	return out
 }
 
+// ProbeSelector is the outbound the canary steers. Exported because the ranker
+// has to name it over the Clash API, and a second copy of the string in the other
+// composition root is exactly how the two drift apart.
+const ProbeSelector = probeSelector
+
+const probeSelector = "sel-probe"
+
 // inbounds builds the inbound list: the tproxy that catches br-lan traffic, plus
 // an optional socks "probe-in" so the box can probe through its own LAN path
 // (matching the real R5S). A malformed SocksProbeListen is skipped, not fatal —
@@ -702,6 +709,36 @@ func Generate(services []registry.Service, devices []registry.Device, nodes []su
 	}
 	sort.Strings(poolTags) // deterministic order after the back-fill
 
+	// sel-probe: the CANARY's selector, and the reason node ranking can measure a
+	// node it is not currently using.
+	//
+	// The delay probe is per-node because Clash /proxies/{node}/delay takes the node
+	// as an argument. Throughput has no such API, so measuring it meant pulling bytes
+	// down whatever path was active — one number for every candidate, which cannot
+	// rank anything (LOT-67). This selector is the missing addressability: the ranker
+	// points it at ONE node and pulls a known volume through the probe-in inbound,
+	// so the number describes that node and nothing else.
+	//
+	// Every node is a member, not just a pool's: the point is to measure a candidate
+	// the service is NOT on. Emitted only alongside probe-in, since without that
+	// inbound nothing can reach it.
+	var probeTags []string
+	if opts.SocksProbeListen != "" {
+		for _, n := range nodes {
+			if t, ok := tagOf[n.ID]; ok {
+				probeTags = append(probeTags, t)
+			}
+		}
+		sort.Strings(probeTags)
+		if len(probeTags) > 0 {
+			outbounds = append(outbounds, outbound{
+				"type": "selector", "tag": probeSelector,
+				"outbounds": probeTags,
+				"default":   probeTags[0],
+			})
+		}
+	}
+
 	// Per-service selector + route rule. Order matters: sing-box route is
 	// first-match-wins, so emit by Priority (lower first), then name for a stable
 	// tie-break. Protective/specific rules (ru-direct, Priority<0) land before
@@ -725,6 +762,15 @@ func Generate(services []registry.Service, devices []registry.Device, nodes []su
 		routeRules = append(routeRules, map[string]any{"protocol": "dns", "action": "hijack-dns"})
 	}
 	routeRules = append(routeRules, map[string]any{"ip_is_private": true, "outbound": "direct"})
+
+	// Canary traffic is pinned to sel-probe and must never fall through to a service
+	// rule: the whole point is to measure the node the ranker chose, not the node the
+	// service is currently on. Before the device and service rules for that reason.
+	if len(probeTags) > 0 {
+		routeRules = append(routeRules, map[string]any{
+			"inbound": []string{"probe-in"}, "outbound": probeSelector,
+		})
+	}
 
 	// Per-device source overrides come before destination rules so a device's
 	// policy wins regardless of what it is connecting to.

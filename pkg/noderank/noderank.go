@@ -150,6 +150,24 @@ type Ranker struct {
 	ScreenURL     string
 	ScreenTimeout time.Duration
 
+	// Canary measures ONE node's CAPACITY by pulling a volume we chose through it,
+	// after pointing the probe selector at it. Distinct from Goodput, which observes
+	// how much a node happened to carry: that measures DEMAND, and an exit nobody
+	// asked much of is not a slow exit. Only a transfer we sized measures the path.
+	//
+	// nil keeps the latency ranking exactly as it was — a half-wired canary would be
+	// worse than none (principle 4).
+	Canary func(ctx context.Context, service, node string) (kbps float64, ok bool)
+
+	// CanaryEvery is how stale a node's measurement may be before it is re-run, and
+	// PromoteMargin how far a challenger must exceed the incumbent before advice
+	// moves. Zero uses the defaults in canary.go.
+	CanaryEvery   time.Duration
+	PromoteMargin float64
+
+	cmu    sync.Mutex
+	canary map[string]canarySample
+
 	mu     sync.Mutex
 	health map[string]*nodeHealth
 
@@ -363,6 +381,26 @@ func (r *Ranker) Pick(ctx context.Context, svc Service, cands []Candidate) (stri
 		return balancer.Score(pool[i].cand, svc.Weights) > balancer.Score(pool[j].cand, svc.Weights)
 	})
 	best := pool[0].cand
+
+	// The measured half. One node per service per pass, serialised — never a
+	// fan-out: more than three concurrent TLS handshakes provoke the very freeze
+	// this is measuring for. Called from Pick, which the ranking loop drives on an
+	// interval, so the measurement follows a steady state rather than an edge
+	// (principle 14 — the previous throughput canary was only ever called from the
+	// apply path and so could not see a path that broke while sitting still).
+	shortlist := make([]string, 0, len(pool))
+	for _, p := range pool {
+		shortlist = append(shortlist, p.cand.ID)
+	}
+	r.runCanary(ctx, svc.Name, shortlist)
+	if advised, decided := r.promote(svc.Name, best.ID, prev, shortlist); decided {
+		for _, p := range pool {
+			if p.cand.ID == advised {
+				best = p.cand
+				break
+			}
+		}
+	}
 
 	// Switch margin (anti-flap): if the previously-advised node is still in the
 	// pool, healthy, and a selector member, only flip to a new top node when it

@@ -1215,3 +1215,73 @@ func TestTunExcludesLocalDiscovery(t *testing.T) {
 		t.Error("no excludes must mean no key at all")
 	}
 }
+
+// Throughput has no per-node Clash API the way delay does, so measuring a node the
+// service is NOT using needs a selector the ranker can point somewhere and an
+// ingress that lands on it. Without the route rule the canary would follow the
+// ordinary service rules and measure whatever path was already active — which is
+// the LOT-67 defect wearing a different hat.
+func TestProbeIngressIsPinnedToItsOwnSelector(t *testing.T) {
+	a := mustParse(t, "hysteria2://pw@1.2.3.4:443?sni=a.example", subscription.FormatSingleURL)
+	b := mustParse(t, "hysteria2://pw@5.6.7.8:443?sni=b.example", subscription.FormatSingleURL)
+	opts := DefaultOptions()
+	opts.SocksProbeListen = "127.0.0.1:7891"
+	res, err := Generate([]registry.Service{svc("discord", "vpn_url_test")}, nil,
+		[]subscription.Node{a, b},
+		map[string][]subscription.Node{"vpn_url_test": {a, b}}, opts)
+	if err != nil {
+		t.Fatalf("generate: %v", err)
+	}
+	_, _, cfg := outboundsByTag(t, res.JSON)
+
+	var members []any
+	for _, o := range cfg["outbounds"].([]any) {
+		if m := o.(map[string]any); m["tag"] == ProbeSelector {
+			if m["type"] != "selector" {
+				t.Errorf("%s type = %v, want selector — the ranker has to PUT a target on it", ProbeSelector, m["type"])
+			}
+			members, _ = m["outbounds"].([]any)
+		}
+	}
+	if len(members) != 2 {
+		t.Fatalf("%s has %d members, want both nodes — the point is measuring a node the service is not on", ProbeSelector, len(members))
+	}
+
+	// And probe ingress must reach it before any service rule can claim the traffic.
+	rules := cfg["route"].(map[string]any)["rules"].([]any)
+	probeAt, serviceAt := -1, -1
+	for i, r := range rules {
+		m := r.(map[string]any)
+		if m["outbound"] == ProbeSelector {
+			probeAt = i
+		}
+		if m["outbound"] == registry.SelectorTag("discord") && serviceAt < 0 {
+			serviceAt = i
+		}
+	}
+	if probeAt < 0 {
+		t.Fatal("no route rule sends probe-in to the probe selector; the canary would follow service rules")
+	}
+	if serviceAt >= 0 && probeAt > serviceAt {
+		t.Errorf("probe rule at %d comes after the service rule at %d — first-match-wins would hijack the canary", probeAt, serviceAt)
+	}
+}
+
+// No probe ingress, no probe selector: an outbound nothing can reach is dead
+// weight in every generated config on machines that do not probe.
+func TestNoProbeIngressMeansNoProbeSelector(t *testing.T) {
+	a := mustParse(t, "hysteria2://pw@1.2.3.4:443?sni=a.example", subscription.FormatSingleURL)
+	opts := DefaultOptions()
+	opts.SocksProbeListen = ""
+	res, err := Generate([]registry.Service{svc("discord", "vpn_url_test")}, nil,
+		[]subscription.Node{a}, map[string][]subscription.Node{"vpn_url_test": {a}}, opts)
+	if err != nil {
+		t.Fatalf("generate: %v", err)
+	}
+	_, _, cfg := outboundsByTag(t, res.JSON)
+	for _, o := range cfg["outbounds"].([]any) {
+		if o.(map[string]any)["tag"] == ProbeSelector {
+			t.Fatalf("%s emitted with no probe-in inbound to reach it", ProbeSelector)
+		}
+	}
+}
