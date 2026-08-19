@@ -1226,6 +1226,7 @@ func TestProbeIngressIsPinnedToItsOwnSelector(t *testing.T) {
 	b := mustParse(t, "hysteria2://pw@5.6.7.8:443?sni=b.example", subscription.FormatSingleURL)
 	opts := DefaultOptions()
 	opts.SocksProbeListen = "127.0.0.1:7891"
+	opts.CanaryProbeListen = "127.0.0.1:7892"
 	res, err := Generate([]registry.Service{svc("discord", "vpn_url_test")}, nil,
 		[]subscription.Node{a, b},
 		map[string][]subscription.Node{"vpn_url_test": {a, b}}, opts)
@@ -1273,6 +1274,7 @@ func TestNoProbeIngressMeansNoProbeSelector(t *testing.T) {
 	a := mustParse(t, "hysteria2://pw@1.2.3.4:443?sni=a.example", subscription.FormatSingleURL)
 	opts := DefaultOptions()
 	opts.SocksProbeListen = ""
+	opts.CanaryProbeListen = ""
 	res, err := Generate([]registry.Service{svc("discord", "vpn_url_test")}, nil,
 		[]subscription.Node{a}, map[string][]subscription.Node{"vpn_url_test": {a}}, opts)
 	if err != nil {
@@ -1283,5 +1285,55 @@ func TestNoProbeIngressMeansNoProbeSelector(t *testing.T) {
 		if o.(map[string]any)["tag"] == ProbeSelector {
 			t.Fatalf("%s emitted with no probe-in inbound to reach it", ProbeSelector)
 		}
+	}
+}
+
+// The regression that cost a live afternoon on 2026-08-19: one route rule sent
+// EVERY probe-in connection to the probe selector, so each service's active probe
+// left through whichever node the canary had last aimed at. Correlated in the
+// journal — `x`'s probe to x.com and `social`'s to www.instagram.com both went out
+// through youtube's candidate exit. The brain escalates on those verdicts, so a
+// canary aimed at a dead node would have failed every service at once and read as
+// a systemic outage.
+//
+// Ordinary probes must follow their service's own rules. Only the canary's own
+// ingress is pinned.
+func TestOrdinaryProbeTrafficIsNotPinnedToTheProbeSelector(t *testing.T) {
+	a := mustParse(t, "hysteria2://pw@1.2.3.4:443?sni=a.example", subscription.FormatSingleURL)
+	opts := DefaultOptions()
+	opts.SocksProbeListen = "127.0.0.1:7891"
+	opts.CanaryProbeListen = "127.0.0.1:7892"
+	res, err := Generate([]registry.Service{svc("discord", "vpn_url_test")}, nil,
+		[]subscription.Node{a}, map[string][]subscription.Node{"vpn_url_test": {a}}, opts)
+	if err != nil {
+		t.Fatalf("generate: %v", err)
+	}
+	_, _, cfg := outboundsByTag(t, res.JSON)
+
+	for _, r := range cfg["route"].(map[string]any)["rules"].([]any) {
+		m := r.(map[string]any)
+		if m["outbound"] != ProbeSelector {
+			continue
+		}
+		ins, _ := m["inbound"].([]any)
+		for _, in := range ins {
+			if in == "probe-in" {
+				t.Fatal("probe-in is routed to the probe selector: every service's probe would describe the canary's node, not its own path")
+			}
+			if in != CanaryInbound {
+				t.Errorf("unexpected inbound %v pinned to the probe selector", in)
+			}
+		}
+	}
+
+	// And the canary's ingress must actually exist, or the selector is unreachable.
+	var hasCanaryIn bool
+	for _, in := range cfg["inbounds"].([]any) {
+		if in.(map[string]any)["tag"] == CanaryInbound {
+			hasCanaryIn = true
+		}
+	}
+	if !hasCanaryIn {
+		t.Errorf("no %q inbound emitted; the probe selector cannot be reached", CanaryInbound)
 	}
 }

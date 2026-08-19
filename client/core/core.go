@@ -1786,6 +1786,7 @@ func (c *Core) singboxOptions() singbox.Options {
 		opts.Tun = nil
 		opts.TproxyPort = 0
 		opts.SocksProbeListen = c.opts.ProxyListen
+		opts.CanaryProbeListen = c.canaryListen()
 	} else {
 		opts.Tun = c.tunOptions()
 		// A tun captures DNS system-wide, so the client must carry its own: without a
@@ -1810,6 +1811,7 @@ func (c *Core) singboxOptions() singbox.Options {
 		}
 		if c.opts.ProbeProxy != "" {
 			opts.SocksProbeListen = c.opts.ProbeProxy
+			opts.CanaryProbeListen = c.canaryListen()
 		}
 	}
 

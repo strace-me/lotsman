@@ -2,6 +2,8 @@ package core
 
 import (
 	"context"
+	"net"
+	"strconv"
 	"sync"
 	"time"
 
@@ -78,7 +80,11 @@ func (c *Core) canaryNodeKBps(ctx context.Context, service, node string) (float6
 	// so a QUIC pull would leave through the ordinary path and describe a different
 	// exit than the one we aimed at — a verdict about something the measurement did
 	// not touch (principle 2).
-	tcpEps, _ := splitEndpoints(volumeTargets(svc), dataplane.BurstClient(c.opts.ProbeProxy, nodeCanaryTimeout), nil)
+	via := c.canaryListen()
+	if via == "" {
+		return 0, false
+	}
+	tcpEps, _ := splitEndpoints(volumeTargets(svc), dataplane.BurstClient(via, nodeCanaryTimeout), nil)
 	if len(tcpEps) == 0 {
 		return 0, false
 	}
@@ -103,4 +109,25 @@ func (c *Core) sayOnce(reason string) {
 		return
 	}
 	c.log.Warn("node canary declined", "why", reason)
+}
+
+// canaryListen is where the canary's own socks ingress lives: the probe address
+// with the port moved up by one.
+//
+// It is DERIVED rather than configured because the alternative is a second flag
+// that can be forgotten, and a canary ingress that silently shares probe-in is
+// exactly the defect this exists to fix — on 2026-08-19 one route rule sent every
+// service's probe out through whichever node the canary had aimed at, so `x` and
+// `social` were both judged on youtube's candidate exit. One knob, two ports, no
+// way to point them at the same place by accident.
+func (c *Core) canaryListen() string {
+	host, portStr, err := net.SplitHostPort(c.opts.ProbeProxy)
+	if err != nil {
+		return ""
+	}
+	port, err := strconv.Atoi(portStr)
+	if err != nil || port <= 0 || port >= 65535 {
+		return ""
+	}
+	return net.JoinHostPort(host, strconv.Itoa(port+1))
 }

@@ -57,6 +57,11 @@ const ProbeSelector = probeSelector
 
 const probeSelector = "sel-probe"
 
+// CanaryInbound is the socks ingress whose traffic is pinned to ProbeSelector.
+const CanaryInbound = canaryInbound
+
+const canaryInbound = "canary-in"
+
 // inbounds builds the inbound list: the tproxy that catches br-lan traffic, plus
 // an optional socks "probe-in" so the box can probe through its own LAN path
 // (matching the real R5S). A malformed SocksProbeListen is skipped, not fatal —
@@ -105,6 +110,19 @@ func inbounds(opts Options) []any {
 			}
 		}
 	}
+	// The canary's own ingress, deliberately not shared with probe-in: everything
+	// arriving here is routed to the probe selector, which is the wrong path for
+	// any traffic that is not the canary's.
+	if opts.CanaryProbeListen != "" {
+		if host, portStr, err := net.SplitHostPort(opts.CanaryProbeListen); err == nil {
+			if port, err := strconv.Atoi(portStr); err == nil {
+				in = append(in, map[string]any{
+					"type": "socks", "tag": canaryInbound,
+					"listen": host, "listen_port": port,
+				})
+			}
+		}
+	}
 	return in
 }
 
@@ -116,16 +134,23 @@ type Options struct {
 	DefaultMark    int    // route.default_mark (sing-box's own traffic mark)
 	RuleSetDir     string // base dir holding rule-set-{geosite,geoip}/*.srs
 
-	SocksProbeListen string                 // socks "probe-in" inbound host:port (empty = none); lets the box probe via the LAN path
-	Tun              *TunOptions            // CLIENT ingress: emit a `tun` inbound instead of tproxy (nil = tproxy, the router default). Never carries the tun fd.
-	PoolOpts         map[string]PoolOptions // per-pool url-test tuning (interval/idle_timeout); nil = defaults
-	UTLSFingerprint  string                 // default tls.utls fingerprint for TCP TLS outbounds lacking one (e.g. "chrome"); "" = off
-	UTLSPool         []string               // diversity-with-consistency: when set, each node draws a fingerprint from this vetted pool deterministically by node ID (consistent per node, diverse across the fleet) instead of all sharing UTLSFingerprint. Avoids "the whole fleet is one fingerprint → that fingerprint becomes the tool signature" without per-connection flipping (which uTLS warns is itself suspicious). Empty = use UTLSFingerprint for all.
-	TargetVersion    string                 // sing-box version to target (e.g. "1.12.17"); gates version-specific knobs. "" = baseline
-	FakeIP           *FakeIPOptions         // legacy fakeip-only DNS section (nil = off); superseded by DNS
-	DNS              *DNSOptions            // split-DNS block (multi-server, DoT/DoH/DoQ, VPN-detoured); nil = fall back to FakeIP/none
-	Multiplex        *MultiplexOptions      // default outbound multiplex for TCP proxies (nil = off)
-	Remediations     map[string]Remediation // per-service self-heal remediation rules (nil/absent = no change; LOT-18). Keyed by service name.
+	SocksProbeListen string // socks "probe-in" inbound host:port (empty = none); lets the box probe via the LAN path
+	// CanaryProbeListen is a SEPARATE socks inbound ("canary-in") whose traffic is
+	// pinned to the probe selector. It must not be SocksProbeListen: ordinary probes
+	// enter through that one and MUST follow their service's own rules, or every
+	// service's verdict silently describes whichever node the canary last aimed at.
+	// Measured live 2026-08-19 — probes for x and social both left through the
+	// youtube canary's exit (principle 2). Empty = no canary ingress, no probe selector.
+	CanaryProbeListen string
+	Tun               *TunOptions            // CLIENT ingress: emit a `tun` inbound instead of tproxy (nil = tproxy, the router default). Never carries the tun fd.
+	PoolOpts          map[string]PoolOptions // per-pool url-test tuning (interval/idle_timeout); nil = defaults
+	UTLSFingerprint   string                 // default tls.utls fingerprint for TCP TLS outbounds lacking one (e.g. "chrome"); "" = off
+	UTLSPool          []string               // diversity-with-consistency: when set, each node draws a fingerprint from this vetted pool deterministically by node ID (consistent per node, diverse across the fleet) instead of all sharing UTLSFingerprint. Avoids "the whole fleet is one fingerprint → that fingerprint becomes the tool signature" without per-connection flipping (which uTLS warns is itself suspicious). Empty = use UTLSFingerprint for all.
+	TargetVersion     string                 // sing-box version to target (e.g. "1.12.17"); gates version-specific knobs. "" = baseline
+	FakeIP            *FakeIPOptions         // legacy fakeip-only DNS section (nil = off); superseded by DNS
+	DNS               *DNSOptions            // split-DNS block (multi-server, DoT/DoH/DoQ, VPN-detoured); nil = fall back to FakeIP/none
+	Multiplex         *MultiplexOptions      // default outbound multiplex for TCP proxies (nil = off)
+	Remediations      map[string]Remediation // per-service self-heal remediation rules (nil/absent = no change; LOT-18). Keyed by service name.
 
 	// RemHotReload (LOT-34) emits PERMANENT reject-QUIC + ip-fallback rules that
 	// match LOCAL rule_sets (rem-rq-<svc> / rem-fb-<svc>) whose membership the armed
@@ -720,10 +745,11 @@ func Generate(services []registry.Service, devices []registry.Device, nodes []su
 	// so the number describes that node and nothing else.
 	//
 	// Every node is a member, not just a pool's: the point is to measure a candidate
-	// the service is NOT on. Emitted only alongside probe-in, since without that
-	// inbound nothing can reach it.
+	// the service is NOT on. Emitted only alongside the canary's OWN inbound: it must
+	// never be where ordinary probes land, or their verdicts describe this node
+	// instead of the service's path.
 	var probeTags []string
-	if opts.SocksProbeListen != "" {
+	if opts.CanaryProbeListen != "" {
 		for _, n := range nodes {
 			if t, ok := tagOf[n.ID]; ok {
 				probeTags = append(probeTags, t)
@@ -768,7 +794,7 @@ func Generate(services []registry.Service, devices []registry.Device, nodes []su
 	// service is currently on. Before the device and service rules for that reason.
 	if len(probeTags) > 0 {
 		routeRules = append(routeRules, map[string]any{
-			"inbound": []string{"probe-in"}, "outbound": probeSelector,
+			"inbound": []string{canaryInbound}, "outbound": probeSelector,
 		})
 	}
 
