@@ -450,7 +450,7 @@ func (r *Ranker) Pick(ctx context.Context, svc Service, cands []Candidate) (stri
 	r.setAdvice(svc.Name, best.ID)
 	r.log.Info("noderank: recommend node", "service", svc.Name, "selector", svc.Selector,
 		"now", info.Now, "best", best.ID, "p95ms", best.Q.P95ms, "loss", best.Q.Loss,
-		"kbps", carryOf(best.Q))
+		"kbps", r.carryFor(best.ID, best.Q))
 
 	// The ranking is still by latency, so say when the evidence disagrees with it.
 	// On 2026-08-12 the pool grew from 52 to 104 nodes, url-test re-voted on delay,
@@ -502,14 +502,22 @@ func (r *Ranker) screen(ctx context.Context, node string) bool {
 // a line that fires on noise is a line nobody reads.
 const carryDisagreement = 10
 
-// carryOf renders a node's measured carry for a log line, distinguishing "not
-// measured" from "measured as nothing" — the two read identically as 0 and mean
-// opposite things.
-func carryOf(q quality.Quality) string {
-	if !q.GoodputKnown {
-		return "unmeasured"
+// carryFor renders what is KNOWN about a node's carry, preferring the canary over
+// the passive reading and saying which it is. Two different measurements answer two
+// different questions — capacity we asked for, versus demand that happened — and a
+// bare number that does not say which is a number nobody can act on.
+//
+// It reads the canary map rather than the probe's Quality because the canary runs
+// beside the probe, not inside it: the first live pass logged "unmeasured" for an
+// exit its own canary had measured at 311 KiB/s one line earlier.
+func (r *Ranker) carryFor(tag string, q quality.Quality) string {
+	if kbps, ok := r.measuredCarry(tag, time.Now()); ok {
+		return strconv.FormatFloat(kbps, 'f', 1, 64) + " (canary)"
 	}
-	return strconv.FormatFloat(q.GoodputKBps, 'f', 1, 64)
+	if q.GoodputKnown {
+		return strconv.FormatFloat(q.GoodputKBps, 'f', 1, 64) + " (carried)"
+	}
+	return "unmeasured"
 }
 
 func (r *Ranker) probe(ctx context.Context, node, testURL string) quality.Quality {
