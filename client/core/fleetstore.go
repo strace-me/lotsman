@@ -100,6 +100,10 @@ func (c *Core) loadNodes(ctx context.Context) ([]subscription.Node, *subscriptio
 	var mgr *subscription.Manager
 	var nodes []subscription.Node
 	for attempt := 1; ; attempt++ {
+		// Direct: this runs at startup, BEFORE our sing-box socks inbound exists, so
+		// a proxy fetch here is a guaranteed "connection refused". The refresh loop
+		// (box up) is the one that pulls through the tunnel; a failed startup fetch
+		// falls back to the last-good snapshot below.
 		mgr = subscription.NewManager(subscription.NewHTTPFetcher())
 		var errs []error
 		nodes, errs = mgr.Load(ctx, c.conf.Subscriptions)

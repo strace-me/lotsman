@@ -97,6 +97,25 @@ func (c *Core) reconcileBox(ctx context.Context, rc *reconcile.Reconciler) error
 // whose fetch came back degraded (a flaky mirror returning fewer nodes must not
 // churn the config), it backs up before swapping, and it rolls back if sing-box
 // does not come back alive.
+// subFetcher is the HTTP fetcher for subscription and hostlist pulls. When one of
+// our own sing-box socks inbounds is configured, pulls go THROUGH the tunnel: the
+// client's own resolver cannot reach a DNS server that is not on a
+// directly-connected subnet — a corporate resolver on another subnet is captured
+// by auto_route and its lookup times out — so at the office every HTTP
+// subscription failed, the fetch came back degraded, and the anti-churn guard
+// refused the apply, leaving new nodes invisible. The daemon solved the same
+// problem with subscription_via_pool (LOT-28); the client had no equivalent.
+func (c *Core) subFetcher() subscription.Fetcher {
+	via := c.opts.ProbeProxy
+	if c.opts.ProxyListen != "" {
+		via = c.opts.ProxyListen
+	}
+	if via == "" {
+		return subscription.NewHTTPFetcher()
+	}
+	return subscription.NewHTTPFetcherProxy(via)
+}
+
 func (c *Core) newReconciler() *reconcile.Reconciler {
 	services := make([]registry.Service, 0, len(c.reg.Services))
 	for _, s := range c.reg.Services {
@@ -107,7 +126,7 @@ func (c *Core) newReconciler() *reconcile.Reconciler {
 		Devices:    c.conf.Devices,
 		Opts:       c.singboxOptions(),
 		Subs:       c.conf.Subscriptions,
-		Loader:     subscription.NewManager(subscription.NewHTTPFetcher()),
+		Loader:     subscription.NewManager(c.subFetcher()),
 		Pools:      c.conf.Pools,
 		ConfigPath: c.opts.SingboxConfig,
 		Runner:     boxRunner{box: c.box},

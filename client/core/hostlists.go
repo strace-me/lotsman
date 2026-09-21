@@ -44,6 +44,9 @@ func EnsureDomainLists(ctx context.Context, conf *config.Config, timeout time.Du
 		ctx, cancel = context.WithTimeout(ctx, timeout)
 		defer cancel()
 	}
+	// Direct, not through the tunnel: this runs BEFORE the tunnel exists (a fresh
+	// install fetching a list its config needs to parse), so there is no socks
+	// inbound to route through yet.
 	m := aggregate.NewManager(subscription.NewHTTPFetcher())
 	for _, hl := range missing {
 		if _, err := aggregate.Rebuild(ctx, m, specOf(hl), false, log); err != nil {
@@ -67,7 +70,7 @@ func (c *Core) refreshHostlists(ctx context.Context, timeout time.Duration) {
 		ctx, cancel = context.WithTimeout(ctx, timeout)
 		defer cancel()
 	}
-	m := aggregate.NewManager(subscription.NewHTTPFetcher())
+	m := aggregate.NewManager(c.subFetcher())
 	for _, hl := range c.conf.Hostlists {
 		changed, err := aggregate.Rebuild(ctx, m, specOf(hl), false, c.log)
 		if err != nil {

@@ -58,7 +58,7 @@ func (c *Core) RefreshSubscriptions(ctx context.Context, name string) ([]SubRefr
 
 	out := make([]SubRefresh, 0, len(want))
 	for _, d := range want {
-		mgr := subscription.NewManager(subscription.NewHTTPFetcher())
+		mgr := subscription.NewManager(c.subFetcher())
 		nodes, errs := mgr.Load(ctx, []subscription.Declaration{d})
 		r := SubRefresh{Name: d.Name, Nodes: len(nodes)}
 		for _, e := range errs {
