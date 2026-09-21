@@ -95,6 +95,19 @@ func realityNode(t *testing.T, server, sid string) subscription.Node {
 	return ns[0]
 }
 
+// realityNodeSNI is realityNode with a caller-chosen REALITY camouflage SNI, so a
+// test can rotate it independently of the short_id.
+func realityNodeSNI(t *testing.T, server, sid, sni string) subscription.Node {
+	t.Helper()
+	url := "vless://11111111-2222-3333-4444-555555555555@" + server +
+		":443?security=reality&flow=xtls-rprx-vision&pbk=PUBKEY&sid=" + sid + "&sni=" + sni + "&fp=chrome#n"
+	ns, err := subscription.Parse([]byte(url), subscription.FormatSingleURL, "test")
+	if err != nil || len(ns) != 1 {
+		t.Fatalf("parse reality node: %v", err)
+	}
+	return ns[0]
+}
+
 func testReconciler(t *testing.T, run *fakeRunner, ld fakeLoader, dryRun bool) (*Reconciler, string) {
 	t.Helper()
 	dir := t.TempDir()
@@ -237,6 +250,29 @@ func TestReconcileIgnoresShortIDRotation(t *testing.T) {
 	}
 	if len(run.calls) != 0 {
 		t.Errorf("short_id-only churn must be a no-op (no check/restart), calls=%v", run.calls)
+	}
+}
+
+// AcmeVPN (measured 2026-09-18) rotates the REALITY camouflage SNI together
+// with short_id on every pull. With the node identity fixed the outbound TAG is
+// stable, but tls.server_name still changes — so a config differing only in
+// those two fields must be a no-op, or reconcile restarts sing-box every fetch.
+func TestReconcileIgnoresSNIRotation(t *testing.T) {
+	run := &fakeRunner{}
+	r, _ := testReconciler(t, run, fakeLoader{nodes: []subscription.Node{realityNodeSNI(t, "1.2.3.4", "aaaa", "a.example.com")}}, false)
+	if err := r.Reconcile(context.Background()); err != nil {
+		t.Fatalf("first reconcile: %v", err)
+	}
+	if !run.ran("restart") {
+		t.Fatalf("first apply should restart, calls=%v", run.calls)
+	}
+	r.Loader = fakeLoader{nodes: []subscription.Node{realityNodeSNI(t, "1.2.3.4", "bbbb", "b.example.com")}}
+	run.calls = nil
+	if err := r.Reconcile(context.Background()); err != nil {
+		t.Fatalf("second reconcile: %v", err)
+	}
+	if len(run.calls) != 0 {
+		t.Errorf("sni+short_id churn must be a no-op (no check/restart), calls=%v", run.calls)
 	}
 }
 

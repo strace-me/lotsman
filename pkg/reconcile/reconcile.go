@@ -429,9 +429,16 @@ func (r *Reconciler) restart(ctx context.Context) error {
 // volatileKeys are config fields the VPN provider rotates for the same nodes
 // (same servers/uuids/order) without any real change. Comparing them byte-for-
 // byte makes reconcile re-apply + restart sing-box on cosmetic churn (LOT-1).
-// REALITY short_id is rotated by the `vpn-a` provider every few minutes.
+// REALITY short_id is rotated by the `vpn-a` provider every few minutes; the
+// AcmeVPN provider (measured 2026-09-18) rotates the REALITY camouflage SNI
+// (`tls.server_name`) on all 50 nodes every pull as well. The node identity fix
+// (pkg/subscription) keeps the outbound TAG stable across that rotation, but the
+// server_name inside the outbound still changes, so without this it kept looking
+// like a new config — one apply+restart per fetch, which dropped every stream.
 var volatileKeys = map[string]bool{
-	"short_id": true,
+	"short_id":    true,
+	"sni":         true,
+	"server_name": true,
 }
 
 // sameConfig reports whether two generated sing-box configs are semantically

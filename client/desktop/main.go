@@ -105,6 +105,7 @@ func main() {
 		pathHealth    = flag.Bool("path-health", true, "escalation-v2 DETECT: probe EVERY chain step out-of-band each minute and log which tier works here, instead of discovering it by walking the chain one rung at a time")
 		pathHealthAct = flag.Bool("path-health-act", false, "escalation-v2 ACT: let the brain jump straight to the best WORKING tier instead of escalating one rung at a time. Requires -path-health.")
 		engineHealth  = flag.Bool("engine-health", true, "watch the DESYNC engine and recompose it when a rule is on a zapret rung and the engine is not there. sing-box is not watched here — superviseBox already does that, and on a stricter test.")
+		smart         = flag.Bool("smart", true, "compose the intelligence layer (correlate/damper/adaptive/anomaly + tspu) into the brain, exactly as the daemon does. false = the plain fail-count threshold, where every rule escalates independently and a link blip paints them all red (LOT-74).")
 		auditLog      = flag.String("audit-log", "", "append brain state transitions here as JSONL. Empty keeps them in memory only, where they die with the process — and the journald ring on a laptop holds minutes, so an investigation started an hour later has nothing to read.")
 		failLog       = flag.String("fail-log", "", "append probe failures here as JSONL (empty = discarded)")
 		controlSock   = flag.String("control-socket", "", "unix socket for the local control API (empty = default under the runtime dir)")
@@ -199,6 +200,7 @@ func main() {
 		PathHealth:        *pathHealth,
 		PathHealthAct:     *pathHealthAct,
 		EngineHealth:      *engineHealth,
+		Smart:             *smart,
 		AuditLog:          *auditLog,
 		FailLog:           *failLog,
 		CanaryGoodputKBps: *canaryGoodput,

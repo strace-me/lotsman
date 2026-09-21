@@ -33,9 +33,7 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/strace-me/lotsman/pkg/adaptive"
 	"github.com/strace-me/lotsman/pkg/aggregate"
-	"github.com/strace-me/lotsman/pkg/anomaly"
 	"github.com/strace-me/lotsman/pkg/applier"
 	"github.com/strace-me/lotsman/pkg/audit"
 	"github.com/strace-me/lotsman/pkg/balancer"
@@ -43,8 +41,6 @@ import (
 	"github.com/strace-me/lotsman/pkg/bypasslearn"
 	"github.com/strace-me/lotsman/pkg/capture"
 	"github.com/strace-me/lotsman/pkg/config"
-	"github.com/strace-me/lotsman/pkg/correlate"
-	"github.com/strace-me/lotsman/pkg/damper"
 	"github.com/strace-me/lotsman/pkg/dataplane"
 	"github.com/strace-me/lotsman/pkg/desynctune"
 	"github.com/strace-me/lotsman/pkg/enginehealth"
@@ -70,12 +66,12 @@ import (
 	"github.com/strace-me/lotsman/pkg/remediate"
 	"github.com/strace-me/lotsman/pkg/rulesets"
 	"github.com/strace-me/lotsman/pkg/singbox"
+	"github.com/strace-me/lotsman/pkg/spine"
 	"github.com/strace-me/lotsman/pkg/state"
 	"github.com/strace-me/lotsman/pkg/strategy"
 	"github.com/strace-me/lotsman/pkg/strategycat"
 	"github.com/strace-me/lotsman/pkg/strategyimport"
 	"github.com/strace-me/lotsman/pkg/subscription"
-	"github.com/strace-me/lotsman/pkg/tspu"
 	"github.com/strace-me/lotsman/pkg/version"
 	"github.com/strace-me/lotsman/pkg/vpnbalance"
 	"github.com/strace-me/lotsman/pkg/zapret"
@@ -421,51 +417,16 @@ func main() {
 		log.Info("state persistence enabled", "path", *stateFile)
 	}
 
-	// Intelligence layer: compose correlate/damper/adaptive/anomaly into Brain's
-	// escalation decision via policy. Without it, Brain uses the plain threshold.
+	// Intelligence layer: composed in pkg/spine so BOTH roots (this daemon and
+	// client/core) wire the SAME organs. It used to be inline here and absent on
+	// the client, and the difference was invisible because each root tested only
+	// what it had (LOT-65, LOT-74). Without it, Brain uses the plain threshold.
 	if *smart {
-		corr := correlate.New(2, 0.6) // >=2 services and >=60% down => systemic
-		damp := damper.New(10*time.Minute, 3, 30*time.Second, 10*time.Minute)
-		tuner := adaptive.NewTuner(adaptive.Thresholds{EscalateAt: cfg.EscalateFails, RecoverAt: cfg.RecoverSuccess})
-		anomalies := map[string]*anomaly.Detector{}
+		names := make([]string, 0, len(reg.Services))
 		for name := range reg.Services {
-			anomalies[name] = anomaly.New(anomaly.DefaultConfig())
+			names = append(names, name)
 		}
-		br.SetSmarts(&brain.Smarts{
-			FeedAnomaly: func(s string, ok bool, rtt int) {
-				if d := anomalies[s]; d != nil {
-					d.Observe(ok, rtt)
-				}
-			},
-			ObserveHealth: func(s string, healthy bool) { corr.Set(s, healthy) },
-			Threshold: func(s, activeStrategy string) int {
-				rel := knowledge.Stats(s, activeStrategy).Success
-				return tuner.Tune(rel, damp.Count(s, time.Now())).EscalateAt
-			},
-			Systemic:    corr.Systemic,
-			FlapBackoff: damp.Backoff,
-			Anomaly: func(s string) anomaly.State {
-				if d := anomalies[s]; d != nil {
-					return d.State()
-				}
-				return anomaly.Healthy
-			},
-			RecordSwitch: damp.Record,
-			SuggestClass: func(errText string, rttMs int) string {
-				return tspu.SuggestClass(tspu.Classify(tspu.Signals{OK: false, Err: errText, RTTms: rttMs}))
-			},
-			// LOT-40: raw observed block-type + per-strategy declared block-types, so
-			// zapret strategy resolution prefers one known to beat the current block.
-			BlockType: func(errText string, rttMs int) string {
-				return string(tspu.Classify(tspu.Signals{OK: false, Err: errText, RTTms: rttMs}))
-			},
-			BlockTypesFor: func(id string) []string {
-				if d, ok := catalog.Resolve(id); ok {
-					return d.BlockTypes
-				}
-				return nil
-			},
-		})
+		br.SetSmarts(spine.Smarts(knowledge, catalog, cfg, names))
 		log.Info("intelligence layer enabled", "components", "policy/correlate/damper/adaptive/anomaly")
 	}
 
@@ -1068,7 +1029,14 @@ func main() {
 	// pkg/enginehealth. Runs on its own short interval, independent of -check-interval.
 	if *engineHealth {
 		ehp := periodic.New(log)
-		const healthURL = "http://www.gstatic.com/generate_204"
+		// A DOMESTIC target on purpose. This probe answers "can sing-box route at
+		// all"; a censored foreign host — it used to be www.gstatic.com — answers a
+		// different question, "is TSPU letting Google through right now". When it
+		// wasn't, the watchdog read that as a WEDGED engine and restarted sing-box
+		// (measured 2026-09-18: a false restart that dropped every stream on the
+		// LAN). ya.ru is reachable through the box's own `direct` egress and is not
+		// subject to that censorship.
+		const healthURL = "https://ya.ru/"
 		checks := []*enginehealth.Check{{
 			Name: "sing-box",
 			// sing-box can route iff its `direct` outbound reaches a generic target.
@@ -1080,7 +1048,10 @@ func main() {
 				cmd := strings.Fields(*singboxRestart)
 				return executor.ExecRunner{}.Run(c, cmd[0], cmd[1:]...)
 			},
-			Threshold: 3, Cooldown: 5 * time.Minute,
+			// A false "unhealthy" costs a restart, and a restart drops every
+			// connection; the cooldown is the blast radius. 15m, not 5m, so one bad
+			// minute cannot become a restart loop.
+			Threshold: 3, Cooldown: 15 * time.Minute,
 		}}
 		// nfqws check (opt-in): a BOX-DIRECT probe to a DPI'd target. The box's own
 		// egress to tcp/443 is desync'd by nfqws (oifname eth0 queue 200) on the SAME

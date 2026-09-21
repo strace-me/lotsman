@@ -107,23 +107,31 @@ func nodeID(proto, server string, port int) string {
 // appears many times at once" — turned out to be false for AcmeVPN, and that is
 // what this function now guards against. Measured on the live subscription
 // 2026-08-11: 50 nodes over 6 addresses, up to 15 on one, and a fresh `sid` on
-// EVERY fetch — 48 of 50 changed between two pulls three seconds apart. So the
-// provider both multiplexes by address and rotates, the extension below baked the
-// rotating value into every ID, and sing-box was rebuilt and restarted every five
-// minutes on churn (LOT-1 again, from the other side).
+// EVERY fetch — 48 of 50 changed between two pulls three seconds apart. The fix
+// for that (strip `sid`, keep everything else) was itself incomplete: measured
+// again on 2026-09-18, the provider rotates `sni` too, on all 50 together with
+// `sid`, so the "stable" identity still moved every pull and sing-box was rebuilt
+// and restarted every fifteen minutes (LOT-1 again, from a third field).
 //
-// The rule is therefore self-checking rather than provider-specific: prefer the
-// identity that ignores rotating credentials, but only where it still tells the
-// pull's own nodes apart, and fall back to the full one for any address group it
-// would merge. A wrong guess in volatileParams then cannot cost an exit — the
-// worst it can do is leave the churn as it is today, which is the recoverable
-// direction.
+// So the choice is not "stable vs full" but a LADDER, each rung self-checked
+// against the pull's own nodes. assignIDs takes the first rung that still tells
+// every node behind an address apart:
 //
-// It returns the addresses it fell back on. NOTHING SURFACES THAT YET — Parse's
-// signature has thirteen call sites and widening it would bury this fix in
-// mechanical churn — so today the list exists for the tests and the fallback is
-// visible only as the restarts continuing. That gap is LOT-60: a provider whose
-// only discriminator rotates is a fact worth a log line.
+//  1. the connection parameters, minus rotating credentials and camouflage;
+//  2. the display name — the only field AcmeVPN held fixed across a pull;
+//  3. the full connection string.
+//
+// The ladder is safe because every rung is verified unique: a rung that would
+// merge two exits is skipped, so the worst a wrong guess can do is fall to the
+// full identity and leave the churn — the recoverable direction. (Over-
+// distinguishing splits a node's health history, which heals in minutes; under-
+// distinguishing silently deletes an exit you are paying for.)
+//
+// It returns the addresses that reached rung 3 (the honest fallback). NOTHING
+// SURFACES THAT YET — Parse's signature has thirteen call sites and widening it
+// would bury this fix in mechanical churn — so today the list exists for the
+// tests and the fallback is visible only as the restarts continuing. That gap is
+// LOT-60: a provider whose only discriminator rotates is a fact worth a log line.
 func assignIDs(nodes []Node) (fellBack []string) {
 	byAddr := make(map[string][]int, len(nodes))
 	for i := range nodes {
@@ -135,20 +143,36 @@ func assignIDs(nodes []Node) (fellBack []string) {
 			// apart from everything else, so a rotated credential stays invisible.
 			continue
 		}
-		stable := make(map[string]bool, len(idx))
-		for _, i := range idx {
-			stable[connectionIdentityStable(nodes[i].Raw)] = true
+		// Candidate identities per node, in ladder order (see above).
+		tiers := make([][3]string, len(idx))
+		for j, i := range idx {
+			tiers[j] = [3]string{
+				connectionIdentityStable(nodes[i].Raw),
+				nodes[i].DisplayName,
+				connectionIdentity(nodes[i].Raw),
+			}
 		}
-		useStable := len(stable) == len(idx)
-		if !useStable {
+		chosen := 2 // rung 3 unless a stabler rung distinguishes the whole group
+		for rung := 0; rung < 2; rung++ {
+			seen := make(map[string]bool, len(idx))
+			distinct := true
+			for _, c := range tiers {
+				if seen[c[rung]] {
+					distinct = false
+					break
+				}
+				seen[c[rung]] = true
+			}
+			if distinct {
+				chosen = rung
+				break
+			}
+		}
+		if chosen == 2 {
 			fellBack = append(fellBack, nodes[idx[0]].Server)
 		}
-		for _, i := range idx {
-			ident := connectionIdentityStable(nodes[i].Raw)
-			if !useStable {
-				ident = connectionIdentity(nodes[i].Raw)
-			}
-			h := sha256.Sum256([]byte(addr + "|" + ident))
+		for j, i := range idx {
+			h := sha256.Sum256([]byte(addr + "|" + tiers[j][chosen]))
 			nodes[i].ID = hex.EncodeToString(h[:8])
 		}
 	}
@@ -176,8 +200,26 @@ var volatileParams = map[string]bool{
 	"short_id": true,
 }
 
+// camouflageParams are fields a provider rotates as DPI camouflage on a node that
+// has not otherwise changed: REALITY's `sni`, spelled `sni` in a share link and
+// `server_name` (nested under tls) in a marshalled outbound. Measured on the live
+// AcmeVPN subscription 2026-09-18: every pull rotated `sni` on all 50 nodes along
+// with `sid`, while the display name stayed fixed. Keeping `sni` in the preferred
+// identity made every node's ID (and its outbound tag) move every pull, which
+// rewrote the config and restarted sing-box — the same churn as `sid`, from a
+// field nobody had named. assignIDs still verifies uniqueness, so dropping these
+// can never merge two exits: a group that collapses falls through to a stabler
+// tier or, failing that, to the full identity.
+var camouflageParams = map[string]bool{
+	"sni":         true,
+	"server_name": true,
+}
+
 // connectionIdentityStable is connectionIdentity with the rotating credentials
-// removed, so re-fetching an unchanged fleet yields unchanged identities.
+// and rotating camouflage removed, so re-fetching an unchanged fleet yields
+// unchanged identities. This is assignIDs' FIRST-choice identity: it names the
+// reachable endpoint itself, and only when it stops telling the nodes behind one
+// address apart does assignIDs look for another field.
 func connectionIdentityStable(raw string) string {
 	if raw == "" {
 		return ""
@@ -191,6 +233,9 @@ func connectionIdentityStable(raw string) string {
 		}
 		q := u.Query()
 		for k := range volatileParams {
+			q.Del(k)
+		}
+		for k := range camouflageParams {
 			q.Del(k)
 		}
 		u.RawQuery = q.Encode() // sorted by key, so it is stable across pulls
@@ -212,13 +257,14 @@ func connectionIdentityStable(raw string) string {
 	return string(out)
 }
 
-// dropVolatile walks a decoded node and deletes the rotating credentials wherever
-// they sit — REALITY's short_id is nested under tls.reality, not at the top.
+// dropVolatile walks a decoded node and deletes the rotating credentials and
+// rotating camouflage wherever they sit — REALITY's short_id is nested under
+// tls.reality, and its sni is tls.server_name, neither at the top level.
 func dropVolatile(v any) {
 	switch t := v.(type) {
 	case map[string]any:
 		for k := range t {
-			if volatileParams[k] {
+			if volatileParams[k] || camouflageParams[k] {
 				delete(t, k)
 			} else {
 				dropVolatile(t[k])

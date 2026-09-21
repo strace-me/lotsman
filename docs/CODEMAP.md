@@ -157,6 +157,30 @@ coherence config dataplane domainscan registry singbox strategy subscription.
 pkg already does it (e.g. composition→zaptune/nfqwsgen, NAT-sensitive classify→bypasslearn, .srs→domains
 →rulesets, node rank→noderank), reuse it.
 
+**Symmetric rule (composition, not just helpers):** a NEW CAPABILITY goes in a package, not in a
+front-end, and both roots wire it through a SHARED package. `pkg/spine` is that package for the
+intelligence layer (`correlate`/`damper`/`adaptive`/`anomaly` + `tspu`); `spine.Smarts` is called by
+`cmd/lotsmand` and `client/core` alike, and its test asserts every hook is present. The failure this
+prevents is silent: the client wired a subset of the daemon for months (LOT-65), each root tested only
+what it had, both were green, and the only detector was a service misbehaving on the owner's device.
+
+### Parity — what each root wires (keep in sync)
+
+| Organ | `cmd/lotsmand` | `client/core` |
+|---|---|---|
+| brain / applier / probing / kb | ✅ | ✅ |
+| intelligence — `pkg/spine` (correlate/damper/adaptive/anomaly + tspu) | ✅ | ✅ (`-smart`) |
+| `noderank` | ✅ | ✅ (`-noderank`) |
+| `pathhealth` (escalation-v2) | ✅ | ✅ (`-path-health`) |
+| `enginehealth` | ✅ | ✅ (`-engine-health`) |
+| `observe` (the eye) | ✅ | ✅ (`-metrics-addr`) |
+| `capture` (nft tproxy) | ✅ | n/a — the client uses a tun |
+| `remctl`/`remediate`/`incident` (armed route remediation) | ✅ | n/a — the lane/canary instead |
+| `prospect`/`desyncgen`/`desynctune`/`tester` (recipe search) | ✅ | ⛔ the lane rotates recipes; the prospector is not wired |
+| `flowseal`/`strategyimport`/`rulesets` updaters | ✅ | partial — `client/platform/rulesets` provisions `.srs` |
+| `zapretgen` (armed composer) | ✅ | n/a — own `zaptune`+`zapret.RenderComposed` |
+| `vpnbalance` | ✅ | n/a — `noderank` supersedes it |
+
 ### Client (`client/`, desktop)
 
 Single-device Lotsman. Composes the spine above unchanged — see [CLIENT.md](CLIENT.md)

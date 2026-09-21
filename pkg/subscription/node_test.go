@@ -9,8 +9,8 @@ import "testing"
 func TestNodeIDSeparatesExitsThatShareAnAddress(t *testing.T) {
 	const base = "vless://ee29c36e@192.0.2.10:443?security=reality&pbk=CMkW&flow=xtls-rprx-vision&sid="
 	nodes := []Node{
-		{Protocol: ProtoVLESS, Server: "192.0.2.10", Port: 443, Raw: base + "3be8339923410338&sni=cdn2-15.yahoo.com#Вена"},
-		{Protocol: ProtoVLESS, Server: "192.0.2.10", Port: 443, Raw: base + "55e6d9bd269aac46&sni=cdn6-91.yahoo.com#Прага"},
+		{Protocol: ProtoVLESS, Server: "192.0.2.10", Port: 443, DisplayName: "Вена", Raw: base + "3be8339923410338&sni=cdn2-15.yahoo.com#Вена"},
+		{Protocol: ProtoVLESS, Server: "192.0.2.10", Port: 443, DisplayName: "Прага", Raw: base + "55e6d9bd269aac46&sni=cdn6-91.yahoo.com#Прага"},
 	}
 	for i := range nodes {
 		nodes[i].finalize("sub")
@@ -37,22 +37,31 @@ func TestNodeIDIgnoresAShortIDRotationOnALoneNode(t *testing.T) {
 	}
 }
 
-// The other half of the contract: a provider re-labelling a node must not reset
-// its health history.
+// A provider re-labelling a node must not reset its health history — as long as
+// something other than the name tells the exits apart. Here the uuids differ, so
+// the name is not the discriminator and a rename is invisible. (When the name IS
+// the only discriminator — AcmeVPN — a rename does split the ID; that is the
+// accepted price for killing the per-pull churn, and it is the recoverable
+// direction: the history heals in minutes, no exit is ever lost.)
 func TestNodeIDIgnoresARename(t *testing.T) {
-	const u = "vless://ee29c36e@1.2.3.4:443?security=reality&sid=aa"
-	one := []Node{{Protocol: ProtoVLESS, Server: "1.2.3.4", Port: 443, Raw: u + "#Амстердам"},
-		{Protocol: ProtoVLESS, Server: "1.2.3.4", Port: 443, Raw: u + "&sid=bb#Другой"}}
-	two := []Node{{Protocol: ProtoVLESS, Server: "1.2.3.4", Port: 443, Raw: u + "#Amsterdam, NL"},
-		{Protocol: ProtoVLESS, Server: "1.2.3.4", Port: 443, Raw: u + "&sid=bb#Other"}}
+	const a = "vless://ee29c36e@1.2.3.4:443?security=reality#Амстердам"
+	const b = "vless://deadbeef@1.2.3.4:443?security=reality#Другой"
+	one := []Node{
+		{Protocol: ProtoVLESS, Server: "1.2.3.4", Port: 443, DisplayName: "Амстердам", Raw: a},
+		{Protocol: ProtoVLESS, Server: "1.2.3.4", Port: 443, DisplayName: "Другой", Raw: b},
+	}
+	two := []Node{
+		{Protocol: ProtoVLESS, Server: "1.2.3.4", Port: 443, DisplayName: "Amsterdam, NL", Raw: a},
+		{Protocol: ProtoVLESS, Server: "1.2.3.4", Port: 443, DisplayName: "Other", Raw: b},
+	}
 	for i := range one {
 		one[i].finalize("s")
 		two[i].finalize("s")
 	}
 	assignIDs(one)
 	assignIDs(two)
-	if one[0].ID != two[0].ID {
-		t.Error("renaming a node changed its identity")
+	if one[0].ID != two[0].ID || one[1].ID != two[1].ID {
+		t.Error("renaming a node changed its identity even though the uuid told it apart")
 	}
 }
 
@@ -83,13 +92,20 @@ func TestConnectionIdentityFallsBackToTheWholeString(t *testing.T) {
 // 2026-08-11. Folding sid into the ID renamed every outbound every pull, which
 // rewrote the sing-box config and restarted it every five minutes, dropping every
 // established TCP session with it (LOT-1, from the other side).
+//
+// Stripping `sid` was not enough: re-measured 2026-09-18, the provider rotates
+// `sni` too, on all 50 nodes together with `sid`, so a "stable" identity that
+// still held `sni` moved every pull — sing-box restarted every fifteen minutes
+// and broke VK Video/Kinopoisk/YouTube mid-stream. The name (the city) is the one
+// field that survives a pull, so the ladder falls to it. This test rotates sid
+// AND sni together and pins the identities.
 func TestNodeIDSurvivesRotationOnAnAddressCarryingSeveralExits(t *testing.T) {
-	pull := func(sid1, sid2 string) []string {
+	pull := func(sni1, sni2, sid1, sid2 string) []string {
 		n := []Node{
-			{Protocol: ProtoVLESS, Server: "198.51.100.10", Port: 443,
-				Raw: "vless://u@198.51.100.10:443?security=reality&sni=cdn2-15.yahoo.com&sid=" + sid1 + "#Вена"},
-			{Protocol: ProtoVLESS, Server: "198.51.100.10", Port: 443,
-				Raw: "vless://u@198.51.100.10:443?security=reality&sni=cdn6-91.yahoo.com&sid=" + sid2 + "#Прага"},
+			{Protocol: ProtoVLESS, Server: "198.51.100.10", Port: 443, DisplayName: "Вена",
+				Raw: "vless://u@198.51.100.10:443?security=reality&sni=" + sni1 + "&sid=" + sid1 + "#Вена"},
+			{Protocol: ProtoVLESS, Server: "198.51.100.10", Port: 443, DisplayName: "Прага",
+				Raw: "vless://u@198.51.100.10:443?security=reality&sni=" + sni2 + "&sid=" + sid2 + "#Прага"},
 		}
 		for i := range n {
 			n[i].finalize("sub")
@@ -97,27 +113,28 @@ func TestNodeIDSurvivesRotationOnAnAddressCarryingSeveralExits(t *testing.T) {
 		assignIDs(n)
 		return []string{n[0].ID, n[1].ID}
 	}
-	a := pull("3be8339923410338", "55e6d9bd269aac46")
-	b := pull("ffff111122223333", "4444555566667777")
+	a := pull("cdn2-15.yahoo.com", "cdn6-91.yahoo.com", "3be8339923410338", "55e6d9bd269aac46")
+	b := pull("img1-65.uefa.com", "hlst8-92.uefa.com", "ffff111122223333", "4444555566667777")
 	if a[0] == a[1] {
 		t.Fatal("two exits behind one address collapsed into one identity — exits would be silently dropped")
 	}
 	if a[0] != b[0] || a[1] != b[1] {
-		t.Errorf("a rotated short_id moved the identities: %v then %v", a, b)
+		t.Errorf("a rotated sid+sni moved the identities: %v then %v", a, b)
 	}
 }
 
 // The honest fallback. When the ONLY thing telling two exits apart is the field
 // that rotates, ignoring it would merge them — and merging silently deletes an
-// exit you are paying for, which is the unrecoverable direction. So the full
-// identity is kept for that address: the churn stays, no exit is lost, and the
-// address is named in the return value.
+// exit you are paying for, which is the unrecoverable direction. Here both the
+// connection parameters AND the name are shared, so rungs 1 and 2 collapse and
+// the full identity is kept: the churn stays, no exit is lost, and the address is
+// named in the return value.
 func TestNodeIDKeepsTheRotatingFieldWhenItIsTheOnlyDiscriminator(t *testing.T) {
 	n := []Node{
-		{Protocol: ProtoVLESS, Server: "198.51.100.11", Port: 443,
+		{Protocol: ProtoVLESS, Server: "198.51.100.11", Port: 443, DisplayName: "Осло",
 			Raw: "vless://u@198.51.100.11:443?security=reality&sni=one.yahoo.com&sid=aaaaaaaaaaaaaaaa#Осло"},
-		{Protocol: ProtoVLESS, Server: "198.51.100.11", Port: 443,
-			Raw: "vless://u@198.51.100.11:443?security=reality&sni=one.yahoo.com&sid=bbbbbbbbbbbbbbbb#Рига"},
+		{Protocol: ProtoVLESS, Server: "198.51.100.11", Port: 443, DisplayName: "Осло",
+			Raw: "vless://u@198.51.100.11:443?security=reality&sni=one.yahoo.com&sid=bbbbbbbbbbbbbbbb#Осло"},
 	}
 	for i := range n {
 		n[i].finalize("sub")
@@ -141,8 +158,8 @@ func TestNodeIDIgnoresANestedShortIDRotation(t *testing.T) {
 				`"tls":{"enabled":true,"server_name":"` + sni + `","reality":{"enabled":true,"short_id":"` + sid + `"}}}`
 		}
 		n := []Node{
-			{Protocol: ProtoVLESS, Server: "198.51.100.12", Port: 443, Raw: mk("a.yahoo.com", sid)},
-			{Protocol: ProtoVLESS, Server: "198.51.100.12", Port: 443, Raw: mk("b.yahoo.com", sid+"ff")},
+			{Protocol: ProtoVLESS, Server: "198.51.100.12", Port: 443, DisplayName: "А", Raw: mk("a.yahoo.com", sid)},
+			{Protocol: ProtoVLESS, Server: "198.51.100.12", Port: 443, DisplayName: "Б", Raw: mk("b.yahoo.com", sid+"ff")},
 		}
 		for i := range n {
 			n[i].finalize("sub")

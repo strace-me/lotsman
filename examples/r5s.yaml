@@ -63,7 +63,7 @@ services:
   - name: youtube
     probe_target: https://www.youtube.com/generate_204
     rule_sets: [geosite-youtube]
-    domains: [googlevideo.com, ytimg.com, youtubei.googleapis.com, jnn-pa.googleapis.com]
+    domains: [googlevideo.com, gvt1.com, gvt2.com, ytimg.com, youtubei.googleapis.com, jnn-pa.googleapis.com]
     sticky: true
     profile: streaming
     chain:

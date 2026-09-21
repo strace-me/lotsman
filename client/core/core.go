@@ -42,6 +42,7 @@ import (
 	"github.com/strace-me/lotsman/pkg/reconcile"
 	"github.com/strace-me/lotsman/pkg/registry"
 	"github.com/strace-me/lotsman/pkg/singbox"
+	"github.com/strace-me/lotsman/pkg/spine"
 	"github.com/strace-me/lotsman/pkg/state"
 	"github.com/strace-me/lotsman/pkg/strategy"
 	"github.com/strace-me/lotsman/pkg/strategycat"
@@ -106,22 +107,27 @@ type Options struct {
 	// Desync (zapret/nfqws) — Linux only, and only when the config actually has
 	// zapret chain steps. NFQUEUE needs root, which this service already has for
 	// the tun, so it costs nothing extra where it works at all.
-	NfqwsBin      string        // nfqws binary ("" = "nfqws" on PATH)
-	ZapretFiles   string        // dir holding zapret's fake payload .bin files ("" = skip the availability check)
-	HostlistDir   string        // dir for per-service nfqws hostlist files ("" = inline domains into argv, which forces an engine restart on every membership change)
-	SingboxBin    string        // sing-box binary, used to decompile rule-sets into domains ("" = "sing-box")
-	SingboxConfig string        // path of the live sing-box config the reconciler swaps
-	StateFile     string        // persists each service's chain position across restarts ("" = start cold every time)
-	NodeRank      bool          // rank a VPN pool's concrete nodes per service and pin the best, instead of riding plain url-test
-	PathHealth    bool          // escalation-v2 DETECT: probe every chain step out-of-band and log which tier works
-	PathHealthAct bool          // escalation-v2 ACT: let the brain jump straight to the best working tier (needs PathHealth)
-	EngineHealth  bool          // watch the desync engine and bring it back when it is wedged while a rule expects it
-	AuditLog      string        // append brain state transitions here as JSONL ("" = memory only, lost on restart)
-	FailLog       string        // append probe failures here as JSONL ("" = discarded)
-	RefreshEvery  time.Duration // how often to re-fetch subscriptions and reconcile (0 = never)
-	RoamInterval  time.Duration // how often to re-fingerprint the network for roaming (0 = default 15s; only in -kb-dir mode)
-	QNum          int           // NFQUEUE queue number (0 = 200, matching the router)
-	WAN           string        // egress interface for the nft rules ("" = autodetect the default route)
+	NfqwsBin      string // nfqws binary ("" = "nfqws" on PATH)
+	ZapretFiles   string // dir holding zapret's fake payload .bin files ("" = skip the availability check)
+	HostlistDir   string // dir for per-service nfqws hostlist files ("" = inline domains into argv, which forces an engine restart on every membership change)
+	SingboxBin    string // sing-box binary, used to decompile rule-sets into domains ("" = "sing-box")
+	SingboxConfig string // path of the live sing-box config the reconciler swaps
+	StateFile     string // persists each service's chain position across restarts ("" = start cold every time)
+	NodeRank      bool   // rank a VPN pool's concrete nodes per service and pin the best, instead of riding plain url-test
+	PathHealth    bool   // escalation-v2 DETECT: probe every chain step out-of-band and log which tier works
+	PathHealthAct bool   // escalation-v2 ACT: let the brain jump straight to the best working tier (needs PathHealth)
+	EngineHealth  bool   // watch the desync engine and bring it back when it is wedged while a rule expects it
+	// Smart composes the intelligence layer (correlate/damper/adaptive/anomaly +
+	// tspu) into the brain, exactly as the daemon does. Off = the plain
+	// fail-count threshold, which is how the client ran and why a link blip
+	// painted every rule red independently (LOT-74).
+	Smart        bool
+	AuditLog     string        // append brain state transitions here as JSONL ("" = memory only, lost on restart)
+	FailLog      string        // append probe failures here as JSONL ("" = discarded)
+	RefreshEvery time.Duration // how often to re-fetch subscriptions and reconcile (0 = never)
+	RoamInterval time.Duration // how often to re-fingerprint the network for roaming (0 = default 15s; only in -kb-dir mode)
+	QNum         int           // NFQUEUE queue number (0 = 200, matching the router)
+	WAN          string        // egress interface for the nft rules ("" = autodetect the default route)
 
 	// MetricsAddr serves the same Prometheus /metrics the daemon exposes (per-service
 	// position/state/broken/active-fails, KB EWMA, and — while it is set — the passive
@@ -166,6 +172,7 @@ type Core struct {
 
 	bus        *events.Bus
 	kb         *kb.KB
+	catalog    *strategy.Catalog    // strategy catalog, built once (Start/Reload) and shared with the intelligence layer
 	kbFile     string               // resolved KB path (KBFile, or a per-network file under KBDir); guarded by mu
 	ranker     *noderank.Ranker     // per-service node ranker; nil when NodeRank is off or there are no subscriptions
 	pathHealth *pathhealth.Detector // escalation-v2 detector; nil when PathHealth is off or no box-direct probe exists
@@ -389,12 +396,14 @@ func (c *Core) Start(ctx context.Context) error {
 	c.bus = events.NewBus()
 	c.kb = kb.New()
 
-	// Strategy catalog bounds what the KB may propose.
-	catalog := strategy.BuiltinCatalog()
+	// Strategy catalog bounds what the KB may propose. Built once and kept on the
+	// Core so buildLoop can hand the SAME catalog to the intelligence layer's
+	// BlockTypesFor instead of building a third copy.
+	c.catalog = strategy.BuiltinCatalog()
 	for _, d := range c.conf.Strategies {
-		catalog.Add(d)
+		c.catalog.Add(d)
 	}
-	c.kb.SetZapretSeed(catalog.ZapretIDs())
+	c.kb.SetZapretSeed(c.catalog.ZapretIDs())
 	// Wait for a network before deciding anything that depends on one. A laptop
 	// boots faster than its Wi-Fi associates, and everything downstream of here
 	// takes the absence of a network as a FACT about the world rather than as "not
@@ -682,8 +691,22 @@ func (c *Core) buildLoop() error {
 	// The brain asks the knowledge base which zapret strategy to use; the client
 	// narrows that to the ones it can actually render, so it cannot name an id the
 	// executor will silently replace (see renderableRecommender).
-	c.brain = brain.New(c.bus, c.reg, c.renderableKB(), brain.DefaultConfig(), c.rec, c.log)
+	brainCfg := brain.DefaultConfig()
+	c.brain = brain.New(c.bus, c.reg, c.renderableKB(), brainCfg, c.rec, c.log)
 	c.brain.SetReassert(c.opts.Interval)
+	// Intelligence layer, composed in pkg/spine so it is the SAME layer the daemon
+	// wires — the client ran on the plain fail-count threshold before this (LOT-65):
+	// no systemic-outage hold (every rule escalated independently when the link
+	// blipped, painting all of them red — LOT-74), no anti-flap damper, no adaptive
+	// thresholds, no degraded-vs-down, no block-type escalation jump.
+	if c.opts.Smart {
+		names := make([]string, 0, len(c.reg.Services))
+		for name := range c.reg.Services {
+			names = append(names, name)
+		}
+		c.brain.SetSmarts(spine.Smarts(c.kb, c.catalog, brainCfg, names))
+		c.log.Info("intelligence layer enabled", "components", "policy/correlate/damper/adaptive/anomaly")
+	}
 	if c.opts.StateFile != "" {
 		c.bindStateStore(c.currentNetID)
 	}
@@ -875,11 +898,11 @@ func (c *Core) Reload(newConf *config.Config) error {
 	c.conf = newConf
 	c.reg = newConf.Registry
 	c.pristineChains = snapshotChains(newConf.Registry)
-	catalog := strategy.BuiltinCatalog()
+	c.catalog = strategy.BuiltinCatalog()
 	for _, d := range newConf.Strategies {
-		catalog.Add(d)
+		c.catalog.Add(d)
 	}
-	c.kb.SetZapretSeed(catalog.ZapretIDs())
+	c.kb.SetZapretSeed(c.catalog.ZapretIDs())
 
 	// The loop is DOWN from here until buildLoop runs. Every exit past this point must
 	// rebuild it, or the client keeps a live tunnel with nothing steering it: no brain,
