@@ -131,6 +131,15 @@ func (s *Sandbox) installLocked(ctx context.Context) error {
 			s.Opts.WAN = wan
 		}
 	}
+	// The candidate engine's INJECTED packets carry nfqws's own fwmark, and they
+	// must stay out of the tunnel for the same reason production's do (see
+	// DesyncFwmark). Ensured HERE because the lane is what runs while production is
+	// unarmed — the exact window in which a missing rule turns a working recipe
+	// into a false negative.
+	_ = s.Run.Run(ctx, "ip", "rule", "del", "fwmark", fmt.Sprintf("0x%x", DesyncFwmark), "lookup", "main")
+	if err := s.Run.Run(ctx, "ip", "rule", "add", "fwmark", fmt.Sprintf("0x%x", DesyncFwmark), "lookup", "main", "pref", "100"); err != nil {
+		return fmt.Errorf("zapret: sandbox: keep the desync fwmark out of the tunnel: %w", err)
+	}
 	// A table from a killed run would otherwise stack with this one.
 	_ = s.Run.Run(ctx, "nft", "delete", "table", s.Opts.Table)
 	f, err := os.CreateTemp("", "lotsman-sandbox-*.nft")

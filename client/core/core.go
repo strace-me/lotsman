@@ -1534,6 +1534,11 @@ func (c *Core) Stop() error {
 			c.log.Warn("nfqws stop", "err", err)
 		}
 	}
+	// Cleared here, ONCE — not on every engine stop, because the lane needs it while
+	// production is unarmed. Leaving it would be harmless (a rare mark routed via
+	// main), but a client that leaves the host as it found it should not leave a
+	// global ip rule behind either.
+	nfqws.RemoveFwmarkBypass(tctx)
 	// Put the host's resolver back before tearing the tun down, so the machine is
 	// never left pointing at an in-tun sentinel whose tun no longer exists.
 	if c.hostDNS != nil {

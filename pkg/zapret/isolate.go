@@ -10,6 +10,19 @@ import (
 // every rule below keys on it.
 const TuneMark = 0x4554
 
+// DesyncFwmark is the fwmark nfqws stamps on the packets it INJECTS to desync a
+// connection (its --dpi-desync-fwmark; default 0x40000000). Unlike TuneMark it
+// marks the ENGINE's own output, not the probe's input, and on a tun client that
+// output must be kept out of the tunnel or it loops: the injected copy follows the
+// normal route, auto_route pulls it in, and the DPI sees a duplicated, split
+// ClientHello and answers RST while every log reports the strategy healthy.
+//
+// Shared here because BOTH engines need it excluded — production and the sandbox
+// lane — and the rule must outlive whichever one is running: measured 2026-09-22,
+// the lane gave a false negative on a recipe that works precisely when production
+// was unarmed and had removed the rule.
+const DesyncFwmark = 0x40000000
+
 // IsolateOptions describes a sandbox for measuring a candidate desync strategy
 // against live DPI without changing what anyone else's traffic gets.
 type IsolateOptions struct {

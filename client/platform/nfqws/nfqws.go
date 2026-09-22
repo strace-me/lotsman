@@ -31,20 +31,10 @@ import (
 	"github.com/strace-me/lotsman/pkg/zapret"
 )
 
-// desyncFwmark is the fwmark nfqws stamps on the packets it INJECTS to desync a
-// connection (its --dpi-desync-fwmark; default 0x40000000, passed explicitly in
-// launchLocked so this value and the engine's cannot drift).
-//
-// Those injected packets are raw and unbound, so they follow the normal route —
-// and on a tun client sing-box's auto_route pulls that route into the tunnel. The
-// loop that follows is silent and total: the DPI sees a duplicated, split
-// ClientHello, answers with a RST, and TLS times out while every log reports the
-// strategy applied and healthy. Measured 2026-09-22 on the ThinkPad: with the
-// client stopped ALT12 opened YouTube (204, 0.03s connect, 0.07s TLS); with it
-// running the SAME ALT12 timed out, and `ip rule add fwmark 0x40000000 lookup
-// main` restored 204 immediately and stably. So nfqws's injected traffic must be
-// excluded from the tunnel exactly as sing-box excludes its own.
-const desyncFwmark = 0x40000000
+// desyncFwmark is nfqws's own --dpi-desync-fwmark: the mark it stamps on the
+// packets it INJECTS. Kept out of the tunnel by ensureFwmarkBypass; the full
+// rationale lives on zapret.DesyncFwmark, which the sandbox lane shares.
+const desyncFwmark = zapret.DesyncFwmark
 
 // Engine owns one nfqws instance and its nft table.
 type Engine struct {
@@ -235,9 +225,11 @@ func (e *Engine) Stop(ctx context.Context) error {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	e.stopProcessLocked()
-	// Before the armed guard: the bypass rule is not part of the nft table, so a
-	// Stop that finds nothing to disarm must still clear it.
-	e.removeFwmarkBypass(ctx)
+	// The fwmark bypass rule is deliberately NOT removed here. Stopping production
+	// is the normal state while the lane measures a recovery candidate, and the
+	// candidate's injected packets need the rule just as much — removing it here is
+	// what made the lane report a false negative on a recipe that works. It is
+	// cleared once, at client shutdown (RemoveFwmarkBypass).
 	if !e.armed {
 		return nil
 	}
@@ -265,9 +257,9 @@ func (e *Engine) Alive() bool {
 }
 
 // ensureFwmarkBypass adds the rule that keeps nfqws's injected desync packets out
-// of the tunnel (see desyncFwmark). Idempotent, and Linux-only in effect because
-// the engine is. pref 100 sits above sing-box's 9000+ policy rules, so it wins.
-func (e *Engine) ensureFwmarkBypass(ctx context.Context) error {
+// of the tunnel (see zapret.DesyncFwmark). Idempotent, and Linux-only in effect
+// because the engine is. pref 100 sits above sing-box's 9000+ policy rules.
+func ensureFwmarkBypass(ctx context.Context) error {
 	mark := fmt.Sprintf("0x%x", desyncFwmark)
 	// Delete-then-add: a stale rule with the same selector makes `ip rule add`
 	// fail with "File exists", which would be read as the fix not applying.
@@ -278,9 +270,10 @@ func (e *Engine) ensureFwmarkBypass(ctx context.Context) error {
 	return nil
 }
 
-// removeFwmarkBypass clears the rule on teardown. Best effort: an orphaned rule
-// merely routes a rare mark via main, which is where those packets belong anyway.
-func (e *Engine) removeFwmarkBypass(ctx context.Context) {
+// RemoveFwmarkBypass clears the rule at client shutdown — once, not on every engine
+// stop, because the lane needs it while production is down. Best effort: an
+// orphaned rule merely routes a rare mark via main, where those packets belong.
+func RemoveFwmarkBypass(ctx context.Context) {
 	_ = run(ctx, "ip", "rule", "del", "fwmark", fmt.Sprintf("0x%x", desyncFwmark), "lookup", "main")
 }
 
@@ -296,7 +289,7 @@ func (e *Engine) installNftLocked(ctx context.Context, args []string) error {
 	// Before any early return: the bypass rule can be lost to a reboot or another
 	// tool without the queue itself changing, and a missing rule is the silent
 	// total failure desyncFwmark describes.
-	if err := e.ensureFwmarkBypass(ctx); err != nil {
+	if err := ensureFwmarkBypass(ctx); err != nil {
 		return err
 	}
 	// The instance's own spec is a FLOOR, not the whole answer: it keeps the
