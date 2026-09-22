@@ -96,7 +96,26 @@ func GenerateNft(instances []Instance, opts NftOptions) string {
 	// to measure a candidate strategy without imposing it on the household.
 	fmt.Fprintf(&b, "        meta mark 0x%x return\n", TuneMark)
 	if len(opts.VPNServers) > 0 {
-		fmt.Fprintf(&b, "        ip daddr { %s } return\n", strings.Join(opts.VPNServers, ", "))
+		// Split by family. A v6 literal inside an `ip daddr` (v4) set makes nft
+		// refuse the WHOLE ruleset ("Address family for hostname not supported"),
+		// which takes the desync down entirely — no queue, no strategy, nothing.
+		// Measured on the ThinkPad 2026-09-21: one node's AAAA in this list did
+		// exactly that, so the engine never installed and the isolated lane then
+		// "proved" no candidate, leaving every desync rung with no desync at all.
+		var v4, v6 []string
+		for _, ip := range opts.VPNServers {
+			if strings.Contains(ip, ":") {
+				v6 = append(v6, ip)
+			} else {
+				v4 = append(v4, ip)
+			}
+		}
+		if len(v4) > 0 {
+			fmt.Fprintf(&b, "        ip daddr { %s } return\n", strings.Join(v4, ", "))
+		}
+		if len(v6) > 0 {
+			fmt.Fprintf(&b, "        ip6 daddr { %s } return\n", strings.Join(v6, ", "))
+		}
 	}
 	for _, in := range instances {
 		writeRule(&b, opts.WAN, "tcp", in.Capture.TCP, in.QNum, in.Connbytes)
