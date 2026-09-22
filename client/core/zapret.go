@@ -184,6 +184,19 @@ func (z *zapretExec) Enable(ctx context.Context, service, strategyID string) err
 	}
 	z.mu.Unlock()
 
+	// A PIN is an explicit instruction, not a guess: apply it now instead of holding
+	// it behind the lane. The gate exists to keep an UNPROVEN candidate off live
+	// traffic; a named preset is the operator's assertion. Without this the client
+	// can sit indefinitely with the rung pinned and NOTHING applied, because the
+	// lane proves no candidate (its control cannot even establish the path), while
+	// the same preset — applied by hand, or by winws on Windows — works. Measured
+	// on the ThinkPad 2026-09-21: hand-applied ALT12 gave youtube 204 while the
+	// gated client left youtube direct with no desync and it timed out.
+	if strategyID != "" {
+		if _, ok := z.presetByName(strategyID); ok {
+			return z.applyNow(ctx, service, strategyID)
+		}
+	}
 	if z.gate == nil {
 		return z.applyNow(ctx, service, strategyID)
 	}
