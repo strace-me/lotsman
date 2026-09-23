@@ -55,8 +55,8 @@ const (
 )
 
 // Axes is the nfqws desync search space. Values are grounded in what
-// blockcheck/Zapret-Manager and the live alt-recipes actually use (docs/
-// RESEARCH-adoptable.md); Ordinal/Numeric order defines Mutate adjacency. method
+// blockcheck/Zapret-Manager and the live alt-recipes actually use;
+// Ordinal/Numeric order defines Mutate adjacency. method
 // is always emitted; the rest are optional (off sentinel). fake_tls_mod and
 // fake_quic only bite when the method fakes — nfqws ignores them otherwise, so a
 // nonsensical combo just wastes a probe; the fitness ranks it out.
@@ -107,7 +107,7 @@ func seed(over desyncgen.Strategy) desyncgen.Strategy {
 }
 
 // Seeds is the prior catalog: hand-proven recipes decomposed into axes (the alt-
-// recipes in docs/RESEARCH-adoptable.md + the SlenderSolo/zapret-manager
+// recipes in the hand-proven alt set + the SlenderSolo/zapret-manager
 // strategies.txt enumeration). A cold search starts from these instead of a blind
 // Grid — priors are the strongest lever on a near-binary fitness landscape. The
 // RANDOMIZING fake variants lead (they outlast static fakes DPI memorizes). The

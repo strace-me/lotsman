@@ -315,7 +315,7 @@ func main() {
 			log.Info("node ranking: throughput is observed per exit, not probed",
 				"source", "clash /connections byte deltas", "window", observeInterval.String(),
 				"acts_on_ranking", false,
-				"note", "visible in the ranker log; no floor and no balancer weight consumes it yet — docs/DESIGN-node-selection.md")
+				"note", "visible in the ranker log; no floor and no balancer weight consumes it yet")
 			if *nodeGoodputURL != "" {
 				log.Warn("-node-goodput-url is ignored: throughput is observed per exit now, not pulled from a URL",
 					"was", *nodeGoodputURL)

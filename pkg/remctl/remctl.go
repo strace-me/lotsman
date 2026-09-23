@@ -10,7 +10,7 @@
 // real reconcile required. main.go wires the real apply/rollback (which update
 // an active-remediations map and call reconcile) behind a default-OFF flag.
 //
-// # The ladder (rungs, from docs/DESIGN-selfheal-misroute.md §4)
+// # The ladder (rungs)
 //
 //	rung 1 — ip-fallback   : route learned CDN CIDRs to the service selector
 //	rung 2 — reject-quic    : reject udp/443 so the client retries over TCP

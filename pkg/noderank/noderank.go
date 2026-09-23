@@ -458,7 +458,6 @@ func (r *Ranker) Pick(ctx context.Context, svc Service, cands []Candidate) (stri
 	// TLS handshake — with nothing in any log to contradict the healthy-looking
 	// numbers. This is that missing line. It states a fact and changes no decision:
 	// promoting on it needs a challenger canary, not a louder log
-	// (docs/DESIGN-node-selection.md).
 	if best.Q.GoodputKnown {
 		for _, p := range pool {
 			if !p.cand.Q.GoodputKnown || p.cand.ID == best.ID {

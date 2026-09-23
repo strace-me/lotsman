@@ -26,7 +26,7 @@ const (
 	// re-running. A result is evidence about a moment: the freeze is per-connection
 	// and time-varying, so an old number is not a small error, it is a different
 	// question. Past this age a node is treated as unmeasured rather than as its
-	// last value (docs/DESIGN-node-selection.md, "Staleness").
+	// last value.
 	defaultCanaryEvery = 30 * time.Minute
 
 	// defaultPromoteMargin is the fraction by which a challenger's measured carry

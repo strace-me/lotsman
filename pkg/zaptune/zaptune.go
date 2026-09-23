@@ -155,7 +155,7 @@ type PinIgnored struct {
 // produced — the caller applies the composed config ONLY then, otherwise it keeps
 // the existing whole-config (e.g. Flowseal alt12). This is because a whole-script
 // strategy and composed recipe blocks are different nfqws-config forms that do
-// not mix per-service (see docs/DESIGN-strategy-generator.md). Pure — no I/O.
+// not mix per-service. Pure — no I/O.
 // hostlistDir, when non-empty, scopes each block by a per-service hostlist FILE
 // under that directory instead of inlining its domains into the arguments. The
 // files themselves are returned in Plan.Hostlists for the caller to write.

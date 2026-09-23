@@ -1,11 +1,8 @@
 # Code map
 
 Dense per-package index of the Lotsman repo. Read this to rehydrate the whole
-architecture without grepping source. **New session: read
-[START-HERE.md](START-HERE.md) first** — what the project is, where it stands, and
-the principles it derived. For prose, see
-[ARCHITECTURE.md](ARCHITECTURE.md); for direction, see [ROADMAP.md](ROADMAP.md)
-and the GitHub issue tracker.
+architecture without grepping source. Direction and open work live in the GitHub
+issue tracker.
 
 ## What it is
 
@@ -184,9 +181,9 @@ what it had, both were green, and the only detector was a service misbehaving on
 
 ### Client (`client/`, desktop)
 
-Single-device Lotsman. Composes the spine above unchanged — see [CLIENT.md](CLIENT.md)
-for how to run it and the operational facts. Desktop shape is a privileged service
-plus a thin unprivileged UI, since only the tun and the NFQUEUE rules need root.
+Single-device Lotsman. Composes the spine above unchanged. Desktop shape is a
+privileged service plus a thin unprivileged UI, since only the tun and the
+NFQUEUE rules need root.
 
 - `client/core` — spine composition (bus/kb/brain/applier/probing), client config
   generation, preflight refusals, subscription reconcile, box supervisor, canary
@@ -263,6 +260,5 @@ plus a thin unprivileged UI, since only the tun and the NFQUEUE rules need root.
 
 ## Other durable state
 
-- [docs/ARCHITECTURE.md](ARCHITECTURE.md) — prose architecture, state machine, routing model.
-- [docs/ROADMAP.md](ROADMAP.md) — direction and what's not wired yet; open work lives in the GitHub issue tracker.
-- [docs/CLIENT.md](CLIENT.md) — the desktop client: running it, host requirements, and the facts that cost the most to learn.
+Prose architecture and the design series are maintained outside the public tree;
+the map above is the canonical index of the code.

@@ -1,6 +1,6 @@
 // Package remediate is the self-heal remediation PLANNER (LOT-18a): a pure
 // function that turns a misroute Verdict into a staged remediation Plan — one
-// rung of the ladder from docs/DESIGN-selfheal-misroute.md §4.
+// rung of the ladder.
 //
 // Phase 18a is PROPOSE-ONLY. Plan has no I/O and mutates nothing: it decides
 // WHICH rung is appropriate for a verdict (given whether learned CDN CIDRs are

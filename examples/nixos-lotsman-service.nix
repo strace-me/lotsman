@@ -46,7 +46,7 @@ let
   #   sudo install -m0644 assets/zapret-payloads/*.bin /var/lib/lotsman-payloads/
   payloadDir = "/var/lib/lotsman-payloads";
   storePayloads = "${pkgs.zapret}/usr/share/zapret/files/fake";
-  user = "operator"; # the desktop user whose unprivileged GUI/tray drives the service
+  user = "alice"; # the desktop user whose unprivileged GUI/tray drives the service
 in
 {
   # The privilege seam: the service runs as root, the GUI does not. A 0660 socket owned

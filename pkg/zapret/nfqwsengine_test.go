@@ -43,8 +43,8 @@ func TestNfqwsEngineOmitsOffKnobs(t *testing.T) {
 	}
 }
 
-// The engine's vocabulary must be wide enough to express the real alt-recipes
-// (docs/RESEARCH-adoptable.md), not just the narrow original 7 axes — otherwise
+// The engine's vocabulary must be wide enough to express the real alt-recipes,
+// not just the narrow original 7 axes — otherwise
 // the search can never rediscover a working hand recipe. Reproduce two of them.
 func TestNfqwsEngineExpressesRealRecipes(t *testing.T) {
 	e := NfqwsEngine{}

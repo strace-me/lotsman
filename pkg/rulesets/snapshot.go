@@ -18,7 +18,7 @@ const manifestName = "manifest"
 // Snapshot copies the live .srs for tags into a new timestamped directory under
 // snapDir and returns its path.
 //
-// This is the piece docs/AUTOUPDATE.md has specified since June — "atomic swap,
+// This is the piece auto-update has always wanted — "atomic swap,
 // keep the prior snapshot for rollback" — and never had. Its absence leaves two
 // live hazards, not one. A swap that fails part-way through leaves some tags on
 // the new release and some on the old, a state no release ever produced. And the

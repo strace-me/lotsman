@@ -808,7 +808,7 @@ func (c *Core) buildLoop() error {
 		det := &pathhealth.Detector{
 			Reg: c.reg, Pos: c.brain, Direct: boxDirect, Nodes: c.clash,
 			TestURL: pathHealthTestURL, Timeout: 4 * time.Second, Log: c.log,
-			// Two, not the package default of four. docs/DESIGN-clients.md: the TSPU
+			// Two, not the package default of four: the TSPU
 			// freezes on more than three parallel handshakes, so a fan-out sized for a
 			// router on a wired uplink is the wrong shape on a client that shares one
 			// radio — the scan would provoke the very failure it is measuring for.

@@ -1,4 +1,4 @@
-// Package capture is the TM-2 capture layer (docs/DESIGN-tm2-capture.md): it
+// Package capture is the TM-2 capture layer: it
 // turns Lotsman into the OWNER of the tproxy nft table that pulls LAN traffic
 // into sing-box — the third of the four data-plane layers (route + desync are
 // already owned; capture + NAT were hardcoded in /usr/bin/sb-nft).

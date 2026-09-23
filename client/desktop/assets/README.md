@@ -2,8 +2,7 @@
 
 Mark: a **sextant** — the instrument a harbour pilot (лоцман) uses to find their
 bearing, i.e. Lotsman finds the working path past the DPI. Chosen after a long
-bake-off (buoy / compass / створ / AI-gen attempts all rejected); see the logo
-section in [../../../docs/DESIGN-client-ui.md](../../../docs/DESIGN-client-ui.md).
+bake-off (buoy / compass / створ / AI-gen attempts all rejected).
 
 - **`lotsman.svg`** — source of truth. Edit this, then re-render the PNGs.
 - **`icon-{16,32,64,128,256,512,1024}.png`** — rendered app-icon set (teal tile,

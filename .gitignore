@@ -63,3 +63,7 @@ skills-lock.json
 # из git через scripts/build.sh, так что терять их не страшно — но `git clean -xdf`
 # сносит и игнорируемое, а значит снесёт и их.
 /rollbacks/
+
+# Рабочий артеФилтер: plaintext-секреты (old-значения) для --replace-text.
+# Каноника живёт в /tmp/opencode/replace-text-scrub; в репо не коммитить.
+/.replace-text-scrub

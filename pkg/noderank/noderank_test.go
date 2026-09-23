@@ -408,7 +408,7 @@ func TestHealthSnapshot(t *testing.T) {
 	}
 }
 
-// docs/DESIGN-node-selection.md, acceptance #1 and #6: an exit that answers
+// Acceptance #1 and #6: an exit that answers
 // quickly and carries nothing must not be chosen, and must lose its place on the
 // OBSERVATION rather than after a streak. This is the TSPU volume freeze — 40ms to
 // a delay probe, nothing afterwards — and loss, latency and jitter all read
