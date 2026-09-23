@@ -32,7 +32,7 @@ type Quality struct {
 	// dimension exists to remove. Read it together with Short, which says the
 	// measurement was about a small file rather than about the path.
 	GoodputKnown bool
-	Bytes       int64   // total bytes pulled (0 = froze from the first byte)
+	Bytes        int64 // total bytes pulled (0 = froze from the first byte)
 	// Short means the ENDPOINT ran out before the requested volume — every read
 	// reached end-of-body rather than being cut off by the deadline. A low goodput
 	// then measures how small the file is, not how bad the path is, and must not be

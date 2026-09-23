@@ -26,8 +26,12 @@ func TestDefaultSocketPathFallsBackToPerUserWhenNothingExists(t *testing.T) {
 	t.Setenv("XDG_RUNTIME_DIR", dir)
 	perUser := filepath.Join(dir, "lotsman", "control.sock")
 	// Neither the per-user socket nor (in a normal test env) the system one exists,
-	// so a fresh same-user run should still get the per-user path to bind.
-	if got := DefaultSocketPath(); got != perUser {
+	// so a fresh same-user run should still get the per-user path to bind. The
+	// system path is honed down to a per-test temp dir rather than the real
+	// SystemSocketPath: the daily-driver service owns the real /run/lotsman socket,
+	// and a test must not read its decisions from the machine it happens to run on.
+	system := filepath.Join(t.TempDir(), "lotsman", "control.sock")
+	if got := chooseSocketPath(perUser, system); got != perUser {
 		t.Errorf("DefaultSocketPath() = %q, want per-user fallback %q", got, perUser)
 	}
 }

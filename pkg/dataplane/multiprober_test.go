@@ -147,7 +147,10 @@ func TestSTUNRejectsGarbageResponse(t *testing.T) {
 func TestProbesDoNotReuseConnections(t *testing.T) {
 	var mu sync.Mutex
 	conns := map[net.Conn]bool{}
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	// ConnState must be wired before the server starts: NewServer starts serving
+	// immediately, and assigning Config.ConnState afterwards races with the server
+	// goroutine reading the field. NewUnstartedServer lets us set it first.
+	srv := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusNoContent)
 	}))
 	srv.Config.ConnState = func(c net.Conn, s http.ConnState) {
@@ -157,6 +160,7 @@ func TestProbesDoNotReuseConnections(t *testing.T) {
 			mu.Unlock()
 		}
 	}
+	srv.Start()
 	defer srv.Close()
 
 	p := NewHTTPProber(map[string]string{"youtube": srv.URL})
