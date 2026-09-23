@@ -6,6 +6,32 @@ older sections carry working dates rather than release dates.
 
 ## [Unreleased] — v7.1
 
+### A desync engine that never installed, and injected packets that looped
+
+- **A node's IPv6 address rendered inside the IPv4 `ip daddr` set** made `nft` refuse
+  the whole rule ("Address family for hostname not supported"), so the desync engine
+  could not install at all — no queue, no strategy, nothing, while every status read
+  healthy. v4 now goes to `ip daddr`, v6 to `ip6 daddr` (`pkg/zapret/instance.go`).
+  The same class was fixed in `pkg/capture` (LOT-38); the desync renderer was its
+  unpaired sibling.
+- **nfqws's injected packets were pulled into the tunnel.** nfqws stamps the packets it
+  injects with `--dpi-desync-fwmark` (0x40000000); they are raw and unbound, so
+  `auto_route` pulled them into the tun, the DPI saw a duplicated, split ClientHello and
+  answered RST, and TLS timed out while every log reported the strategy applied. The
+  client installed no fwmark ip rule at all. The mark is now shared
+  (`zapret.DesyncFwmark`), the bypass rule is ensured by BOTH the production engine and
+  the sandbox lane, and it is cleared once at client shutdown rather than on every engine
+  stop — removing it on Stop is what made the lane report a false negative on a recipe
+  that works.
+- Measured on the ThinkPad 2026-09-22: with the client stopped ALT12 opened YouTube
+  (204, 0.03s connect); with it running the SAME ALT12 timed out. After the fix, YouTube
+  204 and the production canary carried 64 KiB at 260–475 KiB/s. Full evidence in
+  `docs/FINDING-lane-no-candidate.md`.
+- **A pinned desync preset now applies directly**, not behind the sandbox gate: a chain
+  step's `strategy_id` is the operator's instruction, and holding it "until the lane
+  proves the candidate" applied NOTHING for hours on a network where the lane could not
+  prove anything.
+
 ### The desktop half is called `lotsman`, like everything else
 
 - The binary, the systemd unit and the install templates were `lotsman-client`

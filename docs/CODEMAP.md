@@ -117,7 +117,8 @@ flag-gated and dry-run by default.
 
 ## Where to change X
 
-- **Add a desync engine (nfqws/byedpi/youtube-unblock)** → implement `desyncgen.Engine` (Axes + Render); generation/probing/ranking is reused.
+- **Add a desync engine (nfqws2/byedpi/youtube-unblock)** → implement `desyncgen.Engine` (Axes + Render); generation/probing/ranking is reused. nfqws2 keeps nfqws1's **argv launch shape** (`client/platform/nfqws` runs `exec.Command(bin, argv...)`, the router's init script execs argv) — the seam is the axes/Render, not the launcher. Its actions are Lua (`--lua-desync`) and its payloads are blobs (`--blob=name:@file`, standard `fake_default_*` auto-initialised), so the payload guards (`usablePayloadRecipes`/`absolutizePayloads`, `client/core/payloads.go`) need v2 analogues for `--blob`, and the KB key gains an engine namespace.
+- **Add a manual strategy catalog** → a `strategies.dir` of argv-text files (engine chosen by directory, e.g. `nfqws1/`, `nfqws2/`), read at start/reload/periodically, surfaced to the GUI by `GET /strategies` (see LOT-76/59).
 - **Add a strategy class / new data-plane action** → `pkg/executor` (`StrategyExecutor`), then register in main wiring.
 - **Add a remediation rung** → `pkg/remediate` (planner) + `pkg/remctl` (armed apply/rollback); record in `pkg/incident`.
 - **Change escalation behavior** → `brain.escalateLocked` / `brain.shouldEscalate`; parallel-tier detect in `pkg/pathhealth`; signals via `brain.Smarts`.
