@@ -771,7 +771,7 @@ loss silent.
   asked only whether a UDP flow existed, which an NTP exchange satisfies, and
   would have deferred forever.
 - **Rule-set updates roll back by snapshot**, spanning the swap AND the reconcile
-  that validates it — the piece `docs/AUTOUPDATE.md` specified in June and the code
+  that validates it — the piece the June design specified and the code
   never had.
 - `nfqws`'s last words are recorded when it dies on its own, instead of a bare
   exit status.
