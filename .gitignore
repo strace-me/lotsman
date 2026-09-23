@@ -67,3 +67,4 @@ skills-lock.json
 # Рабочий артеФилтер: plaintext-секреты (old-значения) для --replace-text.
 # Каноника живёт в /tmp/opencode/replace-text-scrub; в репо не коммитить.
 /.replace-text-scrub
+.claude/
