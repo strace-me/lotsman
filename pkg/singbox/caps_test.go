@@ -48,6 +48,32 @@ func TestCapsUngatedFeatureDefaultsSupported(t *testing.T) {
 	}
 }
 
+// Every feature gated so far must light up on a newer target: the generator is
+// forward-compatible, so a machine on 1.13/1.14/1.15 gets the full set the config
+// asks for once that version is installed. This is the "supports a newer sing-box"
+// guarantee — the version string is parsed, not matched against a fixed list.
+func TestCapsNewerTargetsEnableEveryGatedFeature(t *testing.T) {
+	// Everything but gecko is gated at or below 1.12; gecko lands in 1.14.
+	base := []Feature{FeatureTLSFragment, FeatureUTLS, FeatureAnyTLS, FeatureFakeIP, FeatureDNSServers, FeatureMultiplex, FeatureShadowTLS, FeatureWireGuard, FeatureECH}
+	c13 := Capabilities("1.13.0")
+	for _, f := range base {
+		if !c13.Supports(f) {
+			t.Errorf("sing-box 1.13.0 should support %s", f)
+		}
+	}
+	if c13.Supports(FeatureGeckoObfs) {
+		t.Error("sing-box 1.13.0 must NOT support gecko (1.14+)")
+	}
+	for _, v := range []string{"1.14.0", "1.15.0", "1.15", "2.0.0"} {
+		c := Capabilities(v)
+		for _, f := range append(append([]Feature{}, base...), FeatureGeckoObfs) {
+			if !c.Supports(f) {
+				t.Errorf("sing-box %s should support %s", v, f)
+			}
+		}
+	}
+}
+
 func TestAtLeast(t *testing.T) {
 	cases := []struct {
 		a, b string
