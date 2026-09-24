@@ -3,6 +3,8 @@ package core
 import (
 	"context"
 	"net"
+	"os"
+	"strings"
 	"time"
 
 	"github.com/strace-me/lotsman/pkg/config"
@@ -171,7 +173,9 @@ func (c *Core) tickDirectFailover(ctx context.Context, list []string, st *dnsFai
 }
 
 // directResolverAddress is the Direct resolver's current endpoint, or "" when there
-// is none (no direct split, or a type:local server with no address).
+// is none (no direct split). A type:local Direct carries no address of its own —
+// its queries go to the host's configured nameserver(s) — so its FIRST nameserver
+// is returned, which is what the probe must test off-tun.
 func (c *Core) directResolverAddress() string {
 	c.stateMu.Lock()
 	defer c.stateMu.Unlock()
@@ -179,8 +183,33 @@ func (c *Core) directResolverAddress() string {
 		return ""
 	}
 	for _, s := range c.conf.DNS.Servers {
-		if s.Name == c.conf.DNS.Direct {
+		if s.Name != c.conf.DNS.Direct {
+			continue
+		}
+		if s.Address != "" {
 			return s.Address
+		}
+		if s.Type == "local" {
+			return osNameserver()
+		}
+	}
+	return ""
+}
+
+// osNameserver returns the host's first configured nameserver, or "". A type:local
+// Direct resolver queries whatever /etc/resolv.conf names; probing that address
+// directly (bound to the WAN) is how the direct half is tested off-tun (LOT-83).
+func osNameserver() string {
+	b, err := os.ReadFile("/etc/resolv.conf")
+	if err != nil {
+		return ""
+	}
+	for _, line := range strings.Split(string(b), "\n") {
+		f := strings.Fields(line)
+		if len(f) >= 2 && f[0] == "nameserver" {
+			if ip := net.ParseIP(f[1]); ip != nil {
+				return f[1]
+			}
 		}
 	}
 	return ""
