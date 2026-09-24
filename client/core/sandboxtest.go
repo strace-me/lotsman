@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+	"net/url"
 	"runtime"
 	"strings"
 	"time"
@@ -23,6 +24,34 @@ import (
 // dataplane.ProductionResolver.
 func (c *Core) productionResolver() *net.Resolver {
 	return dataplane.ProductionResolver(tunSentinel(c.tunOptions()), 4*time.Second)
+}
+
+// resolveVolumeTarget resolves the rule's first volume target through the SAME
+// resolver the lane dials with, so the log names the exact IP the measurement is
+// against. Comparing it with the IP production actually dials is how a probe/prod
+// divergence of the LOT-77 kind — same hostname, different CDN IP, a different
+// bundle profile matched — becomes visible instead of hiding behind "the recipe
+// failed". Returns "" when there is nothing to resolve; it never blocks the lane.
+func (c *Core) resolveVolumeTarget(ctx context.Context, svc registry.Service) string {
+	targets := volumeTargets(svc)
+	if len(targets) == 0 {
+		return ""
+	}
+	u, err := url.Parse(dataplane.FetchURL(targets[0]))
+	if err != nil || u.Hostname() == "" {
+		return ""
+	}
+	r := c.productionResolver()
+	if r == nil {
+		r = net.DefaultResolver
+	}
+	lctx, cancel := context.WithTimeout(ctx, 3*time.Second)
+	defer cancel()
+	ips, err := r.LookupHost(lctx, u.Hostname())
+	if err != nil || len(ips) == 0 {
+		return ""
+	}
+	return ips[0]
 }
 
 // sandboxProbeTimeout bounds one candidate measurement end to end.
@@ -205,6 +234,12 @@ func (c *Core) measureArm(ctx context.Context, svc registry.Service, sb *zapret.
 			"argv", strings.Join(argv, " "))
 	} else {
 		c.log.Info("sandbox control arm: nothing on the queue", "service", svc.Name)
+	}
+	// Name the IP the lane measured. A probe/prod divergence (LOT-77) is invisible
+	// without it: "the recipe failed" reads the same whether the recipe is wrong or
+	// the probe dialled a CDN IP production never uses.
+	if ip := c.resolveVolumeTarget(ctx, svc); ip != "" {
+		c.log.Info("sandbox lane target", "service", svc.Name, "candidate", label, "ip", ip)
 	}
 	if err := sb.Apply(setup, argv); err != nil {
 		// nfqws validates its inputs after dropping privileges, so a refusal here is
