@@ -1054,8 +1054,34 @@ func Generate(services []registry.Service, devices []registry.Device, nodes []su
 				}
 			}
 			sort.Strings(directRuleSets)
+			// Zapret-class services resolve through a public resolver (LOT-83): their
+			// traffic may run desynced over a DIRECT connection, so it needs the real,
+			// unpoisoned IP — not the office DNS (wrong for censored domains) and not
+			// the VPN resolver (which ties resolution to the tunnel). Collected as both
+			// rule-sets and inline domains because a sing-box rule ANDs its fields.
+			var zapretRuleSets, zapretDomains []string
+			seenZRS, seenZD := map[string]bool{}, map[string]bool{}
+			for _, svc := range services {
+				if !svc.HasZapretRung() {
+					continue
+				}
+				for _, rs := range svc.RuleSets {
+					if !seenZRS[rs] {
+						seenZRS[rs] = true
+						zapretRuleSets = append(zapretRuleSets, rs)
+					}
+				}
+				for _, dm := range svc.Domains {
+					if !seenZD[dm] {
+						seenZD[dm] = true
+						zapretDomains = append(zapretDomains, dm)
+					}
+				}
+			}
+			sort.Strings(zapretRuleSets)
+			sort.Strings(zapretDomains)
 			validDetour := func(tag string) bool { return nonEmptyPool[tag] }
-			if dns, ok := dnsSection(opts.DNS, directRuleSets, validDetour, caps); ok {
+			if dns, ok := dnsSection(opts.DNS, directRuleSets, zapretRuleSets, zapretDomains, validDetour, caps); ok {
 				cfg["dns"] = dns
 				// sing-box 1.12 makes a missing resolver FATAL for any outbound that
 				// dials a HOSTNAME (a node server given as a domain). Point route at the

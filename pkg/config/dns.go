@@ -15,6 +15,7 @@ import (
 type DNS struct {
 	Servers  []DNSServer
 	Direct   string // tag of the resolver for RU-direct domains ("" = no direct split)
+	Zapret   string // tag of the resolver for zapret-class services — public, off-VPN and off the office DNS ("" = no zapret split)
 	Final    string // tag of the default/fallback resolver
 	Strategy string // prefer_ipv4 | prefer_ipv6 | ipv4_only | ipv6_only ("" = prefer_ipv4)
 	FakeIP   bool
@@ -92,6 +93,7 @@ func dnsEncryptedType(t string) bool {
 type dnsYAML struct {
 	Servers        []dnsServerYAML `yaml:"servers"`
 	Direct         string          `yaml:"direct"`
+	Zapret         string          `yaml:"zapret"`
 	Final          string          `yaml:"final"`
 	Strategy       string          `yaml:"strategy"`
 	FakeIP         bool            `yaml:"fakeip"`
@@ -118,7 +120,7 @@ func buildDNS(y *dnsYAML) (*DNS, error) {
 	if y == nil || len(y.Servers) == 0 {
 		return nil, nil
 	}
-	d := &DNS{Direct: y.Direct, Final: y.Final, Strategy: y.Strategy, FakeIP: y.FakeIP}
+	d := &DNS{Direct: y.Direct, Zapret: y.Zapret, Final: y.Final, Strategy: y.Strategy, FakeIP: y.FakeIP}
 	seen := map[string]bool{}
 	for _, s := range y.Servers {
 		if s.Name == "" {
@@ -146,6 +148,9 @@ func buildDNS(y *dnsYAML) (*DNS, error) {
 	}
 	if d.Direct != "" && !seen[d.Direct] {
 		return nil, fmt.Errorf("config: dns.direct %q is not a declared server", d.Direct)
+	}
+	if d.Zapret != "" && !seen[d.Zapret] {
+		return nil, fmt.Errorf("config: dns.zapret %q is not a declared server", d.Zapret)
 	}
 	// Failover re-points a resolver at a provider. Final must already BE a
 	// provider-based server (there is nothing to rotate on a bare endpoint). Direct

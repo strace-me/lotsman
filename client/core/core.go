@@ -1960,7 +1960,7 @@ func defaultDNS(pool string) *singbox.DNSOptions {
 // "vpn" detour alias to the primary VPN pool tag and pointing a hostname-addressed
 // server's bootstrap at the direct resolver.
 func dnsFromConfig(d *config.DNS, pool string) *singbox.DNSOptions {
-	out := &singbox.DNSOptions{Direct: d.Direct, Final: d.Final, Strategy: d.Strategy}
+	out := &singbox.DNSOptions{Direct: d.Direct, Zapret: d.Zapret, Final: d.Final, Strategy: d.Strategy}
 	if d.FakeIP {
 		out.FakeIP = &singbox.FakeIPOptions{} // standard reserved ranges
 	}

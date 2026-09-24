@@ -114,6 +114,24 @@ func (s Service) DirectOnly() bool {
 	return len(s.Chain) > 0 && s.Chain[0].StrategyClass == strategy.ClassDirect
 }
 
+// HasZapretRung reports whether any step of the chain is a zapret-class rung — a
+// service whose traffic may run desynced over a DIRECT connection. Such a service
+// resolves via the zapret DNS (a public resolver, off-VPN and off the office DNS),
+// so a desynced direct connection is not handed a poisoned or office-only answer
+// (LOT-83). A direct-ONLY service is excluded: it is the office case, served by the
+// direct resolver.
+func (s Service) HasZapretRung() bool {
+	if s.DirectOnly() {
+		return false
+	}
+	for _, step := range s.Chain {
+		if step.StrategyClass == strategy.ClassZapret {
+			return true
+		}
+	}
+	return false
+}
+
 // TunnelIntended reports whether the service's PREFERRED (position-0) path is a
 // VPN tunnel. Only such services treat a "direct" flow as a leak: zapret/direct/
 // emergency-preferred services route "direct" by design (e.g. nfqws desyncs

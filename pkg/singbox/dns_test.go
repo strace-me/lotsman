@@ -50,11 +50,11 @@ func TestDNSSectionSplitAndVersionGate(t *testing.T) {
 	valid := func(tag string) bool { return tag == "vpn_url_test" }
 
 	// The whole new-DNS format fails to load on <=1.11 — must be gated off.
-	if _, ok := dnsSection(o, []string{"ru-direct"}, valid, Capabilities("1.11.0")); ok {
+	if _, ok := dnsSection(o, []string{"ru-direct"}, nil, nil, valid, Capabilities("1.11.0")); ok {
 		t.Error("new DNS format must be gated off below 1.12")
 	}
 
-	dns, ok := dnsSection(o, []string{"ru-direct"}, valid, Capabilities("1.12.17"))
+	dns, ok := dnsSection(o, []string{"ru-direct"}, nil, nil, valid, Capabilities("1.12.17"))
 	if !ok {
 		t.Fatal("expected a dns block on 1.12")
 	}
@@ -74,13 +74,54 @@ func TestDNSSectionSplitAndVersionGate(t *testing.T) {
 	}
 }
 
+// LOT-83: zapret-class services' domains resolve through a separate public
+// resolver, emitted AFTER the direct (office) rule and BEFORE the final (VPN) one.
+func TestDNSSectionZapretSplit(t *testing.T) {
+	o := &DNSOptions{
+		Servers: []DNSServer{
+			{Tag: "dns_remote", Type: "https", Server: "1.1.1.1", Detour: "vpn_url_test"},
+			{Tag: "dns_office", Type: "local"},
+			{Tag: "dns_zapret", Type: "https", Server: "9.9.9.9", ServerName: "dns.quad9.net"},
+		},
+		Direct: "dns_office", Zapret: "dns_zapret", Final: "dns_remote",
+	}
+	dns, ok := dnsSection(o,
+		[]string{"ru-direct"}, []string{"geosite-censor"}, []string{"youtube.com", "x.com"},
+		func(string) bool { return true }, Capabilities("1.12.17"))
+	if !ok {
+		t.Fatal("expected a dns block")
+	}
+	rules := dns["rules"].([]any)
+	// direct, then zapret rule_set, then zapret domain_suffix.
+	if len(rules) != 3 {
+		t.Fatalf("want 3 rules (direct, zapret rule_set, zapret domain), got %d: %v", len(rules), rules)
+	}
+	if r := rules[0].(map[string]any); r["server"] != "dns_office" {
+		t.Errorf("rule 0 must be the direct/office split: %v", r)
+	}
+	zrs := rules[1].(map[string]any)
+	if zrs["server"] != "dns_zapret" {
+		t.Errorf("zapret rule_set must route to dns_zapret: %v", zrs)
+	}
+	if rs, ok := zrs["rule_set"].([]string); !ok || len(rs) != 1 || rs[0] != "geosite-censor" {
+		t.Errorf("zapret rule_set wrong: %v", zrs["rule_set"])
+	}
+	zd := rules[2].(map[string]any)
+	if zd["server"] != "dns_zapret" {
+		t.Errorf("zapret domain rule must route to dns_zapret: %v", zd)
+	}
+	if ds, ok := zd["domain_suffix"].([]string); !ok || len(ds) != 2 {
+		t.Errorf("zapret domain_suffix wrong: %v", zd["domain_suffix"])
+	}
+}
+
 func TestDNSSectionFakeIP(t *testing.T) {
 	o := &DNSOptions{
 		Servers: []DNSServer{{Tag: "dns_remote", Type: "https", Server: "1.1.1.1", Detour: "vpn_url_test"}},
 		Final:   "dns_remote",
 		FakeIP:  &FakeIPOptions{},
 	}
-	dns, ok := dnsSection(o, nil, func(string) bool { return true }, Capabilities("1.12.17"))
+	dns, ok := dnsSection(o, nil, nil, nil, func(string) bool { return true }, Capabilities("1.12.17"))
 	if !ok {
 		t.Fatal("expected a dns block")
 	}

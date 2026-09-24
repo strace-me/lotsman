@@ -16,6 +16,7 @@ package singbox
 type DNSOptions struct {
 	Servers  []DNSServer    // upstreams, each pinned to an outbound via Detour
 	Direct   string         // tag of the resolver for DirectRuleSets (usually a Detour:"direct"/local server); "" = no direct split
+	Zapret   string         // tag of the resolver for zapret-class services' domains — a public resolver off-VPN; "" = no zapret split
 	Final    string         // tag of the default/fallback resolver (censored + everything else)
 	Strategy string         // prefer_ipv4 (default) | prefer_ipv6 | ipv4_only | ipv6_only
 	FakeIP   *FakeIPOptions // optional: adds a fakeip server + an A/AAAA rule after the direct bypass
@@ -88,7 +89,7 @@ func dnsServerObject(s DNSServer, validDetour func(string) bool) map[string]any 
 // queries resolve via o.Direct (the RU-direct services). validDetour gates each
 // server's detour against the outbounds that actually exist. Returns (nil,false) when
 // there is nothing to emit or the target can't load the new DNS format.
-func dnsSection(o *DNSOptions, directRuleSets []string, validDetour func(string) bool, caps Caps) (map[string]any, bool) {
+func dnsSection(o *DNSOptions, directRuleSets, zapretRuleSets, zapretDomains []string, validDetour func(string) bool, caps Caps) (map[string]any, bool) {
 	if o == nil || len(o.Servers) == 0 || !caps.Supports(FeatureDNSServers) {
 		return nil, false
 	}
@@ -98,13 +99,35 @@ func dnsSection(o *DNSOptions, directRuleSets []string, validDetour func(string)
 	}
 
 	var rules []any
-	// RU-direct domains resolve via the direct/local server, off the VPN.
+	// RU-direct domains resolve via the direct/local server (the office DNS), off the
+	// VPN. Emitted FIRST so an office domain that also appears in a zapret list still
+	// resolves internally.
 	if o.Direct != "" && len(directRuleSets) > 0 {
 		rules = append(rules, map[string]any{
 			"rule_set": directRuleSets,
 			"action":   "route",
 			"server":   o.Direct,
 		})
+	}
+	// Zapret-class services' domains resolve via a PUBLIC resolver off-VPN and off
+	// the office DNS, so a desynced direct connection gets the real, unpoisoned IP
+	// (LOT-83). Two rules because a sing-box rule ANDs its fields: one matches the
+	// service rule-sets, one the inline domain suffixes.
+	if o.Zapret != "" {
+		if len(zapretRuleSets) > 0 {
+			rules = append(rules, map[string]any{
+				"rule_set": zapretRuleSets,
+				"action":   "route",
+				"server":   o.Zapret,
+			})
+		}
+		if len(zapretDomains) > 0 {
+			rules = append(rules, map[string]any{
+				"domain_suffix": zapretDomains,
+				"action":        "route",
+				"server":        o.Zapret,
+			})
+		}
 	}
 	// Optional fakeip — a first-class server object in 1.12+, driven by an A/AAAA rule
 	// placed AFTER the direct bypass so RU-direct still gets real IPs (rules match
