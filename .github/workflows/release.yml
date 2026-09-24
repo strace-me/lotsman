@@ -1,0 +1,47 @@
+name: Release
+
+# Builds the host binaries on every tagged release and attaches them to the
+# GitHub Release, so a machine can install from a stable URL instead of building
+# by hand:
+#
+#   https://github.com/strace-me/lotsman/releases/download/<tag>/lotsman
+#
+# The hand-install model (binary to /var/lib/lotsman-bin/, config to
+# /etc/lotsman/) stays: the binary is rebuilt often and does not belong in the
+# Nix store. This job only makes the built artefact fetchable from GitHub.
+on:
+  push:
+    tags:
+      - "beta-v*"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: build host binaries
+        env:
+          CGO_ENABLED: "0"
+        run: |
+          VERSION="${GITHUB_REF_NAME}"
+          V=github.com/strace-me/lotsman/pkg/version
+          LDFLAGS="-s -w -X ${V}.Version=${VERSION} -X ${V}.Commit=${GITHUB_SHA::7}"
+          mkdir -p out
+          go build -trimpath -ldflags "$LDFLAGS" -o out/lotsman ./client/desktop
+          go build -trimpath -ldflags "$LDFLAGS" -o out/lotsmand ./cmd/lotsmand
+          go build -trimpath -ldflags "$LDFLAGS" -o out/lotsmanctl ./cmd/lotsmanctl
+          ls -la out/
+      - name: attach to the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release view "${GITHUB_REF_NAME}" >/dev/null 2>&1 || gh release create "${GITHUB_REF_NAME}" --prerelease --title "${GITHUB_REF_NAME}" --notes "Automated release ${GITHUB_REF_NAME}."
+          gh release upload "${GITHUB_REF_NAME}" out/lotsman out/lotsmand out/lotsmanctl --clobber
