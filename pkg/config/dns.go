@@ -178,8 +178,12 @@ func (d *DNS) validatedFailover(serverTag string, list []string, listName, serve
 		return nil, fmt.Errorf("config: %s is set but %s names no server", listName, serverName)
 	}
 	for _, p := range list {
+		if _, declared := d.serverByName(p); declared {
+			continue
+		}
 		if _, ok := dnsProviders[p]; !ok {
-			return nil, fmt.Errorf("config: %s has unknown provider %q (known: %s)", listName, p, knownProviders())
+			return nil, fmt.Errorf("config: %s entry %q is neither a declared server nor a known provider (declared: %s; providers: %s)",
+				listName, p, strings.Join(d.serverNames(), ", "), knownProviders())
 		}
 	}
 	var srv DNSServer
@@ -212,24 +216,62 @@ func DNSProviderNames() []string {
 // loop applies once its probe says the active resolver has gone dark. It errors if the
 // alias is unknown or Final is not a provider-based server (nothing to re-point).
 func (d *DNS) SetFinalProvider(alias string) error {
-	p, ok := dnsProviders[alias]
+	src, ok := d.failoverSource(alias)
 	if !ok {
-		return fmt.Errorf("config: unknown dns provider %q", alias)
+		return fmt.Errorf("config: unknown dns failover target %q", alias)
 	}
 	for i := range d.Servers {
-		if d.Servers[i].Name != d.Final {
+		s := &d.Servers[i]
+		if s.Name != d.Final {
 			continue
 		}
-		if d.Servers[i].Provider == "" {
-			return fmt.Errorf("config: dns.final %q is not provider-based; cannot re-point it", d.Final)
+		s.Provider = alias
+		if src.Type != "" { // a declared server's transport, adopted whole
+			s.Type = src.Type
 		}
-		d.Servers[i].Provider = alias
-		d.Servers[i].Address = p.IP
-		d.Servers[i].ServerName = p.Host
-		d.Servers[i].Path = p.Path
+		s.Address = src.Address
+		s.ServerName = src.ServerName
+		s.Path = src.Path
+		if src.Port != 0 {
+			s.Port = src.Port
+		}
 		return nil
 	}
 	return fmt.Errorf("config: dns.final %q not found among servers", d.Final)
+}
+
+// serverByName returns the declared server with this name, if any.
+func (d *DNS) serverByName(name string) (DNSServer, bool) {
+	for _, s := range d.Servers {
+		if s.Name == name {
+			return s, true
+		}
+	}
+	return DNSServer{}, false
+}
+
+// serverNames lists the declared server names.
+func (d *DNS) serverNames() []string {
+	out := make([]string, 0, len(d.Servers))
+	for _, s := range d.Servers {
+		out = append(out, s.Name)
+	}
+	return out
+}
+
+// failoverSource resolves a failover entry to the endpoint to copy: a declared
+// server by NAME (its full endpoint, transport included) or a curated provider
+// alias (address/SNI/path from the catalog; the transport is kept from the server
+// being re-pointed). Declared names win, so a config can rotate among its OWN
+// resolvers without depending on the curated catalog.
+func (d *DNS) failoverSource(target string) (DNSServer, bool) {
+	if s, ok := d.serverByName(target); ok {
+		return s, true
+	}
+	if p, ok := dnsProviders[target]; ok {
+		return DNSServer{Address: p.IP, ServerName: p.Host, Path: p.Path}, true
+	}
+	return DNSServer{}, false
 }
 
 // SetDirectProvider re-points the Direct resolver at another curated provider, the
@@ -238,27 +280,32 @@ func (d *DNS) SetFinalProvider(alias string) error {
 // emitted config stays valid. Errors if the alias is unknown or Direct is not a
 // provider-based server (nothing to re-point).
 func (d *DNS) SetDirectProvider(alias string) error {
-	p, ok := dnsProviders[alias]
+	src, ok := d.failoverSource(alias)
 	if !ok {
-		return fmt.Errorf("config: unknown dns provider %q", alias)
+		return fmt.Errorf("config: unknown dns failover target %q", alias)
 	}
 	for i := range d.Servers {
 		s := &d.Servers[i]
 		if s.Name != d.Direct {
 			continue
 		}
-		if !dnsEncryptedType(s.Type) {
-			// A manual plain endpoint (an office DNS) is replaced by an encrypted
-			// provider: the transport must change with the endpoint, or the config
-			// would carry a DoH host on a udp server and fail to load.
+		if src.Type != "" {
+			// A declared server supplies its own transport.
+			s.Type = src.Type
+			s.Port = src.Port
+			s.Bootstrap = false
+		} else if !dnsEncryptedType(s.Type) {
+			// A curated provider replaces a plain/local endpoint: the transport must
+			// change with the endpoint, or the config would carry a DoH host on a udp
+			// server and fail to load.
 			s.Type = "https"
 			s.Port = 0
 			s.Bootstrap = false
 		}
 		s.Provider = alias
-		s.Address = p.IP
-		s.ServerName = p.Host
-		s.Path = p.Path
+		s.Address = src.Address
+		s.ServerName = src.ServerName
+		s.Path = src.Path
 		return nil
 	}
 	return fmt.Errorf("config: dns.direct %q not found among servers", d.Direct)

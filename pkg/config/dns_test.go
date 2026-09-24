@@ -219,6 +219,38 @@ func TestBuildDNSRejectsBadURL(t *testing.T) {
 	}
 }
 
+// A failover entry may name a DECLARED server, not only a curated alias — so a
+// config can rotate among its own resolvers with no catalog entry.
+func TestFailoverCanNameADeclaredServer(t *testing.T) {
+	d, err := buildDNS(&dnsYAML{
+		Servers: []dnsServerYAML{
+			{Name: "remote", Provider: "cloudflare", Method: "https", Detour: "vpn"},
+			{Name: "my-doh", URL: "https://doh.example/dns-query", Detour: "vpn"},
+			{Name: "lan", Type: "local"},
+		},
+		Final: "remote", Direct: "lan",
+		Failover: []string{"my-doh", "quad9"},
+	})
+	if err != nil {
+		t.Fatalf("buildDNS: %v", err)
+	}
+	if err := d.SetFinalProvider("my-doh"); err != nil {
+		t.Fatalf("SetFinalProvider by declared name: %v", err)
+	}
+	var final DNSServer
+	for _, s := range d.Servers {
+		if s.Name == "remote" {
+			final = s
+		}
+	}
+	if final.Address != "doh.example" || final.ServerName != "doh.example" || final.Type != "https" {
+		t.Errorf("Final not re-pointed to the declared my-doh server: %+v", final)
+	}
+	if final.Provider != "my-doh" {
+		t.Errorf("the rotation label must record the target, got %q", final.Provider)
+	}
+}
+
 func TestBuildDNSNilOrEmptyIsNoConfig(t *testing.T) {
 	if d, err := buildDNS(nil); err != nil || d != nil {
 		t.Errorf("nil dns yaml => (nil,nil), got (%v,%v)", d, err)
