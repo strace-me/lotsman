@@ -212,12 +212,41 @@ func Blocks(src Source) [][]string {
 	var out [][]string
 	for _, chunk := range chunks(src) {
 		for _, seg := range splitOnNew(strings.Fields(chunk)) {
+			if src.Kind == KindBat {
+				for i := range seg {
+					seg[i] = unescapeBatchCarets(seg[i])
+				}
+			}
 			if len(seg) > 0 {
 				out = append(out, seg)
 			}
 		}
 	}
 	return out
+}
+
+// unescapeBatchCarets removes Windows-batch caret escapes from an argument token.
+// In a .bat file `^` is the escape character: `^!` is a literal `!`, `^^` a literal
+// `^`. Line-continuation and comment carets are already consumed by
+// joinContinuations, so any caret still present escapes the character after it.
+// Leaving them in produced a literal `^!` that nfqws read as a filename and refused
+// to start the engine with ("could not read ^!"), which is how the FAKE TLS AUTO
+// preset silently lost its only real-ClientHello profile (LOT-82).
+func unescapeBatchCarets(s string) string {
+	if !strings.Contains(s, "^") {
+		return s
+	}
+	var b strings.Builder
+	b.Grow(len(s))
+	for i := 0; i < len(s); i++ {
+		if s[i] == '^' && i+1 < len(s) {
+			b.WriteByte(s[i+1])
+			i++
+			continue
+		}
+		b.WriteByte(s[i])
+	}
+	return b.String()
 }
 
 // chunks returns the argument text of a source, one string per invocation found.

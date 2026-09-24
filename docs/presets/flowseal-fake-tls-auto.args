@@ -34,7 +34,7 @@
 --dpi-desync-repeats=11
 --dpi-desync-fooling=badseq
 --dpi-desync-fake-tls=0x00000000
---dpi-desync-fake-tls=^!
+--dpi-desync-fake-tls=!
 --dpi-desync-fake-tls-mod=rnd,dupsid,sni=www.google.com
 --new
 --filter-tcp=443
@@ -45,7 +45,7 @@
 --dpi-desync-repeats=11
 --dpi-desync-fooling=badseq
 --dpi-desync-fake-tls=0x00000000
---dpi-desync-fake-tls=^!
+--dpi-desync-fake-tls=!
 --dpi-desync-fake-tls-mod=rnd,dupsid,sni=www.google.com
 --new
 --filter-tcp=80,443
@@ -57,7 +57,7 @@
 --dpi-desync-repeats=11
 --dpi-desync-fooling=badseq
 --dpi-desync-fake-tls=0x00000000
---dpi-desync-fake-tls=^!
+--dpi-desync-fake-tls=!
 --dpi-desync-fake-tls-mod=rnd,dupsid,sni=www.google.com
 --dpi-desync-fake-http=tls_clienthello_max_ru.bin
 --new
@@ -78,7 +78,7 @@
 --dpi-desync-repeats=11
 --dpi-desync-fooling=badseq
 --dpi-desync-fake-tls=0x00000000
---dpi-desync-fake-tls=^!
+--dpi-desync-fake-tls=!
 --dpi-desync-fake-tls-mod=rnd,dupsid,sni=www.google.com
 --dpi-desync-fake-http=tls_clienthello_max_ru.bin
 --new
@@ -92,7 +92,7 @@
 --dpi-desync-repeats=11
 --dpi-desync-fooling=badseq
 --dpi-desync-fake-tls=0x00000000
---dpi-desync-fake-tls=^!
+--dpi-desync-fake-tls=!
 --dpi-desync-fake-tls-mod=rnd,dupsid,sni=www.google.com
 --dpi-desync-fake-http=tls_clienthello_max_ru.bin
 --new

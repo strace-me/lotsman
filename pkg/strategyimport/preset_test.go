@@ -55,6 +55,26 @@ func TestAsPresetKeepsThePerProfileLists(t *testing.T) {
 	}
 }
 
+// A .bat escapes `!` as `^!` (delayed expansion). nfqws reads `^!` as a filename
+// and refuses to start ("could not read ^!"), so a preset that kept the caret lost
+// its only real-ClientHello profile whole (LOT-82). The caret escape must be stripped.
+func TestAsPresetStripsBatchCaretEscapes(t *testing.T) {
+	const bat = `@echo off
+start "zapret: %~n0" /min "%BIN%winws.exe" --filter-tcp=443 --dpi-desync=fake,multidisorder --dpi-desync-fake-tls=0x00000000 --dpi-desync-fake-tls=^! --dpi-desync-fake-tls-mod=rnd,dupsid,sni=www.google.com
+`
+	p, err := AsPreset("FAKE TLS AUTO", Source{Name: "x.bat", Kind: KindBat, Body: []byte(bat)}, PresetOptions{ListsDir: "/lists"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := strings.Join(p.Args, " ")
+	if strings.Contains(got, "^!") {
+		t.Errorf("the batch caret survived into argv (nfqws would read ^! as a file):\n%s", got)
+	}
+	if !strings.Contains(got, "--dpi-desync-fake-tls=!") {
+		t.Errorf("expected a bare `!` (real-ClientHello marker):\n%s", got)
+	}
+}
+
 // Three things cannot mean anything here, and each must be dropped LOUDLY — a
 // silent drop yields a preset that is not the preset, which is the failure this
 // mode exists to end.
