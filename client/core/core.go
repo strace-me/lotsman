@@ -593,16 +593,18 @@ func (c *Core) Start(ctx context.Context) error {
 			c.log.Info("metrics enabled", "addr", c.opts.MetricsAddr, "path", "/metrics")
 		}
 	}
-	// DNS failover: probe the active remote resolver and rotate providers when it goes
-	// dark. Runs outside the autonomy loop (its own ctx + wg) so the Reload it applies
-	// does not deadlock on the loop's wg. Only meaningful in tun mode with a failover
-	// list and a reconcilable config.
-	if c.opts.ProxyListen == "" && c.opts.SingboxConfig != "" && c.conf.DNS != nil && len(c.conf.DNS.Failover) > 0 {
+	// DNS failover: probe the active resolver(s) and rotate providers when they go
+	// dark — the remote resolver through the tun, the direct one off it (LOT-83).
+	// Runs outside the autonomy loop (its own ctx + wg) so the Reload it applies does
+	// not deadlock on the loop's wg. Only meaningful with a failover list and a
+	// reconcilable config.
+	if c.opts.ProxyListen == "" && c.opts.SingboxConfig != "" && c.conf.DNS != nil &&
+		(len(c.conf.DNS.Failover) > 0 || len(c.conf.DNS.DirectFailover) > 0) {
 		fctx, fcancel := context.WithCancel(ctx)
 		c.failoverCancel = fcancel
 		c.failoverWg.Add(1)
 		go func() { defer c.failoverWg.Done(); c.dnsFailoverLoop(fctx) }()
-		c.log.Info("dns: failover armed", "providers", c.conf.DNS.Failover)
+		c.log.Info("dns: failover armed", "remote", c.conf.DNS.Failover, "direct", c.conf.DNS.DirectFailover)
 	}
 
 	started = true

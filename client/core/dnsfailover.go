@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/strace-me/lotsman/pkg/config"
+	"github.com/strace-me/lotsman/pkg/dataplane"
 )
 
 // dnsFailoverCanary is resolved through the tunnel to tell whether the active remote
@@ -34,11 +35,15 @@ const dnsFailoverThreshold = 3
 // probe path is down, not the resolvers, and thrashing through them would not help.
 func (c *Core) dnsFailoverLoop(ctx context.Context) {
 	sentinel := tunSentinel(c.tunOptions())
-	if sentinel == "" {
-		c.log.Warn("dns: failover disabled — no tun peer address to probe the resolver through")
+	remoteList := append([]string(nil), c.conf.DNS.Failover...)       // stable snapshots; the lists rarely change
+	directList := append([]string(nil), c.conf.DNS.DirectFailover...) // LOT-83
+	if len(remoteList) > 0 && sentinel == "" {
+		c.log.Warn("dns: remote failover disabled — no tun peer address to probe the resolver through")
+		remoteList = nil
+	}
+	if len(remoteList) == 0 && len(directList) == 0 {
 		return
 	}
-	list := append([]string(nil), c.conf.DNS.Failover...) // stable snapshot; the list rarely changes
 
 	interval := c.opts.Interval * 2
 	if interval < 20*time.Second {
@@ -47,7 +52,10 @@ func (c *Core) dnsFailoverLoop(ctx context.Context) {
 	t := time.NewTicker(interval)
 	defer t.Stop()
 
-	fails, rotations := 0, 0
+	// Each half keeps its own fail/rotation counters and its own pause deadline, so a
+	// dead remote resolver never stalls the direct probe or vice versa.
+	var rem dnsFailoverState
+	var dir dnsFailoverState
 	for {
 		select {
 		case <-ctx.Done():
@@ -56,55 +64,185 @@ func (c *Core) dnsFailoverLoop(ctx context.Context) {
 		}
 
 		if !c.box.Alive(ctx) {
-			fails = 0 // a dead box is superviseBox's problem, not a DNS failure
+			rem.fails, dir.fails = 0, 0 // a dead box is superviseBox's problem, not a DNS failure
 			continue
 		}
-		if c.probeResolverViaTun(ctx, sentinel) {
-			fails, rotations = 0, 0
-			continue
+		if len(remoteList) > 0 {
+			c.tickRemoteFailover(ctx, sentinel, remoteList, &rem)
 		}
-		fails++
-		if fails < dnsFailoverThreshold {
-			c.log.Warn("dns: active resolver did not answer", "consecutive", fails, "threshold", dnsFailoverThreshold)
-			continue
+		if len(directList) > 0 {
+			c.tickDirectFailover(ctx, directList, &dir)
 		}
-		fails = 0
-
-		if rotations >= len(list) {
-			c.log.Warn("dns: cycled every failover provider without recovery — pausing rotation (the tunnel or all resolvers may be down)", "providers", len(list))
-			rotations = 0
-			select {
-			case <-ctx.Done():
-				return
-			case <-time.After(5 * time.Minute):
-			}
-			continue
-		}
-
-		from, to, conf, err := c.rotateDNSFailover()
-		if err != nil {
-			c.log.Warn("dns: failover rotation failed", "err", err)
-			continue
-		}
-		if conf == nil || from == to {
-			continue // nothing to rotate to
-		}
-		// Only a reload that actually APPLIED means we are now on `to`. Counting the
-		// attempt instead would let a run of skipped reloads (a degraded subscription
-		// fetch during the very outage that triggered us) walk the in-memory provider
-		// through the whole list while sing-box still runs the first one — and then
-		// conclude "every provider failed" about providers it never installed.
-		if err := c.Reload(conf); err != nil {
-			c.log.Error("dns: failover could not be applied — still on the old resolver", "from", from, "attempted", to, "err", err)
-			// Put the config back so memory matches what sing-box is actually running.
-			if _, _, _, rerr := c.rotateDNSFailoverTo(from); rerr != nil {
-				c.log.Warn("dns: could not restore the previous provider in the config", "err", rerr)
-			}
-			continue
-		}
-		rotations++
-		c.log.Info("dns: failed over to another provider", "from", from, "to", to)
 	}
+}
+
+// dnsFailoverState is one resolver's consecutive-failure and rotation counters.
+type dnsFailoverState struct {
+	fails     int
+	rotations int
+}
+
+// tickRemoteFailover probes the remote resolver through the tun and rotates it when
+// it goes dark. Extracted from the loop so the direct half is not blocked by this
+// half's backoff.
+func (c *Core) tickRemoteFailover(ctx context.Context, sentinel string, list []string, st *dnsFailoverState) {
+	if c.probeResolverViaTun(ctx, sentinel) {
+		st.fails, st.rotations = 0, 0
+		return
+	}
+	st.fails++
+	if st.fails < dnsFailoverThreshold {
+		c.log.Warn("dns: active resolver did not answer", "consecutive", st.fails, "threshold", dnsFailoverThreshold)
+		return
+	}
+	st.fails = 0
+	if st.rotations >= len(list) {
+		c.log.Warn("dns: cycled every failover provider without recovery — pausing rotation (the tunnel or all resolvers may be down)", "providers", len(list))
+		st.rotations = 0
+		return
+	}
+	from, to, conf, err := c.rotateDNSFailover()
+	if err != nil {
+		c.log.Warn("dns: failover rotation failed", "err", err)
+		return
+	}
+	if conf == nil || from == to {
+		return // nothing to rotate to
+	}
+	// Only a reload that actually APPLIED means we are now on `to`. Counting the
+	// attempt instead would let a run of skipped reloads (a degraded subscription
+	// fetch during the very outage that triggered us) walk the in-memory provider
+	// through the whole list while sing-box still runs the first one — and then
+	// conclude "every provider failed" about providers it never installed.
+	if err := c.Reload(conf); err != nil {
+		c.log.Error("dns: failover could not be applied — still on the old resolver", "from", from, "attempted", to, "err", err)
+		// Put the config back so memory matches what sing-box is actually running.
+		if _, _, _, rerr := c.rotateDNSFailoverTo(from); rerr != nil {
+			c.log.Warn("dns: could not restore the previous provider in the config", "err", rerr)
+		}
+		return
+	}
+	st.rotations++
+	c.log.Info("dns: failed over to another provider", "from", from, "to", to)
+}
+
+// tickDirectFailover probes the Direct resolver DIRECTLY (off the tun) and rotates
+// it — to a public provider — when the pinned endpoint goes dark. This is the
+// LOT-83 half: direct/zapret rungs resolve through this resolver, and a pinned
+// office DNS that does not answer on the current network left them unable to
+// resolve a target at all.
+func (c *Core) tickDirectFailover(ctx context.Context, list []string, st *dnsFailoverState) {
+	server := c.directResolverAddress()
+	if server == "" {
+		return // no addressable Direct resolver (e.g. type: local) to probe
+	}
+	if c.probeResolverDirect(ctx, server) {
+		st.fails, st.rotations = 0, 0
+		return
+	}
+	st.fails++
+	if st.fails < dnsFailoverThreshold {
+		c.log.Warn("dns: direct resolver did not answer", "server", server, "consecutive", st.fails, "threshold", dnsFailoverThreshold)
+		return
+	}
+	st.fails = 0
+	if st.rotations >= len(list) {
+		c.log.Warn("dns: cycled every direct failover provider without recovery — pausing rotation", "providers", len(list))
+		st.rotations = 0
+		return
+	}
+	from, to, conf, err := c.rotateDNSDirectFailover()
+	if err != nil {
+		c.log.Warn("dns: direct failover rotation failed", "err", err)
+		return
+	}
+	if conf == nil || from == to {
+		return
+	}
+	if err := c.Reload(conf); err != nil {
+		c.log.Error("dns: direct failover could not be applied — still on the old resolver", "from", from, "attempted", to, "err", err)
+		if _, _, _, rerr := c.rotateDNSDirectFailoverTo(from); rerr != nil {
+			c.log.Warn("dns: could not restore the previous direct provider", "err", rerr)
+		}
+		return
+	}
+	st.rotations++
+	c.log.Info("dns: direct resolver failed over to another provider", "from", from, "to", to)
+}
+
+// directResolverAddress is the Direct resolver's current endpoint, or "" when there
+// is none (no direct split, or a type:local server with no address).
+func (c *Core) directResolverAddress() string {
+	c.stateMu.Lock()
+	defer c.stateMu.Unlock()
+	if c.conf == nil || c.conf.DNS == nil || c.conf.DNS.Direct == "" {
+		return ""
+	}
+	for _, s := range c.conf.DNS.Servers {
+		if s.Name == c.conf.DNS.Direct {
+			return s.Address
+		}
+	}
+	return ""
+}
+
+// probeResolverDirect resolves the canary through the Direct resolver directly,
+// off the tun (SO_BINDTODEVICE to the WAN), so it measures the endpoint production
+// uses and not the VPN resolver a tun-routed probe would reach.
+func (c *Core) probeResolverDirect(ctx context.Context, server string) bool {
+	r := dataplane.DirectResolver(server, c.wanIface, 4*time.Second)
+	lctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	_, err := r.LookupHost(lctx, dnsFailoverCanary)
+	return err == nil
+}
+
+// rotateDNSDirectFailover advances dns.direct to the next provider and returns the
+// config to Reload. Mirrors rotateDNSFailover.
+func (c *Core) rotateDNSDirectFailover() (from, to string, conf *config.Config, err error) {
+	c.stateMu.Lock()
+	cur := ""
+	if c.conf.DNS != nil {
+		cur = currentDirectProvider(c.conf.DNS)
+	}
+	next := ""
+	if c.conf.DNS != nil {
+		next = nextFailoverProvider(cur, c.conf.DNS.DirectFailover)
+	}
+	c.stateMu.Unlock()
+	if c.conf.DNS == nil || next == "" || next == cur {
+		return cur, cur, nil, nil
+	}
+	return c.rotateDNSDirectFailoverTo(next)
+}
+
+// rotateDNSDirectFailoverTo pins the Direct resolver to a named provider, or puts
+// the previous one back when a reload did not apply.
+func (c *Core) rotateDNSDirectFailoverTo(provider string) (from, to string, conf *config.Config, err error) {
+	c.stateMu.Lock()
+	defer c.stateMu.Unlock()
+	if c.conf.DNS == nil {
+		return "", "", nil, nil
+	}
+	cur := currentDirectProvider(c.conf.DNS)
+	if provider == "" || provider == cur {
+		return cur, cur, nil, nil
+	}
+	if err := c.conf.DNS.SetDirectProvider(provider); err != nil {
+		return cur, provider, nil, err
+	}
+	return cur, provider, c.conf, nil
+}
+
+// currentDirectProvider is the provider alias the Direct resolver is pinned to
+// ("" when it is a manual, non-provider endpoint).
+func currentDirectProvider(d *config.DNS) string {
+	for _, s := range d.Servers {
+		if s.Name == d.Direct {
+			return s.Provider
+		}
+	}
+	return ""
 }
 
 // probeResolverViaTun resolves the canary through the tun peer, which hijack-dns routes

@@ -117,6 +117,66 @@ func TestSetFinalProviderRepointsEndpointKeepsTag(t *testing.T) {
 	}
 }
 
+// LOT-83: the Direct resolver — what a direct/zapret rung resolves through — can
+// rotate to a public provider too, so a pinned office DNS that is unreachable on
+// another network does not leave the rung unable to resolve at all.
+func TestBuildDNSDirectFailoverValidatesAndRepoints(t *testing.T) {
+	d, err := buildDNS(&dnsYAML{
+		Servers: []dnsServerYAML{
+			{Name: "direct-pub", Provider: "cloudflare", Method: "https", Detour: "direct"},
+			{Name: "remote", Provider: "quad9", Method: "tls", Detour: "vpn"},
+		},
+		Direct: "direct-pub", Final: "remote",
+		DirectFailover: []string{"cloudflare", "google", "adguard"},
+	})
+	if err != nil {
+		t.Fatalf("buildDNS: %v", err)
+	}
+	if len(d.DirectFailover) != 3 || d.DirectFailover[1] != "google" {
+		t.Fatalf("direct_failover not carried: %v", d.DirectFailover)
+	}
+	if err := d.SetDirectProvider("adguard"); err != nil {
+		t.Fatalf("SetDirectProvider: %v", err)
+	}
+	s := d.Servers[0]
+	if s.Name != "direct-pub" || s.Type != "https" || s.Detour != "direct" {
+		t.Errorf("tag/transport/detour must survive: %+v", s)
+	}
+	if s.Provider != "adguard" || s.Address != "94.140.14.14" {
+		t.Errorf("endpoint must move to adguard: %+v", s)
+	}
+}
+
+// A manual Direct (office DNS) is exactly the case LOT-83 fixes: it is accepted,
+// and the first rotation REPLACES it with an encrypted provider so the rung can
+// still resolve on a network where the office DNS does not answer.
+func TestBuildDNSDirectFailoverReplacesManualDirect(t *testing.T) {
+	d, err := buildDNS(&dnsYAML{
+		Servers: []dnsServerYAML{
+			{Name: "office", Type: "udp", Address: "192.168.10.30", Detour: "direct"},
+			{Name: "remote", Provider: "cloudflare"},
+		},
+		Direct: "office", Final: "remote",
+		DirectFailover: []string{"cloudflare", "quad9"},
+	})
+	if err != nil {
+		t.Fatalf("buildDNS: %v", err)
+	}
+	if len(d.DirectFailover) != 2 {
+		t.Fatalf("direct_failover not carried: %v", d.DirectFailover)
+	}
+	if err := d.SetDirectProvider("quad9"); err != nil {
+		t.Fatalf("SetDirectProvider on a manual Direct: %v", err)
+	}
+	s := d.Servers[0]
+	if s.Type != "https" || s.Provider != "quad9" || s.Address != "9.9.9.9" || s.ServerName != "dns.quad9.net" {
+		t.Errorf("manual office DNS must be replaced by an encrypted provider: %+v", s)
+	}
+	if s.Name != "office" || s.Detour != "direct" {
+		t.Errorf("tag/detour must survive: %+v", s)
+	}
+}
+
 func TestBuildDNSNilOrEmptyIsNoConfig(t *testing.T) {
 	if d, err := buildDNS(nil); err != nil || d != nil {
 		t.Errorf("nil dns yaml => (nil,nil), got (%v,%v)", d, err)

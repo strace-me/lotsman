@@ -21,6 +21,11 @@ type DNS struct {
 	// has no native per-rule DNS fallback, so the client drives it: probe the active
 	// resolver, and on repeated failure re-point Final at the next provider here.
 	Failover []string
+	// DirectFailover is the same rotation for the Direct resolver — the one a
+	// direct/zapret rung resolves through (that traffic is off-VPN, so a pinned
+	// office DNS is unreachable on any other network and the rung cannot resolve a
+	// target at all, LOT-83). Empty => no direct failover.
+	DirectFailover []string
 }
 
 // DNSServer is one upstream, already expanded from any provider alias to concrete
@@ -83,12 +88,13 @@ func dnsEncryptedType(t string) bool {
 // --- on-disk shape ---
 
 type dnsYAML struct {
-	Servers  []dnsServerYAML `yaml:"servers"`
-	Direct   string          `yaml:"direct"`
-	Final    string          `yaml:"final"`
-	Strategy string          `yaml:"strategy"`
-	FakeIP   bool            `yaml:"fakeip"`
-	Failover []string        `yaml:"failover"` // ordered provider aliases the Final resolver rotates through on failure
+	Servers        []dnsServerYAML `yaml:"servers"`
+	Direct         string          `yaml:"direct"`
+	Final          string          `yaml:"final"`
+	Strategy       string          `yaml:"strategy"`
+	FakeIP         bool            `yaml:"fakeip"`
+	Failover       []string        `yaml:"failover"`        // ordered provider aliases the Final resolver rotates through on failure
+	DirectFailover []string        `yaml:"direct_failover"` // ordered provider aliases the Direct resolver rotates through on failure
 }
 
 type dnsServerYAML struct {
@@ -138,26 +144,46 @@ func buildDNS(y *dnsYAML) (*DNS, error) {
 	if d.Direct != "" && !seen[d.Direct] {
 		return nil, fmt.Errorf("config: dns.direct %q is not a declared server", d.Direct)
 	}
-	if len(y.Failover) > 0 {
-		for _, p := range y.Failover {
-			if _, ok := dnsProviders[p]; !ok {
-				return nil, fmt.Errorf("config: dns.failover has unknown provider %q (known: %s)", p, knownProviders())
-			}
-		}
-		// Failover re-points the Final server at another provider, so Final must be a
-		// provider-based server — there is nothing to rotate on a manual endpoint.
-		var final DNSServer
-		for _, s := range d.Servers {
-			if s.Name == d.Final {
-				final = s
-			}
-		}
-		if final.Provider == "" {
-			return nil, fmt.Errorf("config: dns.failover needs dns.final (%q) to be a provider-based server", d.Final)
-		}
-		d.Failover = y.Failover
+	// Failover re-points a resolver at a provider. Final must already BE a
+	// provider-based server (there is nothing to rotate on a bare endpoint). Direct
+	// may be a manual pinned endpoint (an office DNS): the first rotation replaces
+	// it with a provider, which is exactly the LOT-83 fallback.
+	var err error
+	if d.Failover, err = d.validatedFailover(d.Final, y.Failover, "dns.failover", "dns.final", true); err != nil {
+		return nil, err
+	}
+	if d.DirectFailover, err = d.validatedFailover(d.Direct, y.DirectFailover, "dns.direct_failover", "dns.direct", false); err != nil {
+		return nil, err
 	}
 	return d, nil
+}
+
+// validatedFailover checks a failover list's providers and that the server it would
+// rotate is declared. requireProvider demands the server already be provider-based
+// (Final's case); when false the server may be a manual endpoint that a rotation
+// will replace (Direct's case). Returns the list (nil when empty) for the caller.
+func (d *DNS) validatedFailover(serverTag string, list []string, listName, serverName string, requireProvider bool) ([]string, error) {
+	if len(list) == 0 {
+		return nil, nil
+	}
+	if serverTag == "" {
+		return nil, fmt.Errorf("config: %s is set but %s names no server", listName, serverName)
+	}
+	for _, p := range list {
+		if _, ok := dnsProviders[p]; !ok {
+			return nil, fmt.Errorf("config: %s has unknown provider %q (known: %s)", listName, p, knownProviders())
+		}
+	}
+	var srv DNSServer
+	for _, s := range d.Servers {
+		if s.Name == serverTag {
+			srv = s
+		}
+	}
+	if requireProvider && srv.Provider == "" {
+		return nil, fmt.Errorf("config: %s needs %s (%q) to be a provider-based server", listName, serverName, serverTag)
+	}
+	return list, nil
 }
 
 // DNSProviderNames returns the curated resolver aliases, sorted. Exported so the
@@ -196,6 +222,38 @@ func (d *DNS) SetFinalProvider(alias string) error {
 		return nil
 	}
 	return fmt.Errorf("config: dns.final %q not found among servers", d.Final)
+}
+
+// SetDirectProvider re-points the Direct resolver at another curated provider, the
+// direct-failover primitive (LOT-83). It mirrors SetFinalProvider: the tag and
+// transport are kept, only the endpoint (IP + SNI + DoH path) changes, so the
+// emitted config stays valid. Errors if the alias is unknown or Direct is not a
+// provider-based server (nothing to re-point).
+func (d *DNS) SetDirectProvider(alias string) error {
+	p, ok := dnsProviders[alias]
+	if !ok {
+		return fmt.Errorf("config: unknown dns provider %q", alias)
+	}
+	for i := range d.Servers {
+		s := &d.Servers[i]
+		if s.Name != d.Direct {
+			continue
+		}
+		if !dnsEncryptedType(s.Type) {
+			// A manual plain endpoint (an office DNS) is replaced by an encrypted
+			// provider: the transport must change with the endpoint, or the config
+			// would carry a DoH host on a udp server and fail to load.
+			s.Type = "https"
+			s.Port = 0
+			s.Bootstrap = false
+		}
+		s.Provider = alias
+		s.Address = p.IP
+		s.ServerName = p.Host
+		s.Path = p.Path
+		return nil
+	}
+	return fmt.Errorf("config: dns.direct %q not found among servers", d.Direct)
 }
 
 func resolveDNSServer(s dnsServerYAML) (DNSServer, error) {

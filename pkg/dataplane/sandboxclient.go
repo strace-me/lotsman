@@ -22,6 +22,22 @@ import (
 //
 // Returns nil when sentinel is empty (no tun): the caller keeps the system
 // resolver, which is the only option without a tunnel.
+// DirectResolver returns a resolver that queries a specific DNS server DIRECTLY,
+// bypassing our own tun by binding the socket to the physical interface. It is how
+// the client probes the Direct resolver, whose whole point is to answer off-VPN: a
+// probe through the tun would exercise the VPN's resolver and never notice that the
+// direct one has gone dark (LOT-83).
+func DirectResolver(server string, iface func() string, timeout time.Duration) *net.Resolver {
+	bind := bindToDeviceControl(iface)
+	return &net.Resolver{
+		PreferGo: true,
+		Dial: func(ctx context.Context, _, _ string) (net.Conn, error) {
+			d := &net.Dialer{Timeout: timeout, Control: bind}
+			return d.DialContext(ctx, "udp", net.JoinHostPort(server, "53"))
+		},
+	}
+}
+
 func ProductionResolver(sentinel string, timeout time.Duration) *net.Resolver {
 	if sentinel == "" {
 		return nil

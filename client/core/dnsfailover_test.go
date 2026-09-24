@@ -73,6 +73,64 @@ func TestRotateDNSFailoverCanBePutBackAfterAFailedApply(t *testing.T) {
 	}
 }
 
+// LOT-83: the Direct resolver may be a manual pinned endpoint (an office DNS).
+// The rotation must REPLACE it with a provider — endpoint and transport together.
+func TestRotateDNSDirectFailoverReplacesManualDirect(t *testing.T) {
+	conf, err := config.Parse([]byte(`
+subscriptions:
+  - { name: s, url: "https://e/x", format: auto, enabled: true }
+services:
+  - { name: yt, category: streaming, probe_target: https://x }
+dns:
+  servers:
+    - { name: office, type: udp, address: 192.168.10.30, detour: direct }
+    - { name: remote, provider: cloudflare, method: tls, detour: vpn }
+  final: remote
+  direct: office
+  direct_failover: [cloudflare, quad9]
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	c := &Core{conf: conf}
+	if got := currentDirectProvider(c.conf.DNS); got != "" {
+		t.Fatalf("a manual direct has no provider, got %q", got)
+	}
+	from, to, got, err := c.rotateDNSDirectFailover()
+	if err != nil {
+		t.Fatalf("rotate: %v", err)
+	}
+	if from != "" || to != "cloudflare" || got == nil {
+		t.Fatalf("first rotation should be manual->cloudflare, got %q->%q (conf nil=%v)", from, to, got == nil)
+	}
+	var direct config.DNSServer
+	for _, s := range c.conf.DNS.Servers {
+		if s.Name == "office" {
+			direct = s
+		}
+	}
+	if direct.Provider != "cloudflare" || direct.Address != "1.1.1.1" || direct.Type != "https" {
+		t.Errorf("manual office DNS not replaced by cloudflare DoH: %+v", direct)
+	}
+	// A failed apply must put the manual endpoint back.
+	if _, _, _, err := c.rotateDNSDirectFailoverTo(""); err != nil {
+		t.Fatalf("restore: %v", err)
+	}
+}
+
+func TestCurrentDirectProviderReadsTheDirectServer(t *testing.T) {
+	d := &config.DNS{
+		Servers: []config.DNSServer{
+			{Name: "direct-pub", Provider: "quad9"},
+			{Name: "remote", Provider: "cloudflare"},
+		},
+		Direct: "direct-pub", Final: "remote",
+	}
+	if got := currentDirectProvider(d); got != "quad9" {
+		t.Errorf("currentDirectProvider = %q, want quad9", got)
+	}
+}
+
 func dnsFailoverConf(t *testing.T) *config.Config {
 	t.Helper()
 	conf, err := config.Parse([]byte(`
