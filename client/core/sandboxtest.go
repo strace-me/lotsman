@@ -3,6 +3,7 @@ package core
 import (
 	"context"
 	"fmt"
+	"net"
 	"net/http"
 	"runtime"
 	"strings"
@@ -14,6 +15,15 @@ import (
 	"github.com/strace-me/lotsman/pkg/zapret"
 	"github.com/strace-me/lotsman/pkg/zaptune"
 )
+
+// productionResolver returns the resolver the sandbox lane should use so a probe
+// target resolves to the SAME IP production dials — sing-box's DNS reached through
+// the tun peer. Nil when there is no tun, where the system resolver is the only
+// option (and the mismatch LOT-77 describes cannot be avoided). See
+// dataplane.ProductionResolver.
+func (c *Core) productionResolver() *net.Resolver {
+	return dataplane.ProductionResolver(tunSentinel(c.tunOptions()), 4*time.Second)
+}
 
 // sandboxProbeTimeout bounds one candidate measurement end to end.
 const sandboxProbeTimeout = 20 * time.Second
@@ -81,14 +91,14 @@ func (c *Core) testRecipe(ctx context.Context, svc registry.Service, recipeID st
 	if err != nil {
 		return false, false, "no sandbox: " + err.Error()
 	}
-	client := dataplane.SandboxClient(zapret.TuneMark, c.wanIface, sandboxProbeTimeout)
+	client := dataplane.SandboxClient(zapret.TuneMark, c.wanIface, sandboxProbeTimeout, c.productionResolver())
 	if client == nil {
 		return false, false, "this platform cannot bind a probe to the interface, so a candidate cannot be measured without imposing it"
 	}
 	// The QUIC half of the lane. It carries the same mark and the same binding, so
 	// a `h3://` target measures the candidate's udp/443 profile through the sandbox
 	// queue — the profile nothing in this project had ever measured.
-	h3 := dataplane.SandboxH3Client(zapret.TuneMark, c.wanIface, sandboxProbeTimeout)
+	h3 := dataplane.SandboxH3Client(zapret.TuneMark, c.wanIface, sandboxProbeTimeout, c.productionResolver())
 
 	// In preset mode there is nothing to compose and nothing to choose: the lane
 	// measures the bundle the operator asked for, exactly as production will run it.
@@ -151,11 +161,11 @@ func (c *Core) testBaseline(ctx context.Context, svc registry.Service) (ok, meas
 	if err != nil {
 		return false, false, "no sandbox: " + err.Error()
 	}
-	client := dataplane.SandboxClient(zapret.TuneMark, c.wanIface, sandboxProbeTimeout)
+	client := dataplane.SandboxClient(zapret.TuneMark, c.wanIface, sandboxProbeTimeout, c.productionResolver())
 	if client == nil {
 		return false, false, "this platform cannot bind a probe to the interface"
 	}
-	h3 := dataplane.SandboxH3Client(zapret.TuneMark, c.wanIface, sandboxProbeTimeout)
+	h3 := dataplane.SandboxH3Client(zapret.TuneMark, c.wanIface, sandboxProbeTimeout, c.productionResolver())
 	return c.measureArm(ctx, svc, sb, client, h3, "no-desync control", nil)
 }
 

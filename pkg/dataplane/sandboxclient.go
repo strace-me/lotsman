@@ -1,11 +1,39 @@
 package dataplane
 
 import (
+	"context"
 	"net"
 	"net/http"
 	"syscall"
 	"time"
 )
+
+// ProductionResolver returns a resolver that queries the SAME DNS production uses:
+// sing-box's DNS, reached through the tun peer (sentinel). A probe that resolves a
+// target here gets the IP production would dial, so a candidate is measured against
+// the same IP — and therefore the same bundle profile — production runs.
+//
+// This is the LOT-77 fix. Without it the sandbox client resolves via the host's
+// /etc/resolv.conf (the system resolver, whatever network we are on) while
+// production resolves through the tun's sing-box DNS; the two disagree on which
+// CDN IP a hostname maps to, a multi-profile bundle (ALT12) then matches a
+// different profile for each, and the lane reports a false negative against a
+// recipe that works in production.
+//
+// Returns nil when sentinel is empty (no tun): the caller keeps the system
+// resolver, which is the only option without a tunnel.
+func ProductionResolver(sentinel string, timeout time.Duration) *net.Resolver {
+	if sentinel == "" {
+		return nil
+	}
+	return &net.Resolver{
+		PreferGo: true,
+		Dial: func(ctx context.Context, _, _ string) (net.Conn, error) {
+			d := &net.Dialer{Timeout: timeout}
+			return d.DialContext(ctx, "udp", net.JoinHostPort(sentinel, "53"))
+		},
+	}
+}
 
 // SandboxClient returns an HTTP client whose sockets carry BOTH the sandbox
 // fwmark and a binding to the physical interface.
@@ -26,14 +54,20 @@ import (
 // measure the candidate strategy against the live DPI — which is the only way to
 // ask "would this recipe work?" without first imposing it on real traffic.
 //
+// resolver, when non-nil, resolves the probe target the way PRODUCTION does
+// (see ProductionResolver) instead of via the host's system resolver. A nil
+// resolver keeps the Go default. It is the difference between measuring the IP
+// production will dial and measuring whatever CDN IP this host's resolver happens
+// to return — the LOT-77 mismatch.
+//
 // Returns nil where the binding is impossible (non-Linux): a client that silently
 // dropped the binding would measure the tunnel and call it the candidate.
-func SandboxClient(mark int, iface func() string, timeout time.Duration) *http.Client {
+func SandboxClient(mark int, iface func() string, timeout time.Duration, resolver *net.Resolver) *http.Client {
 	ctrl := sandboxControl(mark, iface)
 	if ctrl == nil {
 		return nil
 	}
-	d := &net.Dialer{Timeout: DialPhaseTimeout, Control: ctrl}
+	d := &net.Dialer{Timeout: DialPhaseTimeout, Control: ctrl, Resolver: resolver}
 	return &http.Client{
 		Timeout: timeout,
 		Transport: &http.Transport{

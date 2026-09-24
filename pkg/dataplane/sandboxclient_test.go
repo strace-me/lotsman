@@ -1,10 +1,30 @@
 package dataplane
 
 import (
+	"net"
 	"net/http"
 	"testing"
 	"time"
 )
+
+// LOT-77: a nil resolver keeps the system resolver (no tun); a sentinel yields a
+// resolver that queries the tun peer, so a probe resolves the way production does.
+func TestProductionResolverNeedsASentinel(t *testing.T) {
+	if r := ProductionResolver("", time.Second); r != nil {
+		t.Error("no sentinel must yield the system resolver (nil), not a broken one")
+	}
+	r := ProductionResolver("172.19.0.2", time.Second)
+	if r == nil {
+		t.Fatal("a sentinel must yield a resolver that queries it")
+	}
+	if !r.PreferGo {
+		t.Error("the resolver must PreferGo, or the custom Dial is bypassed")
+	}
+	if r.Dial == nil {
+		t.Error("the resolver must carry the tun-peer Dial")
+	}
+	var _ *net.Resolver = r
+}
 
 // The two phases must be bounded separately, or a failure reports itself as
 // "Client.Timeout exceeded while awaiting headers" — true, and useless for the
@@ -12,7 +32,7 @@ import (
 // where no desync recipe can help, or was it the hello being swallowed, which is
 // what a recipe rewrites.
 func TestTheSandboxClientBoundsEachPhaseSeparately(t *testing.T) {
-	c := SandboxClient(0x4554, func() string { return "lo" }, 20*time.Second)
+	c := SandboxClient(0x4554, func() string { return "lo" }, 20*time.Second, nil)
 	if c == nil {
 		t.Skip("no interface binding on this platform")
 	}

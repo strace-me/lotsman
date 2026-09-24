@@ -60,12 +60,37 @@ func H3Client(timeout time.Duration) *http.Client {
 // Returns nil where the binding is impossible, for the same reason SandboxClient
 // does: a measurement that silently lost its isolation describes the tunnel and
 // files the verdict against the candidate.
-func SandboxH3Client(mark int, iface func() string, timeout time.Duration) *http.Client {
+func SandboxH3Client(mark int, iface func() string, timeout time.Duration, resolver *net.Resolver) *http.Client {
 	ctrl := sandboxControl(mark, iface)
 	if ctrl == nil {
 		return nil
 	}
-	return &http.Client{Timeout: timeout, Transport: &h3RoundTripper{ctrl: ctrl, timeout: timeout}}
+	return &http.Client{Timeout: timeout, Transport: &h3RoundTripper{ctrl: ctrl, timeout: timeout, resolver: resolver}}
+}
+
+// resolveUDPAddr resolves addr to a UDP address. A non-nil resolver resolves the
+// way production does (through the tun's sing-box DNS, see ProductionResolver);
+// nil falls back to the system resolver. A literal IP skips resolution either way.
+func resolveUDPAddr(ctx context.Context, r *net.Resolver, addr string) (*net.UDPAddr, error) {
+	host, portStr, err := net.SplitHostPort(addr)
+	if err != nil {
+		return nil, err
+	}
+	if r == nil || net.ParseIP(host) != nil {
+		return net.ResolveUDPAddr("udp", addr)
+	}
+	ips, err := r.LookupIPAddr(ctx, host)
+	if err != nil {
+		return nil, err
+	}
+	if len(ips) == 0 {
+		return nil, net.UnknownNetworkError("udp: no address for " + host)
+	}
+	port, err := net.LookupPort("udp", portStr)
+	if err != nil {
+		return nil, err
+	}
+	return &net.UDPAddr{IP: ips[0].IP, Port: port}, nil
 }
 
 // h3RoundTripper opens a FRESH QUIC connection per request and tears it down
@@ -82,6 +107,9 @@ type h3RoundTripper struct {
 	// ctrl stamps the socket (mark, interface binding); nil means plain egress.
 	ctrl    func(network, address string, c syscall.RawConn) error
 	timeout time.Duration
+	// resolver, when non-nil, resolves the target host the way production does
+	// (through the tun's sing-box DNS) instead of via the system resolver (LOT-77).
+	resolver *net.Resolver
 }
 
 func (h *h3RoundTripper) RoundTrip(req *http.Request) (*http.Response, error) {
@@ -98,7 +126,7 @@ func (h *h3RoundTripper) RoundTrip(req *http.Request) (*http.Response, error) {
 	qt := &quic.Transport{Conn: udp}
 	rt := &http3.Transport{
 		Dial: func(ctx context.Context, addr string, tlsCfg *tls.Config, cfg *quic.Config) (*quic.Conn, error) {
-			ua, err := net.ResolveUDPAddr("udp", addr)
+			ua, err := resolveUDPAddr(ctx, h.resolver, addr)
 			if err != nil {
 				return nil, err
 			}
