@@ -601,13 +601,19 @@ func (b *Brain) emitDesiredLocked(rt *runtime, reason string) {
 	b.log.Info("desired state",
 		"service", rt.svc.Name, "position", rt.position, "state", step.State,
 		"class", step.StrategyClass, "strategy", strategyID, "reason", reason)
-	b.bus.DesiredState <- events.DesiredStateChanged{
+	ev := events.DesiredStateChanged{
 		Service:       rt.svc.Name,
 		Position:      rt.position,
 		State:         step.State,
 		StrategyClass: step.StrategyClass,
 		StrategyID:    strategyID,
 	}
+	// Release b.mu around the (potentially blocking) channel send: a full
+	// DesiredState channel must not hold b.mu or the whole policy loop stalls
+	// (LOT-75). A slow applier waits here; the lock is free so the loop continues.
+	b.mu.Unlock()
+	b.bus.DesiredState <- ev
+	b.mu.Lock()
 	if b.persist != nil {
 		b.persist(b.positionsLocked())
 	}

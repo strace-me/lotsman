@@ -130,8 +130,6 @@ type SubStatus struct {
 // client already holds; nothing here probes or blocks beyond the liveness check
 // Healthy already does.
 func (c *Core) Report(ctx context.Context) Report {
-	c.stateMu.Lock()
-	defer c.stateMu.Unlock()
 	services := c.statusLocked(ctx)
 	running := c.Healthy(ctx)
 	// A Core that has not been given a config yet still answers /status — a UI that
@@ -141,13 +139,16 @@ func (c *Core) Report(ctx context.Context) Report {
 	if c.conf != nil {
 		disabled = c.conf.DisabledServices
 	}
+	c.fleetMu.Lock()
+	fleet := FleetStatus{Total: c.lastNodes, Servers: c.lastServers, Pools: c.lastPools, Nodes: c.lastFleet}
+	c.fleetMu.Unlock()
 	return Report{
 		Version:       version.String(),
 		Running:       running,
 		Verdict:       verdict(running, services),
 		Network:       c.networkInfo(),
 		Engines:       c.engineStatuses(ctx),
-		Fleet:         FleetStatus{Total: c.lastNodes, Servers: c.lastServers, Pools: c.lastPools, Nodes: c.lastFleet},
+		Fleet:         fleet,
 		Subscriptions: c.subStatuses(),
 		Services:      services,
 		Notices:       c.notices(),

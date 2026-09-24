@@ -295,6 +295,7 @@ type Core struct {
 
 	mu         sync.Mutex
 	stateMu    sync.Mutex      // serialises reads of the swappable loop state (brain/reg/eng/zap/prober) against Reload
+	fleetMu    sync.Mutex      // serialises the fleet snapshot (lastNodes/lastServers/lastPools/lastFleet) against Record/OnLive; separate from stateMu so Reload (holds stateMu) can call OnLive without self-deadlock
 	rootCtx    context.Context // process lifetime; the autonomy loop derives from it and is rebuilt on reload
 	life       context.Context
 	lifeCancel context.CancelFunc

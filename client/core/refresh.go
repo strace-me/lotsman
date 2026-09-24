@@ -154,51 +154,44 @@ func (c *Core) newReconciler() *reconcile.Reconciler {
 		// live config while the interface went on showing the count from startup, and
 		// read as a subscription that had not loaded.
 		//
-		// Under stateMu because this one runs on the refresh goroutine while the
-		// control socket serves /status from another; the startup writer does not
-		// need it and must not take it (Reload holds stateMu for its whole body).
-		OnLive: func(nodes []subscription.Node) {
-			c.stateMu.Lock()
-			c.recordFleet(nodes)
-			c.stateMu.Unlock()
-			// A set the reconciler made LIVE is by definition one worth starting from
-			// next time: it passed the degraded-fetch guard and sing-box is running on
-			// it. This is where the snapshot behind the startup fallback is kept fresh,
-			// so a machine that has been up all day boots from today's fleet rather
-			// than from whatever it last managed to fetch at boot.
-			c.saveFleet(nodes)
-		},
+		// Under fleetMu because this one runs on the refresh goroutine while the
+		// control socket serves /status from another. fleetMu is separate from
+		// stateMu: Reload holds stateMu for its whole body and synchronously calls
+		// OnLive, so sharing the mutex would self-deadlock (Go sync.Mutex is not
+		// re-entrant). See LOT-81.
+		OnLive: c.recordFleetOnLive(),
 	}
 	// Keep the config we are about to replace. The daemon has done this since June
 	// and the client never did (LOT-64): BackupDir defaults to "" = no backup, only
 	// cmd/lotsmand set it, so on a laptop `apply` renamed over the live config and
 	// restarted the engine with nothing kept. Principle 10 broken silently — from
 	// outside, the absence of the safety net looks exactly like having one.
-	//
-	// Derived rather than configured, because a backup that can be switched off is
-	// one that will be found switched off. `singbox.json.baseline` is not a
-	// substitute: it is the pristine snapshot, not the last thing that worked.
 	if c.opts.SingboxConfig != "" {
 		dir := filepath.Join(filepath.Dir(c.opts.SingboxConfig), "backups")
 		if err := os.MkdirAll(dir, 0o700); err != nil {
 			c.log.Warn("reconcile: no backup dir, config swaps will keep nothing", "dir", dir, "err", err)
-		} else {
-			rc.BackupDir = dir
 		}
-	}
-	// Persist the anti-churn baseline so the degraded-fetch guard fires on the very
-	// first reconcile after a restart instead of resetting to zero and applying a
-	// degraded startup fetch wholesale (LOT-29/LOT-45). Without a store the guard is
-	// inert until the first clean apply of THIS process — the exact window it exists
-	// to protect. The daemon seeds it identically.
-	if c.opts.BaselineFile != "" {
-		rc.Baseline = reconcile.NewBaselineStore(c.opts.BaselineFile)
-		if n := rc.Baseline.Load(); n > 0 {
-			rc.SetBaseline(n)
-			c.log.Info("reconcile: baseline restored", "path", c.opts.BaselineFile, "last_nodes", n)
-		}
+		rc.BackupDir = dir
 	}
 	return rc
+}
+
+// recordFleetOnLive returns the OnLive hook the reconciler fires when a node set
+// becomes LIVE. It records the fleet under fleetMu — NOT stateMu: Reload holds
+// stateMu for its whole body and synchronously drives the reconciler, so re-using
+// stateMu here would self-deadlock (Go sync.Mutex is not re-entrant). See LOT-81.
+func (c *Core) recordFleetOnLive() func([]subscription.Node) {
+	return func(nodes []subscription.Node) {
+		c.fleetMu.Lock()
+		c.recordFleet(nodes)
+		c.fleetMu.Unlock()
+		// A set the reconciler made LIVE is by definition one worth starting from
+		// next time: it passed the degraded-fetch guard and sing-box is running on
+		// it. This is where the snapshot behind the startup fallback is kept fresh,
+		// so a machine that has been up all day boots from today's fleet rather
+		// than from whatever it last managed to fetch at boot.
+		c.saveFleet(nodes)
+	}
 }
 
 // controlAlive reports whether sing-box came back after a restart. It asks the
