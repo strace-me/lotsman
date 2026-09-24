@@ -177,6 +177,48 @@ func TestBuildDNSDirectFailoverReplacesManualDirect(t *testing.T) {
 	}
 }
 
+// Explicit URI form: the scheme IS the transport, no catalog alias, no method.
+func TestBuildDNSParsesExplicitURLs(t *testing.T) {
+	d, err := buildDNS(&dnsYAML{
+		Servers: []dnsServerYAML{
+			{Name: "doh", URL: "https://cloudflare-dns.com/dns-query", Detour: "direct"},
+			{Name: "doq", URL: "quic://dns.quad9.net"},
+			{Name: "dot", URL: "tls://1.1.1.1:853"},
+			{Name: "plain", URL: "udp://192.168.10.30"},
+			{Name: "lan", Type: "local"},
+		},
+		Direct: "lan", Final: "doh",
+	})
+	if err != nil {
+		t.Fatalf("buildDNS: %v", err)
+	}
+	doh := d.Servers[0]
+	if doh.Type != "https" || doh.Address != "cloudflare-dns.com" || doh.Path != "/dns-query" || doh.ServerName != "cloudflare-dns.com" || !doh.Bootstrap {
+		t.Errorf("DoH url mis-parsed: %+v", doh)
+	}
+	doq := d.Servers[1]
+	if doq.Type != "quic" || doq.Address != "dns.quad9.net" || doq.ServerName != "dns.quad9.net" || doq.Path != "" {
+		t.Errorf("DoQ url mis-parsed: %+v", doq)
+	}
+	dot := d.Servers[2]
+	if dot.Type != "tls" || dot.Address != "1.1.1.1" || dot.Port != 853 || dot.Bootstrap {
+		t.Errorf("DoT url mis-parsed (an IP needs no bootstrap): %+v", dot)
+	}
+	plain := d.Servers[3]
+	if plain.Type != "udp" || plain.Address != "192.168.10.30" || plain.Port != 0 {
+		t.Errorf("plain url mis-parsed: %+v", plain)
+	}
+}
+
+func TestBuildDNSRejectsBadURL(t *testing.T) {
+	if _, err := buildDNS(&dnsYAML{
+		Servers: []dnsServerYAML{{Name: "x", URL: "ftp://nope.example"}},
+		Final:   "x",
+	}); err == nil {
+		t.Error("an unsupported scheme must be rejected")
+	}
+}
+
 func TestBuildDNSNilOrEmptyIsNoConfig(t *testing.T) {
 	if d, err := buildDNS(nil); err != nil || d != nil {
 		t.Errorf("nil dns yaml => (nil,nil), got (%v,%v)", d, err)

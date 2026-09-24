@@ -3,7 +3,9 @@ package config
 import (
 	"fmt"
 	"net"
+	"net/url"
 	"sort"
+	"strconv"
 	"strings"
 )
 
@@ -99,6 +101,7 @@ type dnsYAML struct {
 
 type dnsServerYAML struct {
 	Name     string `yaml:"name"`
+	URL      string `yaml:"url"`      // explicit endpoint: https://host/path | tls://host | quic://host | h3://host | udp|tcp://host[:port]
 	Provider string `yaml:"provider"` // curated alias: fills address + server_name
 	Method   string `yaml:"method"`   // with provider: https(default)|tls|quic|h3|tcp|udp
 	// manual form (no provider):
@@ -256,8 +259,74 @@ func (d *DNS) SetDirectProvider(alias string) error {
 	return fmt.Errorf("config: dns.direct %q not found among servers", d.Direct)
 }
 
+// parseDNSURL splits an explicit DNS endpoint URL into the transport, address,
+// port, DoH path and TLS SNI the generator needs. Accepted schemes:
+//
+//	https://host[/path]   DoH  (path defaults to /dns-query)
+//	h3://host[/path]      DoH over HTTP/3
+//	tls://host[:port]     DoT
+//	quic://host[:port]    DoQ
+//	udp://host[:port]     plain DNS over UDP
+//	tcp://host[:port]     plain DNS over TCP
+//
+// The scheme IS the transport, so the user never writes `method:`/`type:` by hand
+// and no catalog alias is required. A scheme-less value is rejected.
+func parseDNSURL(raw string) (typ, address string, port int, path, serverName string, err error) {
+	u, perr := url.Parse(raw)
+	if perr != nil {
+		return "", "", 0, "", "", fmt.Errorf("bad url %q: %v", raw, perr)
+	}
+	typ = strings.ToLower(u.Scheme)
+	switch typ {
+	case "https", "h3", "tls", "quic", "udp", "tcp":
+	default:
+		return "", "", 0, "", "", fmt.Errorf("unsupported scheme %q (https|h3|tls|quic|udp|tcp)", u.Scheme)
+	}
+	address = u.Hostname()
+	if address == "" {
+		return "", "", 0, "", "", fmt.Errorf("url %q has no host", raw)
+	}
+	if ps := u.Port(); ps != "" {
+		n, aerr := strconv.Atoi(ps)
+		if aerr != nil {
+			return "", "", 0, "", "", fmt.Errorf("url %q has a bad port: %v", raw, aerr)
+		}
+		port = n
+	}
+	if typ == "https" || typ == "h3" {
+		path = u.Path
+		if path == "" {
+			path = "/dns-query"
+		}
+	}
+	if dnsEncryptedType(typ) {
+		serverName = address
+	}
+	return typ, address, port, path, serverName, nil
+}
+
 func resolveDNSServer(s dnsServerYAML) (DNSServer, error) {
 	out := DNSServer{Name: s.Name, Port: s.Port, Detour: s.Detour, Provider: s.Provider}
+	if s.URL != "" {
+		// Explicit endpoint form — no catalog: `https://cloudflare-dns.com/dns-query`,
+		// `quic://dns.quad9.net`, `tls://1.1.1.1`, `udp://192.168.10.30`. The scheme IS
+		// the transport, the host IS the address, the path IS the DoH path.
+		typ, addr, port, path, sname, err := parseDNSURL(s.URL)
+		if err != nil {
+			return out, fmt.Errorf("config: dns server %q: %w", s.Name, err)
+		}
+		out.Type, out.Address, out.Path, out.ServerName = typ, addr, path, sname
+		if port != 0 {
+			out.Port = port
+		}
+		if dnsEncryptedType(typ) && net.ParseIP(addr) == nil {
+			// A hostname-addressed encrypted server needs a bootstrap resolver: its
+			// own name must be resolved before it can answer. sing-box uses the
+			// declared bootstrap server for that (see dnsServerObject).
+			out.Bootstrap = true
+		}
+		return out, nil
+	}
 	if s.Provider != "" {
 		p, ok := dnsProviders[s.Provider]
 		if !ok {
