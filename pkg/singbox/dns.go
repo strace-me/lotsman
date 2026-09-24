@@ -79,7 +79,12 @@ func dnsServerObject(s DNSServer, validDetour func(string) bool) map[string]any 
 	if s.Bootstrap != "" {
 		srv["domain_resolver"] = s.Bootstrap
 	}
-	if s.Detour != "" && (s.Detour == "direct" || validDetour == nil || validDetour(s.Detour)) {
+	// A detour names an OUTBOUND tag. "direct" is NOT a valid one here: sing-box
+	// rejects a DNS server detoured to the empty direct outbound ("detour to an
+	// empty direct outbound makes no sense") and refuses to start. Omitting the
+	// detour is exactly "use the default dialer", which is direct — so we drop a
+	// "direct" detour rather than emit it (LOT-83 regression).
+	if s.Detour != "" && s.Detour != "direct" && (validDetour == nil || validDetour(s.Detour)) {
 		srv["detour"] = s.Detour
 	}
 	return srv

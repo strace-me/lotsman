@@ -17,8 +17,10 @@ func TestDNSServerObjectShapes(t *testing.T) {
 		in   DNSServer
 		want map[string]any
 	}{
-		{"udp-direct", DNSServer{Tag: "d", Type: "udp", Server: "192.168.1.1", Detour: "direct"},
-			map[string]any{"tag": "d", "type": "udp", "server": "192.168.1.1", "server_port": 53, "detour": "direct"}},
+		// A "direct" detour is DROPPED, not emitted: sing-box refuses a DNS server
+		// detoured to the empty direct outbound. No detour == dial direct.
+		{"udp-direct-dropped", DNSServer{Tag: "d", Type: "udp", Server: "192.168.1.1", Detour: "direct"},
+			map[string]any{"tag": "d", "type": "udp", "server": "192.168.1.1", "server_port": 53}},
 		{"doh-ip-sni", DNSServer{Tag: "r", Type: "https", Server: "1.1.1.1", ServerName: "cloudflare-dns.com", Detour: "vpn_url_test"},
 			map[string]any{"tag": "r", "type": "https", "server": "1.1.1.1", "server_port": 443, "path": "/dns-query", "tls": map[string]any{"server_name": "cloudflare-dns.com"}, "detour": "vpn_url_test"}},
 		{"dot", DNSServer{Tag: "t", Type: "tls", Server: "9.9.9.9", Detour: "vpn_url_test"},
@@ -112,6 +114,32 @@ func TestDNSSectionZapretSplit(t *testing.T) {
 	}
 	if ds, ok := zd["domain_suffix"].([]string); !ok || len(ds) != 2 {
 		t.Errorf("zapret domain_suffix wrong: %v", zd["domain_suffix"])
+	}
+}
+
+// A "direct" detour on a DNS server is NOT emitted: sing-box refuses to start
+// with a DNS server detoured to the empty direct outbound, and omitting the detour
+// IS "dial direct". Regression for the LOT-83 zapret-dns server that killed sing-box.
+func TestDNSServerDropsDirectDetour(t *testing.T) {
+	o := &DNSOptions{
+		Servers: []DNSServer{
+			{Tag: "zapret-dns", Type: "tls", Server: "9.9.9.9", ServerName: "dns.quad9.net", Detour: "direct"},
+			{Tag: "dns_remote", Type: "https", Server: "1.1.1.1", Detour: "vpn_url_test"},
+		},
+		Final: "dns_remote",
+	}
+	dns, ok := dnsSection(o, nil, nil, nil, func(tag string) bool { return tag == "vpn_url_test" }, Capabilities("1.12.17"))
+	if !ok {
+		t.Fatal("expected a dns block")
+	}
+	servers := dns["servers"].([]any)
+	zapret := servers[0].(map[string]any)
+	if _, present := zapret["detour"]; present {
+		t.Errorf("a direct detour must be dropped, not emitted: %v", zapret)
+	}
+	remote := servers[1].(map[string]any)
+	if remote["detour"] != "vpn_url_test" {
+		t.Errorf("a real outbound detour must survive: %v", remote)
 	}
 }
 
