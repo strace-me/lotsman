@@ -43,12 +43,19 @@ func (d Definition) Validate() error {
 	return nil
 }
 
+type SourceRef struct {
+	Kind     Kind
+	Type     string
+	Location string
+}
+
 type Snapshot struct {
 	Name    string
 	Kind    Kind
 	Values  []string
 	Sources int
 	Invalid int
+	Refs    []SourceRef
 }
 
 func (d Definition) Load(ctx context.Context, fetcher subscription.Fetcher) (Snapshot, error) {
@@ -60,12 +67,14 @@ func (d Definition) LoadWith(ctx context.Context, providers Providers, fetcher s
 		return Snapshot{}, err
 	}
 	raw := make([][]byte, 0, len(d.Files)+len(d.URLs)+1)
+	refs := make([]SourceRef, 0, len(d.Files)+len(d.URLs)+2)
 	if d.Source != "" {
 		provided, err := providers.Load(ctx, d.Source, Reference{Kind: d.Kind, Dataset: d.Dataset, Category: d.Category}, fetcher)
 		if err != nil {
 			return Snapshot{}, err
 		}
 		raw = append(raw, provided...)
+		refs = append(refs, SourceRef{Kind: d.Kind, Type: "provider", Location: d.Source + "/" + d.Dataset + "/" + d.Category})
 	}
 	if len(d.Domains) > 0 || len(d.CIDRs) > 0 {
 		var values []string
@@ -76,6 +85,7 @@ func (d Definition) LoadWith(ctx context.Context, providers Providers, fetcher s
 			values = append(values, d.CIDRs...)
 		}
 		raw = append(raw, []byte(strings.Join(values, "\n")))
+		refs = append(refs, SourceRef{Kind: d.Kind, Type: "inline", Location: d.Name})
 	}
 	for _, file := range d.Files {
 		data, err := os.ReadFile(file)
@@ -83,6 +93,7 @@ func (d Definition) LoadWith(ctx context.Context, providers Providers, fetcher s
 			return Snapshot{}, err
 		}
 		raw = append(raw, data)
+		refs = append(refs, SourceRef{Kind: d.Kind, Type: "file", Location: file})
 	}
 	if len(d.URLs) > 0 && fetcher == nil {
 		return Snapshot{}, fmt.Errorf("list %q has URL sources but no fetcher", d.Name)
@@ -94,6 +105,7 @@ func (d Definition) LoadWith(ctx context.Context, providers Providers, fetcher s
 				return Snapshot{}, err
 			}
 			raw = append(raw, data)
+			refs = append(refs, SourceRef{Kind: d.Kind, Type: "url", Location: url})
 		}
 	}
 	var parsed [][]string
@@ -111,7 +123,7 @@ func (d Definition) LoadWith(ctx context.Context, providers Providers, fetcher s
 		}
 	}
 	values := merge(d.Kind, parsed)
-	return Snapshot{Name: d.Name, Kind: d.Kind, Values: values, Sources: len(raw), Invalid: invalid}, nil
+	return Snapshot{Name: d.Name, Kind: d.Kind, Values: values, Sources: len(raw), Invalid: invalid, Refs: refs}, nil
 }
 
 func merge(kind Kind, lists [][]string) []string {
