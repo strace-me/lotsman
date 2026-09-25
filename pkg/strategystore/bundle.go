@@ -10,6 +10,7 @@ type Bundle struct {
 	Root     string
 	Manifest Manifest
 	Args     Args
+	Revision string
 }
 
 func LoadBundle(root string) (Bundle, error) {
@@ -27,7 +28,11 @@ func LoadBundle(root string) (Bundle, error) {
 			return Bundle{}, fmt.Errorf("bundle %q asset %q: %w", manifest.ID, kind, err)
 		}
 	}
-	return Bundle{Root: root, Manifest: manifest, Args: args}, nil
+	revision, err := ContentRevision(root)
+	if err != nil {
+		return Bundle{}, err
+	}
+	return Bundle{Root: root, Manifest: manifest, Args: args, Revision: revision}, nil
 }
 
 func WriteBundle(root string, manifest Manifest, args []string) error {

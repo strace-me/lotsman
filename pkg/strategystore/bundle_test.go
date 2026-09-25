@@ -25,6 +25,9 @@ func TestBundleRoundTrip(t *testing.T) {
 	if bundle.Manifest.ID != "alt12" || len(bundle.Args.Values) != 1 {
 		t.Fatalf("bundle = %#v", bundle)
 	}
+	if bundle.Revision == "" {
+		t.Fatal("bundle has no content revision")
+	}
 }
 
 func TestLoadBundleRejectsMissingAsset(t *testing.T) {
