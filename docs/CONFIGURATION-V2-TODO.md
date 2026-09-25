@@ -79,26 +79,26 @@
 
 ### 1.1 `pkg/strategystore`
 
-- [ ] Вынести текущий `.args` parser из `pkg/config`.
-- [ ] Не создавать третий parser: существующий `loadPreset` должен быть общей primitive.
-- [ ] Сделать parse/write bundle manifest.
-- [ ] Сделать parse/write `command.args` с comments и blank lines.
+- [x] Вынести текущий `.args` parser из `pkg/config`.
+- [x] Не создавать третий parser: существующий `loadPreset` должен быть общей primitive.
+- [x] Сделать parse/write bundle manifest.
+- [x] Сделать parse/write `command.args` с comments и blank lines.
 - [ ] Сделать atomic write: temp file, fsync, rename.
-- [ ] Сделать content revision/hash.
-- [ ] Сделать last-known-good snapshot при reload с ошибкой.
-- [ ] Ограничить id регулярным выражением и запретить traversal.
-- [ ] Проверять существование assets, но не загружать/выполнять их.
+- [x] Сделать content revision/hash.
+- [x] Сделать last-known-good snapshot при reload с ошибкой.
+- [x] Ограничить id регулярным выражением и запретить traversal.
+- [x] Проверять существование assets, но не загружать/выполнять их.
 
 **Файлы:** новый `pkg/strategystore`, тесты рядом; `pkg/config` перестаёт быть единственным владельцем формата.
 
 ### 1.2 Bundle format
 
-- [ ] Утвердить `strategy.yaml` fields: `id`, `name`, `engine`, `args`, `assets`, `revision`, `notes`.
-- [ ] Утвердить layout `hostlists/`, `payloads/`, `lua/`.
-- [ ] Утвердить, что `command.args` — opaque argv, а не shell command.
+- [x] Утвердить `strategy.yaml` fields: `id`, `name`, `engine`, `args`, `assets`, `revision`, `notes`.
+- [x] Утвердить layout `hostlists/`, `payloads/`, `lua/`.
+- [x] Утвердить, что `command.args` — opaque argv, а не shell command.
 - [ ] Добавить nfqws1 и nfqws2 fixtures.
 - [ ] Проверить, что nfqws2 `--blob=name:@file` и `--lua-desync=@file` не проходят через nfqws1 validator.
-- [ ] Проверить, что absolute asset paths допускаются только внутри bundle или явно разрешённого каталога.
+- [x] Проверить, что absolute asset paths допускаются только внутри bundle или явно разрешённого каталога.
 
 **Готово когда:** один и тот же bundle loader читает nfqws1 и nfqws2, но разные engine adapters принимают только свои capabilities.
 
