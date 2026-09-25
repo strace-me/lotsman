@@ -98,6 +98,7 @@
 - [x] Утвердить, что `command.args` — opaque argv, а не shell command.
 - [x] Добавить nfqws1 и nfqws2 fixtures.
 - [x] Проверить, что nfqws2 `--blob=name:@file` и `--lua-desync=@file` не проходят через nfqws1 validator.
+- [x] Добавить отдельный nfqws2 validator и `Prepare` без nfqws1-флага fwmark.
 - [x] Проверить, что absolute asset paths допускаются только внутри bundle или явно разрешённого каталога.
 
 **Готово когда:** один и тот же bundle loader читает nfqws1 и nfqws2, но разные engine adapters принимают только свои capabilities.
