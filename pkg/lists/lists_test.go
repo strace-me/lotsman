@@ -14,15 +14,15 @@ func (f fakeFetcher) Fetch(_ context.Context, url string) ([]byte, error) {
 }
 
 func TestLoadDomains(t *testing.T) {
-	file := filepath.Join(t.TempDir(), "reddit.txt")
-	if err := os.WriteFile(file, []byte("# list\nreddit.com\n\nWWW.REDDIT.COM\nbroken\n"), 0o644); err != nil {
+	file := filepath.Join(t.TempDir(), "domains.txt")
+	if err := os.WriteFile(file, []byte("# list\nexample.com\n\nWWW.EXAMPLE.COM\nbroken\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	snapshot, err := (Definition{Name: "reddit", Kind: Domains, Files: []string{file}}).Load(context.Background(), nil)
+	snapshot, err := (Definition{Name: "example", Kind: Domains, Files: []string{file}}).Load(context.Background(), nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(snapshot.Values) != 2 || snapshot.Values[0] != "reddit.com" || snapshot.Values[1] != "www.reddit.com" {
+	if len(snapshot.Values) != 2 || snapshot.Values[0] != "example.com" || snapshot.Values[1] != "www.example.com" {
 		t.Fatalf("values = %#v", snapshot.Values)
 	}
 	if snapshot.Invalid != 1 {
@@ -41,19 +41,19 @@ func TestLoadIPs(t *testing.T) {
 }
 
 func TestLoadURL(t *testing.T) {
-	snapshot, err := (Definition{Name: "reddit", Kind: Domains, URLs: []string{"https://list.invalid/reddit"}}).Load(context.Background(), fakeFetcher{
-		"https://list.invalid/reddit": []byte("reddit.com\n"),
+	snapshot, err := (Definition{Name: "example", Kind: Domains, URLs: []string{"https://list.invalid/example"}}).Load(context.Background(), fakeFetcher{
+		"https://list.invalid/example": []byte("example.com\n"),
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(snapshot.Values) != 1 || snapshot.Values[0] != "reddit.com" {
+	if len(snapshot.Values) != 1 || snapshot.Values[0] != "example.com" {
 		t.Fatalf("values = %#v", snapshot.Values)
 	}
 }
 
 func TestLoadURLRequiresFetcher(t *testing.T) {
-	if _, err := (Definition{Name: "reddit", Kind: Domains, URLs: []string{"https://list.invalid/reddit"}}).Load(context.Background(), nil); err == nil {
+	if _, err := (Definition{Name: "example", Kind: Domains, URLs: []string{"https://list.invalid/example"}}).Load(context.Background(), nil); err == nil {
 		t.Fatal("URL list without fetcher was accepted")
 	}
 }

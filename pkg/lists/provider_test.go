@@ -18,19 +18,19 @@ func (p fakeProvider) Load(context.Context, Reference, subscription.Fetcher) ([]
 }
 
 func TestLoadWithProvider(t *testing.T) {
-	snapshot, err := (Definition{Name: "reddit", Kind: Domains, Source: "runetfreedom", Dataset: "geosite", Category: "reddit"}).LoadWith(context.Background(), Providers{
-		"runetfreedom": fakeProvider{values: []byte("reddit.com\n")},
+	snapshot, err := (Definition{Name: "example", Kind: Domains, Source: "runetfreedom", Dataset: "geosite", Category: "example"}).LoadWith(context.Background(), Providers{
+		"runetfreedom": fakeProvider{values: []byte("example.com\n")},
 	}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(snapshot.Values) != 1 || snapshot.Values[0] != "reddit.com" {
+	if len(snapshot.Values) != 1 || snapshot.Values[0] != "example.com" {
 		t.Fatalf("values = %#v", snapshot.Values)
 	}
 }
 
 func TestLoadWithUnknownProvider(t *testing.T) {
-	if _, err := (Definition{Name: "reddit", Kind: Domains, Source: "missing"}).LoadWith(context.Background(), nil, nil); err == nil {
+	if _, err := (Definition{Name: "example", Kind: Domains, Source: "missing"}).LoadWith(context.Background(), nil, nil); err == nil {
 		t.Fatal("unknown provider was accepted")
 	}
 }
