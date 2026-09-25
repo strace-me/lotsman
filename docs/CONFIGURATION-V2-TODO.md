@@ -122,8 +122,8 @@
 - [x] Реализовать IP/CIDR lists из manual/URL sources через существующий `aggregate.ParseIPList`.
 - [x] `geosite:reddit` и `geoip:reddit` проверять независимо (SRSProvider ветвится по ref.Kind).
 - [x] Не подменять отсутствующий `geoip:reddit` списком `ru-blocked` (пусто/ошибка, подмены нет).
-- [ ] Поддержать manual `reddit.com` рядом с именованным списком.
-- [ ] Сохранять source metadata для диагностики и UI.
+- [x] Поддержать manual `reddit.com` рядом с именованным списком.
+- [x] Сохранять source metadata для диагностики и UI (Snapshot.Refs: provider/inline/file/url).
 - [ ] Добавить update freshness/status.
 
 ### 2.3 Компиляция под движки
