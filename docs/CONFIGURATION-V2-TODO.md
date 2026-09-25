@@ -109,19 +109,19 @@
 ### 2.1 Provider abstraction
 
 - [x] Определить provider interface для именованных list sources.
-- [ ] Описать `data_sources` для `runetfreedom/russia-v2ray-rules-dat`.
+- [x] Описать `data_sources` для `runetfreedom/russia-v2ray-rules-dat` (SRSProvider поверх локального `.srs`-каталога).
 - [ ] Описать `russia-blocked-geosite` как альтернативный provider.
 - [ ] Поддержать geosite/geoip `.dat` sources и refresh interval.
 - [ ] Проверять checksum/sha256, если источник его публикует.
 - [ ] Не различать `category: reddit` и `field: reddit` в пользовательском API без необходимости.
-- [ ] Сообщать, если provider не содержит запрошенную категорию.
+- [x] Сообщать, если provider не содержит запрошенную категорию (ошибка декомпиляции, без тихого fallback).
 
 ### 2.2 Lists
 
 - [x] Реализовать domain lists из manual/URL sources через существующий `aggregate.ParseList`.
 - [x] Реализовать IP/CIDR lists из manual/URL sources через существующий `aggregate.ParseIPList`.
-- [ ] `geosite:reddit` и `geoip:reddit` проверять независимо.
-- [ ] Не подменять отсутствующий `geoip:reddit` списком `ru-blocked`.
+- [x] `geosite:reddit` и `geoip:reddit` проверять независимо (SRSProvider ветвится по ref.Kind).
+- [x] Не подменять отсутствующий `geoip:reddit` списком `ru-blocked` (пусто/ошибка, подмены нет).
 - [ ] Поддержать manual `reddit.com` рядом с именованным списком.
 - [ ] Сохранять source metadata для диагностики и UI.
 - [ ] Добавить update freshness/status.
