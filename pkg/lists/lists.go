@@ -37,7 +37,7 @@ func (d Definition) Validate() error {
 	if d.Kind != Domains && d.Kind != IPs {
 		return fmt.Errorf("list %q has unknown kind %q", d.Name, d.Kind)
 	}
-	if len(d.Files) == 0 && len(d.URLs) == 0 && len(d.Domains) == 0 && len(d.CIDRs) == 0 {
+	if d.Source == "" && len(d.Files) == 0 && len(d.URLs) == 0 && len(d.Domains) == 0 && len(d.CIDRs) == 0 {
 		return fmt.Errorf("list %q has no sources", d.Name)
 	}
 	return nil
@@ -52,10 +52,21 @@ type Snapshot struct {
 }
 
 func (d Definition) Load(ctx context.Context, fetcher subscription.Fetcher) (Snapshot, error) {
+	return d.LoadWith(ctx, nil, fetcher)
+}
+
+func (d Definition) LoadWith(ctx context.Context, providers Providers, fetcher subscription.Fetcher) (Snapshot, error) {
 	if err := d.Validate(); err != nil {
 		return Snapshot{}, err
 	}
-	raw := make([][]byte, 0, len(d.Files)+len(d.URLs))
+	raw := make([][]byte, 0, len(d.Files)+len(d.URLs)+1)
+	if d.Source != "" {
+		provided, err := providers.Load(ctx, d.Source, Reference{Kind: d.Kind, Dataset: d.Dataset, Category: d.Category}, fetcher)
+		if err != nil {
+			return Snapshot{}, err
+		}
+		raw = append(raw, provided...)
+	}
 	if len(d.Domains) > 0 || len(d.CIDRs) > 0 {
 		var values []string
 		switch d.Kind {
