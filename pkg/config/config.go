@@ -24,6 +24,7 @@ import (
 	"github.com/strace-me/lotsman/pkg/pools"
 	"github.com/strace-me/lotsman/pkg/registry"
 	"github.com/strace-me/lotsman/pkg/strategy"
+	"github.com/strace-me/lotsman/pkg/strategystore"
 	"github.com/strace-me/lotsman/pkg/subscription"
 	"github.com/strace-me/lotsman/pkg/zapret"
 )
@@ -551,41 +552,11 @@ func buildPresets(p presetYAML) ([]ZapretPreset, error) {
 }
 
 func loadPreset(file, declaredName string, single bool) (*ZapretPreset, error) {
-	data, err := os.ReadFile(file)
+	parsed, err := strategystore.ReadArgs(file, declaredName, single)
 	if err != nil {
 		return nil, fmt.Errorf("zapret preset: %w", err)
 	}
-	name := ""
-	var args []string
-	for _, line := range strings.Split(string(data), "\n") {
-		line = strings.TrimSpace(line)
-		if line == "" {
-			continue
-		}
-		if strings.HasPrefix(line, "#") {
-			// The converter's first line is "# NAME — converted from ...", which is the
-			// upstream's own name for the bundle. Operators say "ALT12", not a filename.
-			if name == "" {
-				if rest, ok := strings.CutPrefix(line, "# "); ok {
-					if i := strings.Index(rest, " — "); i > 0 {
-						name = strings.TrimSpace(rest[:i])
-					}
-				}
-			}
-			continue
-		}
-		args = append(args, line)
-	}
-	if len(args) == 0 {
-		return nil, fmt.Errorf("zapret preset %q: %s holds no arguments", declaredName, file)
-	}
-	if single && declaredName != "" {
-		name = declaredName
-	}
-	if name == "" {
-		name = strings.TrimSuffix(filepath.Base(file), ".args")
-	}
-	return &ZapretPreset{Name: name, Args: args}, nil
+	return &ZapretPreset{Name: parsed.Name, Args: parsed.Values}, nil
 }
 
 func buildZapret(z zapretYAML) ([]zapret.Instance, error) {
