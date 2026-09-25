@@ -47,7 +47,7 @@ func H3Client(timeout time.Duration) *http.Client {
 }
 
 // SandboxH3Client is SandboxClient's QUIC twin: a UDP socket carrying BOTH the
-// sandbox fwmark and a binding to the physical interface.
+// sandbox fwmark and a source address on the physical interface.
 //
 // Both halves matter exactly as they do for TCP, and the QUIC probe that already
 // existed had NEITHER — `probeQUIC` builds a bare `http3.Transport{}`, so its
@@ -61,11 +61,16 @@ func H3Client(timeout time.Duration) *http.Client {
 // does: a measurement that silently lost its isolation describes the tunnel and
 // files the verdict against the candidate.
 func SandboxH3Client(mark int, iface func() string, timeout time.Duration, resolver *net.Resolver) *http.Client {
-	ctrl := sandboxControl(mark, iface)
-	if ctrl == nil {
+	ctrl := markControl(mark)
+	if ctrl == nil || iface == nil {
 		return nil
 	}
-	return &http.Client{Timeout: timeout, Transport: &h3RoundTripper{ctrl: ctrl, timeout: timeout, resolver: resolver}}
+	return &http.Client{Timeout: timeout, Transport: &h3RoundTripper{
+		ctrl:     ctrl,
+		local:    func() (net.Addr, error) { return sandboxLocalAddr(iface, "udp") },
+		timeout:  timeout,
+		resolver: resolver,
+	}}
 }
 
 // resolveUDPAddr resolves addr to a UDP address. A non-nil resolver resolves the
@@ -104,8 +109,9 @@ func resolveUDPAddr(ctx context.Context, r *net.Resolver, addr string) (*net.UDP
 // down as principle 15 — and rebuilding it in the QUIC dimension would be
 // unforced.
 type h3RoundTripper struct {
-	// ctrl stamps the socket (mark, interface binding); nil means plain egress.
+	// ctrl stamps the socket with the sandbox mark; nil means plain egress.
 	ctrl    func(network, address string, c syscall.RawConn) error
+	local   func() (net.Addr, error)
 	timeout time.Duration
 	// resolver, when non-nil, resolves the target host the way production does
 	// (through the tun's sing-box DNS) instead of via the system resolver (LOT-77).
@@ -113,8 +119,16 @@ type h3RoundTripper struct {
 }
 
 func (h *h3RoundTripper) RoundTrip(req *http.Request) (*http.Response, error) {
+	listenAddr := ":0"
+	if h.local != nil {
+		local, err := h.local()
+		if err != nil {
+			return nil, err
+		}
+		listenAddr = local.String()
+	}
 	lc := net.ListenConfig{Control: h.ctrl}
-	pc, err := lc.ListenPacket(req.Context(), "udp", ":0")
+	pc, err := lc.ListenPacket(req.Context(), "udp4", listenAddr)
 	if err != nil {
 		return nil, err
 	}

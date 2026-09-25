@@ -32,7 +32,7 @@ func TestProductionResolverNeedsASentinel(t *testing.T) {
 // where no desync recipe can help, or was it the hello being swallowed, which is
 // what a recipe rewrites.
 func TestTheSandboxClientBoundsEachPhaseSeparately(t *testing.T) {
-	c := SandboxClient(0x4554, func() string { return "lo" }, 20*time.Second, nil)
+	c := SandboxClient(0x4554, func() string { return "lo" }, 20*time.Second, nil, "chrome")
 	if c == nil {
 		t.Skip("no interface binding on this platform")
 	}
@@ -52,9 +52,23 @@ func TestTheSandboxClientBoundsEachPhaseSeparately(t *testing.T) {
 	}
 }
 
+func TestSandboxLocalAddrUsesEgressAddress(t *testing.T) {
+	addr, err := sandboxLocalAddr(func() string { return "lo" }, "tcp")
+	if err != nil {
+		t.Fatal(err)
+	}
+	tcp, ok := addr.(*net.TCPAddr)
+	if !ok {
+		t.Fatalf("local address is %T", addr)
+	}
+	if !tcp.IP.IsLoopback() {
+		t.Fatalf("local address = %v, want loopback", tcp.IP)
+	}
+}
+
 // The live canary's client must classify a failure the same way the lane's does,
 // or the two graders describe one path in two languages. This half runs on every
-// platform; the sandbox half needs SO_BINDTODEVICE.
+// platform; the sandbox half needs a source address on the egress interface.
 func TestTheBurstClientBoundsEachPhaseToo(t *testing.T) {
 	tr, ok := BurstClient("", 20*time.Second).Transport.(*http.Transport)
 	if !ok {

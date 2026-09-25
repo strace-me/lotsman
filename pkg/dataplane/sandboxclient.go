@@ -2,9 +2,9 @@ package dataplane
 
 import (
 	"context"
+	"fmt"
 	"net"
 	"net/http"
-	"syscall"
 	"time"
 )
 
@@ -52,7 +52,7 @@ func ProductionResolver(sentinel string, timeout time.Duration) *net.Resolver {
 }
 
 // SandboxClient returns an HTTP client whose sockets carry BOTH the sandbox
-// fwmark and a binding to the physical interface.
+// fwmark and a source address on the physical interface.
 //
 // Each half answers a different question and neither is sufficient alone:
 //
@@ -60,11 +60,9 @@ func ProductionResolver(sentinel string, timeout time.Duration) *net.Resolver {
 //     returns marked packets untouched and the sandbox table queues only them, so
 //     a marked probe is desynced exactly once, by the CANDIDATE, and the
 //     household's traffic never meets it.
-//   - The BINDING is what lets the packet leave at all. Under our own tun,
-//     auto_route pulls every destination into the tunnel, so an unbound socket —
-//     marked or not — is routed by the service's rule into whatever VPN node it
-//     sits on. The mark would then be carried through a tunnel that no nft rule on
-//     this box ever sees, and the "candidate" measurement would describe the VPN.
+//   - The SOURCE ADDRESS keeps the packet on the physical egress path under our
+//     own tun. The mark is then visible to the sandbox nft table and the reply
+//     returns to the interface that sent it.
 //
 // Together they make the probe leave on the WAN, meet the sandbox queue, and
 // measure the candidate strategy against the live DPI — which is the only way to
@@ -78,21 +76,92 @@ func ProductionResolver(sentinel string, timeout time.Duration) *net.Resolver {
 //
 // Returns nil where the binding is impossible (non-Linux): a client that silently
 // dropped the binding would measure the tunnel and call it the candidate.
-func SandboxClient(mark int, iface func() string, timeout time.Duration, resolver *net.Resolver) *http.Client {
-	ctrl := sandboxControl(mark, iface)
-	if ctrl == nil {
+func SandboxClient(mark int, iface func() string, timeout time.Duration, resolver *net.Resolver, fingerprint string) *http.Client {
+	dial := sandboxDialer(mark, iface, resolver)
+	if dial == nil {
 		return nil
 	}
-	d := &net.Dialer{Timeout: DialPhaseTimeout, Control: ctrl, Resolver: resolver}
 	return &http.Client{
 		Timeout: timeout,
 		Transport: &http.Transport{
-			DialContext: d.DialContext,
+			DialContext:    dial,
+			DialTLSContext: uTLSDialContext(dial, fingerprint),
 			// Establishing the connection is the thing being measured; a pooled one
 			// would present the DPI with nothing and the candidate with no work to do.
 			DisableKeepAlives:   true,
 			TLSHandshakeTimeout: TLSPhaseTimeout,
 		},
+	}
+}
+
+func sandboxDialer(mark int, iface func() string, resolver *net.Resolver) func(context.Context, string, string) (net.Conn, error) {
+	if mark == 0 || iface == nil {
+		return nil
+	}
+	ctrl := markControl(mark)
+	if ctrl == nil {
+		return nil
+	}
+	return func(ctx context.Context, network, addr string) (net.Conn, error) {
+		local, err := sandboxLocalAddr(iface, network)
+		if err != nil {
+			return nil, err
+		}
+		d := &net.Dialer{
+			Timeout:   DialPhaseTimeout,
+			Control:   ctrl,
+			Resolver:  resolver,
+			LocalAddr: local,
+		}
+		return d.DialContext(ctx, network, addr)
+	}
+}
+
+func sandboxLocalAddr(iface func() string, network string) (net.Addr, error) {
+	name := iface()
+	if name == "" {
+		return nil, fmt.Errorf("sandbox probe has no egress interface")
+	}
+	i, err := net.InterfaceByName(name)
+	if err != nil {
+		return nil, err
+	}
+	addrs, err := i.Addrs()
+	if err != nil {
+		return nil, err
+	}
+	for _, addr := range addrs {
+		var ip net.IP
+		switch v := addr.(type) {
+		case *net.IPNet:
+			ip = v.IP
+		case *net.IPAddr:
+			ip = v.IP
+		}
+		if ip == nil {
+			continue
+		}
+		if network == "tcp6" || network == "udp6" {
+			if ip.To4() == nil {
+				return localAddr(ip, network)
+			}
+			continue
+		}
+		if ip4 := ip.To4(); ip4 != nil {
+			return localAddr(ip4, network)
+		}
+	}
+	return nil, fmt.Errorf("sandbox interface %q has no address for %s", name, network)
+}
+
+func localAddr(ip net.IP, network string) (net.Addr, error) {
+	switch network {
+	case "tcp", "tcp4", "tcp6":
+		return &net.TCPAddr{IP: ip}, nil
+	case "udp", "udp4", "udp6":
+		return &net.UDPAddr{IP: ip}, nil
+	default:
+		return nil, fmt.Errorf("unsupported sandbox network %q", network)
 	}
 }
 
@@ -116,28 +185,3 @@ const (
 	DialPhaseTimeout = 6 * time.Second
 	TLSPhaseTimeout  = 8 * time.Second
 )
-
-// sandboxControl is the socket stamp both sandbox clients share: the mark that
-// makes the packet the lane's, then the binding that lets it leave on the WAN.
-// Shared rather than written twice, because the TCP and QUIC halves of a
-// measurement differing in isolation would be indistinguishable from the network
-// differing — the trap that cost a day when four HTTP clients turned out to
-// differ in address family rather than in TLS shape.
-//
-// nil where the binding is impossible (non-Linux).
-func sandboxControl(mark int, iface func() string) func(network, address string, c syscall.RawConn) error {
-	bind := bindToDeviceControl(iface)
-	if bind == nil {
-		return nil
-	}
-	markc := markControl(mark)
-	return func(network, address string, c syscall.RawConn) error {
-		if err := bind(network, address, c); err != nil {
-			return err
-		}
-		if markc == nil {
-			return nil
-		}
-		return markc(network, address, c)
-	}
-}

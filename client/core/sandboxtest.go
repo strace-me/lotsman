@@ -26,6 +26,13 @@ func (c *Core) productionResolver() *net.Resolver {
 	return dataplane.ProductionResolver(tunSentinel(c.tunOptions()), 4*time.Second)
 }
 
+func (c *Core) sandboxUTLSFingerprint() string {
+	if c.conf == nil || c.conf.UTLSFingerprint == "" {
+		return "chrome"
+	}
+	return c.conf.UTLSFingerprint
+}
+
 // resolveVolumeTarget resolves the rule's first volume target through the SAME
 // resolver the lane dials with, so the log names the exact IP the measurement is
 // against. Comparing it with the IP production actually dials is how a probe/prod
@@ -120,7 +127,7 @@ func (c *Core) testRecipe(ctx context.Context, svc registry.Service, recipeID st
 	if err != nil {
 		return false, false, "no sandbox: " + err.Error()
 	}
-	client := dataplane.SandboxClient(zapret.TuneMark, c.wanIface, sandboxProbeTimeout, c.productionResolver())
+	client := dataplane.SandboxClient(zapret.TuneMark, c.wanIface, sandboxProbeTimeout, c.productionResolver(), c.sandboxUTLSFingerprint())
 	if client == nil {
 		return false, false, "this platform cannot bind a probe to the interface, so a candidate cannot be measured without imposing it"
 	}
@@ -190,7 +197,7 @@ func (c *Core) testBaseline(ctx context.Context, svc registry.Service) (ok, meas
 	if err != nil {
 		return false, false, "no sandbox: " + err.Error()
 	}
-	client := dataplane.SandboxClient(zapret.TuneMark, c.wanIface, sandboxProbeTimeout, c.productionResolver())
+	client := dataplane.SandboxClient(zapret.TuneMark, c.wanIface, sandboxProbeTimeout, c.productionResolver(), c.sandboxUTLSFingerprint())
 	if client == nil {
 		return false, false, "this platform cannot bind a probe to the interface"
 	}
