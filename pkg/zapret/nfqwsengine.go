@@ -1,9 +1,12 @@
 package zapret
 
 import (
+	"fmt"
+	"strconv"
 	"strings"
 
 	"github.com/strace-me/lotsman/pkg/desyncgen"
+	"github.com/strace-me/lotsman/pkg/strategystore"
 )
 
 // rawAxis carries a complete pre-baked nfqws arg string (a fixed-point raw recipe);
@@ -24,6 +27,36 @@ const rawAxis = "__raw"
 type NfqwsEngine struct{}
 
 func (NfqwsEngine) Name() string { return "nfqws" }
+
+func (NfqwsEngine) Engine() string { return "nfqws1" }
+
+func (NfqwsEngine) Validate(b strategystore.Bundle) error {
+	if b.Manifest.Engine != "nfqws1" && b.Manifest.Engine != "nfqws" {
+		return fmt.Errorf("strategy %q is for engine %q, not nfqws1", b.Manifest.ID, b.Manifest.Engine)
+	}
+	for _, arg := range b.Args.Values {
+		for _, prefix := range []string{"--lua-desync=", "--blob=", "--lua-init="} {
+			if strings.HasPrefix(arg, prefix) {
+				return fmt.Errorf("nfqws1 strategy %q uses nfqws2 argument %q", b.Manifest.ID, arg)
+			}
+		}
+	}
+	return nil
+}
+
+func (NfqwsEngine) Prepare(b strategystore.Bundle, opts strategystore.PrepareOptions) ([]string, error) {
+	if err := (NfqwsEngine{}).Validate(b); err != nil {
+		return nil, err
+	}
+	if opts.QNum <= 0 {
+		return nil, fmt.Errorf("nfqws1 strategy %q has no queue number", b.Manifest.ID)
+	}
+	args := []string{"--qnum=" + strconv.Itoa(opts.QNum)}
+	if opts.Fwmark != 0 {
+		args = append(args, fmt.Sprintf("--dpi-desync-fwmark=0x%x", opts.Fwmark))
+	}
+	return append(args, b.Args.Values...), nil
+}
 
 // Axis names (kept as constants so the engine and any tuner agree on the keys).
 const (
