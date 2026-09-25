@@ -116,8 +116,8 @@
 
 ### 2.2 Lists
 
-- [ ] Реализовать domain lists из provider categories.
-- [ ] Реализовать IP/CIDR lists из manual files и provider categories.
+- [x] Реализовать domain lists из manual/URL sources через существующий `aggregate.ParseList`.
+- [x] Реализовать IP/CIDR lists из manual/URL sources через существующий `aggregate.ParseIPList`.
 - [ ] `geosite:reddit` и `geoip:reddit` проверять независимо.
 - [ ] Не подменять отсутствующий `geoip:reddit` списком `ru-blocked`.
 - [ ] Поддержать manual `reddit.com` рядом с именованным списком.
