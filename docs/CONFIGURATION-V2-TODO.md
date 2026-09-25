@@ -128,11 +128,11 @@
 
 ### 2.3 Компиляция под движки
 
-- [ ] Один source → compiled representation для sing-box.
-- [ ] Один source → compiled representation для nfqws1.
-- [ ] Один source → compiled representation для nfqws2.
+- [x] Один source → compiled representation для sing-box (rule-set source JSON).
+- [x] Один source → compiled representation для nfqws1.
+- [x] Один source → compiled representation для nfqws2.
 - [ ] Сохранять generated files в runtime dir, не перезаписывая пользовательские `/etc` assets.
-- [ ] Проверять, что domain-only list не обещает desync для IP-only трафика.
+- [x] Проверять, что domain-only list не обещает desync для IP-only трафика (hostlist compiler отвергает IP list).
 - [ ] Добавить coherence warning для `GapIPZapret` и `GapRuleSetZapret`.
 
 **Готово когда:** обновление runetfreedom не требует редактирования rule-файлов и не приводит к тихой потере доменов.
