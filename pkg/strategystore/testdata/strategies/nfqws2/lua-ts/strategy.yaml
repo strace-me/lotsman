@@ -1,0 +1,7 @@
+id: lua-ts
+name: Lua TS
+engine: nfqws2
+args: command.args
+assets:
+  lua: lua
+version: "1"

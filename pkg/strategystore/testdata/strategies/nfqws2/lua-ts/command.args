@@ -1,0 +1,3 @@
+# Lua TS — nfqws2 fixture
+--filter-tcp=443
+--lua-desync=@lua/fake.lua

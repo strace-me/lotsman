@@ -1,0 +1,4 @@
+# ALT12 — nfqws1 fixture
+--filter-tcp=80,443
+--dpi-desync=fake,multisplit
+--dpi-desync-fooling=ts
