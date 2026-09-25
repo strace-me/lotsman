@@ -51,3 +51,9 @@ func TestLoadURL(t *testing.T) {
 		t.Fatalf("values = %#v", snapshot.Values)
 	}
 }
+
+func TestLoadURLRequiresFetcher(t *testing.T) {
+	if _, err := (Definition{Name: "reddit", Kind: Domains, URLs: []string{"https://list.invalid/reddit"}}).Load(context.Background(), nil); err == nil {
+		t.Fatal("URL list without fetcher was accepted")
+	}
+}

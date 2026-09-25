@@ -73,6 +73,9 @@ func (d Definition) Load(ctx context.Context, fetcher subscription.Fetcher) (Sna
 		}
 		raw = append(raw, data)
 	}
+	if len(d.URLs) > 0 && fetcher == nil {
+		return Snapshot{}, fmt.Errorf("list %q has URL sources but no fetcher", d.Name)
+	}
 	if fetcher != nil {
 		for _, url := range d.URLs {
 			data, err := fetcher.Fetch(ctx, url)
