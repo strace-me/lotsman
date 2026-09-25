@@ -124,7 +124,7 @@
 - [x] Не подменять отсутствующий `geoip:reddit` списком `ru-blocked` (пусто/ошибка, подмены нет).
 - [x] Поддержать manual `reddit.com` рядом с именованным списком.
 - [x] Сохранять source metadata для диагностики и UI (Snapshot.Refs: provider/inline/file/url).
-- [ ] Добавить update freshness/status.
+- [x] Добавить update freshness/status (`Snapshot.UpdatedAt` + `Stale(interval)`).
 
 ### 2.3 Компиляция под движки
 
