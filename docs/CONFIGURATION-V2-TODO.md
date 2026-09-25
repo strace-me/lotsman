@@ -43,8 +43,7 @@
 8. Правила можно хранить отдельными файлами в `/etc/lotsman/rules/`.
 9. Доменные и IP данные имеют именованные списки и внешние providers.
 10. `ipset` — compiled representation, а не пользовательское поле конфигурации.
-11. `behavior.profile` описывает `general`, `streaming`, `voice`, `gaming` и раскрывается в явные defaults.
-12. Sing-box proxy settings не выгружаются вручную в конфиг: Lotsman генерирует runtime-конфиг из намерений.
+11. Sing-box proxy settings не выгружаются вручную в конфиг: Lotsman генерирует runtime-конфиг из намерений.
 13. Strategy args и payloads не живут в `configuration.yaml`.
 14. Новые GUI-записи пишутся только в canonical store; старые форматы — read-only adapters на переходный период.
 15. Autocomplete строится из общей JSON Schema и metadata API, а не из вручную скопированных Svelte-массивов.
@@ -57,7 +56,7 @@
 - [ ] Определить, где остаются deployment flags и что является override.
 - [ ] Решить, входит ли `runtime:` в YAML или остаётся отдельным deployment-конфигом.
 - [ ] Определить имена `proxy`, `desync`, `rules`, `lists`, `data_sources`, `subscriptions`, `pools`, `dns`.
-- [ ] Определить, остаётся ли `category` или заменяется на profile/behavior defaults.
+- [ ] Определить, остаётся ли `category` или заменяется на inheritance/explicit defaults.
 - [ ] Записать примеры `reddit.yaml`, `steam.yaml`, `youtube.yaml`.
 - [ ] Проверить, что примеры проходят strict parse и semantic validation.
 
@@ -134,18 +133,18 @@
 
 **Готово когда:** обновление runetfreedom не требует редактирования rule-файлов и не приводит к тихой потере доменов.
 
-## Этап 3. Behavior и chain
+## Этап 3. Chain и правила поведения
 
-### 3.1 Behavior profiles
+### 3.1 Явные поля правила
 
-- [ ] `general` → `general_tls`, HTTP probe.
-- [ ] `streaming` → `youtube`, `quic`, `general_tls`, volume probe.
-- [ ] `voice` → `discord_tcp`, `general_tls`, STUN/UDP probe.
-- [ ] `gaming` → `general_tls`, `games`, explicit transport/ports.
-- [ ] Не создавать blanket UDP filter для gaming.
-- [ ] Требовать explicit scope для unscopable game profile.
-- [ ] Разделить `probe`, `transport`, `routing` и `node` defaults.
-- [ ] Сохранить `sticky`, `spread_clients`, `tls_fragment` в явном behavior или rule policy.
+- [ ] `probe` задаёт `http`, `tcp`, `stun` или `quic` и target.
+- [ ] `volume` задаёт реальные цели и минимальный объём для canary.
+- [ ] `match` задаёт domains, domain_lists, ip_lists и cidrs.
+- [ ] `sticky`, `spread_clients` и `tls_fragment` остаются явными полями или action policy.
+- [ ] Не вводить пользовательские `general/streaming/voice/gaming` profiles.
+- [ ] Не создавать blanket UDP filter для игр.
+- [ ] Порты и L7-фильтры остаются в engine-specific strategy bundle либо в явно утверждённом traffic field.
+- [ ] Решить, нужен ли отдельный `traffic` block для игровых портов или bundle достаточно.
 
 ### 3.2 Chain actions
 
@@ -209,7 +208,7 @@
 - [ ] Перенести `domain_lists` → `match.domain_lists`.
 - [ ] Перенести `ips`/`ips_file` → `match.cidrs`/`match.ip_lists`.
 - [ ] Перенести `rule_sets` в provider/list representation.
-- [ ] Перенести `profile` → `behavior.profile`.
+- [ ] Перенести `profile` в explicit engine/probe/chain defaults, не создавая behavior-профиль.
 - [ ] Перенести `sticky`, `spread_clients`, `static` без потери семантики.
 - [ ] Старый `zapret.preset` читать как legacy adapter до миграции.
 - [ ] Сделать dry-run migration report: что перенесено, что потеряно, что не распознано.
@@ -223,7 +222,7 @@
 - [ ] Экспортировать config types для schema generation.
 - [ ] `GET /schema`.
 - [ ] `GET /metadata` или расширенный `/strategies` с engine capabilities.
-- [ ] Metadata содержит enums, pools, lists, strategies, providers и behavior profiles.
+- [ ] Metadata содержит enums, pools, lists, strategies, providers и chain actions.
 - [ ] Убрать ручные enum-копии из Svelte.
 - [ ] Добавить frontend TypeScript types из schema.
 
@@ -241,7 +240,7 @@
 ### 6.3 Rule API/GUI
 
 - [ ] CRUD для rule-файлов.
-- [ ] Rule form показывает match, behavior, chain и probe.
+- [ ] Rule form показывает match, chain, probe и volume.
 - [ ] Engine selector скрыт, если для сервиса только один engine.
 - [ ] Strategy picker показывает только стратегии выбранного engine/pool.
 - [ ] List picker показывает source, freshness и errors.
@@ -256,7 +255,7 @@
 
 ## Этап 7. Canary и observability
 
-- [ ] Runtime sandbox record: `service`, `strategy`, `engine`, `instance`, `purpose`, `profile`, verdict.
+- [ ] Runtime sandbox record: `service`, `strategy`, `engine`, `instance`, `purpose`, verdict.
 - [ ] Убрать полный argv из рутинного runtime-лога.
 - [ ] Crash log оставить с полным argv для диагностики.
 - [ ] Добавить понятные фазы: candidate started, measured, passed, rejected, control.
@@ -274,7 +273,7 @@
 - [ ] strategy bundle parser/writer.
 - [ ] provider category resolution.
 - [ ] list compilation для каждого engine.
-- [ ] behavior profile expansion.
+- [ ] explicit probe and volume validation.
 - [ ] chain action resolution.
 - [ ] engine capability validation.
 - [ ] KB namespace migration.
@@ -301,14 +300,14 @@
 
 1. `runtime:` в YAML или deployment-only flags.
 2. Точное имя списка IP: `ip_lists` достаточно или нужен `ipset` для пользователя.
-3. Default expansion `behavior: gaming`.
-4. Формат отдельного rule-файла и максимальный размер списка.
-5. Поведение отсутствующей provider category.
-6. Comment preservation через `yaml.Node`.
-7. Нужны ли `excluded` списки в v2 и где их место.
-8. Direct/bypass actions в первой версии.
-9. Обязательный минимум v2 для non-root proxy mode.
-10. Порядок удаления legacy `strategies:` и `zapret.preset`.
+3. Формат отдельного rule-файла и максимальный размер списка.
+4. Поведение отсутствующей provider category.
+5. Comment preservation через `yaml.Node`.
+6. Нужны ли `excluded` списки в v2 и где их место.
+7. Direct/bypass actions в первой версии.
+8. Обязательный минимум v2 для non-root proxy mode.
+9. Порядок удаления legacy `strategies:` и `zapret.preset`.
+10. Нужен ли отдельный `traffic` block для игровых портов или достаточно engine-specific strategy bundle.
 
 ## Правило для будущих сессий
 
