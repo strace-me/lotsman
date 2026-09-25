@@ -40,16 +40,25 @@ type SingboxDecompiler struct {
 	Bin string // sing-box binary ("" => "sing-box")
 }
 
+type EntryDecompiler interface {
+	Entries(string) (domains, cidrs []string, err error)
+}
+
 // Domains decompiles the .srs to JSON and collects its domain + domain_suffix
 // entries (lower-cased, leading dot stripped, deduped, sorted).
 func (d SingboxDecompiler) Domains(srsPath string) ([]string, error) {
+	domains, _, err := d.Entries(srsPath)
+	return domains, err
+}
+
+func (d SingboxDecompiler) Entries(srsPath string) ([]string, []string, error) {
 	bin := d.Bin
 	if bin == "" {
 		bin = "sing-box"
 	}
 	tmp, err := os.CreateTemp("", "lotsman-srs-resolve-*.json")
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	tmp.Close()
 	defer os.Remove(tmp.Name())
@@ -57,43 +66,51 @@ func (d SingboxDecompiler) Domains(srsPath string) ([]string, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 	if out, err := exec.CommandContext(ctx, bin, "rule-set", "decompile", srsPath, "-o", tmp.Name()).CombinedOutput(); err != nil {
-		return nil, fmt.Errorf("decompile %s: %w: %s", srsPath, err, strings.TrimSpace(string(out)))
+		return nil, nil, fmt.Errorf("decompile %s: %w: %s", srsPath, err, strings.TrimSpace(string(out)))
 	}
 	data, err := os.ReadFile(tmp.Name())
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	var doc struct {
 		Rules []map[string]json.RawMessage `json:"rules"`
 	}
 	if err := json.Unmarshal(data, &doc); err != nil {
-		return nil, fmt.Errorf("parse decompiled %s: %w", srsPath, err)
+		return nil, nil, fmt.Errorf("parse decompiled %s: %w", srsPath, err)
 	}
-	seen := map[string]bool{}
-	var out []string
+	seenDomains := map[string]bool{}
+	seenCIDRs := map[string]bool{}
+	var domains, cidrs []string
 	for _, rule := range doc.Rules {
-		for _, k := range []string{"domain", "domain_suffix"} {
-			raw, ok := rule[k]
-			if !ok {
-				continue
-			}
-			var arr []string
-			if json.Unmarshal(raw, &arr) != nil {
-				continue
-			}
-			for _, dom := range arr {
-				dom = strings.ToLower(strings.TrimSpace(strings.TrimPrefix(dom, "*.")))
-				dom = strings.TrimPrefix(dom, ".")
-				if dom == "" || seen[dom] {
-					continue
+		for _, key := range []string{"domain", "domain_suffix"} {
+			var values []string
+			if raw, ok := rule[key]; ok && json.Unmarshal(raw, &values) == nil {
+				for _, domain := range values {
+					domain = strings.ToLower(strings.TrimSpace(strings.TrimPrefix(domain, "*.")))
+					domain = strings.TrimPrefix(domain, ".")
+					if domain != "" && !seenDomains[domain] {
+						seenDomains[domain] = true
+						domains = append(domains, domain)
+					}
 				}
-				seen[dom] = true
-				out = append(out, dom)
+			}
+		}
+		if raw, ok := rule["ip_cidr"]; ok {
+			var values []string
+			if json.Unmarshal(raw, &values) == nil {
+				for _, cidr := range values {
+					cidr = strings.TrimSpace(cidr)
+					if cidr != "" && !seenCIDRs[cidr] {
+						seenCIDRs[cidr] = true
+						cidrs = append(cidrs, cidr)
+					}
+				}
 			}
 		}
 	}
-	sort.Strings(out)
-	return out, nil
+	sort.Strings(domains)
+	sort.Strings(cidrs)
+	return domains, cidrs, nil
 }
 
 // Resolver implements the zaptune.Resolver contract: tag -> (plaintext domains,
