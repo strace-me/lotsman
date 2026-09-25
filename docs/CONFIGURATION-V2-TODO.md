@@ -108,6 +108,7 @@
 
 ### 2.1 Provider abstraction
 
+- [x] Определить provider interface для именованных list sources.
 - [ ] Описать `data_sources` для `runetfreedom/russia-v2ray-rules-dat`.
 - [ ] Описать `russia-blocked-geosite` как альтернативный provider.
 - [ ] Поддержать geosite/geoip `.dat` sources и refresh interval.
