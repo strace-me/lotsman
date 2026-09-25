@@ -44,6 +44,7 @@
 9. Доменные и IP данные имеют именованные списки и внешние providers.
 10. `ipset` — compiled representation, а не пользовательское поле конфигурации.
 11. Sing-box proxy settings не выгружаются вручную в конфиг: Lotsman генерирует runtime-конфиг из намерений.
+12. Runtime-настройки живут в `runtime:`; приоритет override: CLI-флаг > YAML > default.
 13. Strategy args и payloads не живут в `configuration.yaml`.
 14. Новые GUI-записи пишутся только в canonical store; старые форматы — read-only adapters на переходный период.
 15. Autocomplete строится из общей JSON Schema и metadata API, а не из вручную скопированных Svelte-массивов.
@@ -52,9 +53,9 @@
 
 ### 0.1 Утвердить schema v2
 
+- [x] Зафиксировать runtime-модель: `runtime:` в YAML, CLI-флаги как override.
 - [ ] Определить минимальный `configuration.yaml` без runtime-флагов.
-- [ ] Определить, где остаются deployment flags и что является override.
-- [ ] Решить, входит ли `runtime:` в YAML или остаётся отдельным deployment-конфигом.
+- [ ] Реализовать приоритет `flag > YAML > default` в v2 options loader.
 - [ ] Определить имена `proxy`, `desync`, `rules`, `lists`, `data_sources`, `subscriptions`, `pools`, `dns`.
 - [ ] Определить, остаётся ли `category` или заменяется на inheritance/explicit defaults.
 - [ ] Записать примеры `reddit.yaml`, `steam.yaml`, `youtube.yaml`.
