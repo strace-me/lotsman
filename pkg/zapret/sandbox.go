@@ -69,6 +69,7 @@ func (s *Sandbox) Apply(ctx context.Context, args []string) error {
 	// and the measurement would describe the incumbent strategy.
 	if !s.installed {
 		if err := s.installLocked(ctx); err != nil {
+			s.removeProbeRoute(ctx)
 			return err
 		}
 		s.installed = true
@@ -110,6 +111,7 @@ func (s *Sandbox) Close(ctx context.Context) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.stopEngineLocked()
+	s.removeProbeRoute(ctx)
 	if !s.installed {
 		return nil
 	}
@@ -140,6 +142,11 @@ func (s *Sandbox) installLocked(ctx context.Context) error {
 	if err := s.Run.Run(ctx, "ip", "rule", "add", "fwmark", fmt.Sprintf("0x%x", DesyncFwmark), "lookup", "main", "pref", "100"); err != nil {
 		return fmt.Errorf("zapret: sandbox: keep the desync fwmark out of the tunnel: %w", err)
 	}
+	probeMark := fmt.Sprintf("0x%x", s.mark())
+	_ = s.Run.Run(ctx, "ip", "rule", "del", "fwmark", probeMark, "lookup", "main")
+	if err := s.Run.Run(ctx, "ip", "rule", "add", "fwmark", probeMark, "lookup", "main", "pref", "101"); err != nil {
+		return fmt.Errorf("zapret: sandbox: keep the probe fwmark on the physical route: %w", err)
+	}
 	// A table from a killed run would otherwise stack with this one.
 	_ = s.Run.Run(ctx, "nft", "delete", "table", s.Opts.Table)
 	f, err := os.CreateTemp("", "lotsman-sandbox-*.nft")
@@ -157,6 +164,11 @@ func (s *Sandbox) installLocked(ctx context.Context) error {
 	}
 	s.log().Info("desync sandbox up", "table", s.Opts.Table, "qnum", s.Opts.QNum, "mark", fmt.Sprintf("0x%x", s.mark()))
 	return nil
+}
+
+func (s *Sandbox) removeProbeRoute(ctx context.Context) {
+	mark := fmt.Sprintf("0x%x", s.mark())
+	_ = s.Run.Run(ctx, "ip", "rule", "del", "fwmark", mark, "lookup", "main")
 }
 
 func (s *Sandbox) stopEngineLocked() {

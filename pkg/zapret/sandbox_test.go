@@ -62,6 +62,27 @@ func TestTableIsUpBeforeTheCandidateEngine(t *testing.T) {
 	}
 }
 
+func TestProbeMarkUsesThePhysicalRouteAndIsRemovedOnClose(t *testing.T) {
+	r := &recRunner{}
+	s := sandboxFor(t, r, func(context.Context, string, string, []string) (func(), error) {
+		return func() {}, nil
+	})
+	ctx := context.Background()
+	if err := s.Apply(ctx, []string{"--dpi-desync=fake"}); err != nil {
+		t.Fatal(err)
+	}
+	added := "ip rule add fwmark 0x4554 lookup main pref 101"
+	if !strings.Contains(r.joined(), added) {
+		t.Fatalf("probe mark was not forced onto main: %s", r.joined())
+	}
+	if err := s.Close(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(r.joined(), "ip rule del fwmark 0x4554 lookup main") {
+		t.Fatalf("probe mark rule survived sandbox teardown: %s", r.joined())
+	}
+}
+
 // Sharing production's queue would put a candidate strategy on the household's
 // real traffic — the one thing a sandbox exists to prevent.
 func TestSandboxRefusesProductionsQueue(t *testing.T) {
