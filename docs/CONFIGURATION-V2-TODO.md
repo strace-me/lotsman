@@ -96,7 +96,7 @@
 - [x] Утвердить `strategy.yaml` fields: `id`, `name`, `engine`, `args`, `assets`, `revision`, `notes`.
 - [x] Утвердить layout `hostlists/`, `payloads/`, `lua/`.
 - [x] Утвердить, что `command.args` — opaque argv, а не shell command.
-- [ ] Добавить nfqws1 и nfqws2 fixtures.
+- [x] Добавить nfqws1 и nfqws2 fixtures.
 - [ ] Проверить, что nfqws2 `--blob=name:@file` и `--lua-desync=@file` не проходят через nfqws1 validator.
 - [x] Проверить, что absolute asset paths допускаются только внутри bundle или явно разрешённого каталога.
 
