@@ -1,0 +1,34 @@
+package configv2
+
+// The enum tables below are the single source of truth: validation checks
+// against them, and the GUI/LuCI metadata endpoint serves them, so a UI can
+// never offer a value the loader would reject.
+var (
+	ProxyEngines  = []string{"sing-box"}
+	ProxyModes    = []string{"tun", "proxy"}
+	DesyncEngines = []string{"nfqws1", "nfqws2"}
+	ProbeTypes    = []string{"http", "tcp", "stun", "quic"}
+	ChainTiers    = []string{"preferred", "fallback", "emergency"}
+)
+
+type ChainActionMeta struct {
+	Name        string   `json:"name"`
+	Description string   `json:"description"`
+	Fields      []string `json:"fields"`
+}
+
+var ChainActions = []ChainActionMeta{
+	{Name: "desync", Description: "desync engine + strategy bundle", Fields: []string{"instance", "strategy"}},
+	{Name: "vpn", Description: "proxy pool from sing-box", Fields: []string{"pool"}},
+	{Name: "direct", Description: "no proxy, no desync", Fields: nil},
+	{Name: "bypass", Description: "exclude from this rule entirely", Fields: nil},
+}
+
+func contains(values []string, want string) bool {
+	for _, value := range values {
+		if value == want {
+			return true
+		}
+	}
+	return false
+}

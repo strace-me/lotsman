@@ -60,7 +60,7 @@ func (s *ChainStep) UnmarshalYAML(node *yaml.Node) error {
 		return fmt.Errorf("chain step must be a single tier mapping")
 	}
 	tier := node.Content[0].Value
-	if tier != "preferred" && tier != "fallback" && tier != "emergency" {
+	if !contains(ChainTiers, tier) {
 		return fmt.Errorf("unknown chain tier %q", tier)
 	}
 	var action Action

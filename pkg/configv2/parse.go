@@ -44,17 +44,17 @@ func (c *Configuration) ApplyDefaults() {
 }
 
 func (c *Configuration) Validate() error {
-	if c.Proxy.Engine != "" && c.Proxy.Engine != "sing-box" {
+	if c.Proxy.Engine != "" && !contains(ProxyEngines, c.Proxy.Engine) {
 		return fmt.Errorf("unsupported proxy engine %q", c.Proxy.Engine)
 	}
-	if c.Proxy.Mode != "" && c.Proxy.Mode != "tun" && c.Proxy.Mode != "proxy" {
+	if c.Proxy.Mode != "" && !contains(ProxyModes, c.Proxy.Mode) {
 		return fmt.Errorf("unsupported proxy mode %q", c.Proxy.Mode)
 	}
-	if c.Runtime.Mode != "" && c.Runtime.Mode != "tun" && c.Runtime.Mode != "proxy" {
+	if c.Runtime.Mode != "" && !contains(ProxyModes, c.Runtime.Mode) {
 		return fmt.Errorf("unsupported runtime mode %q", c.Runtime.Mode)
 	}
 	for name, instance := range c.Desync.Instances {
-		if instance.Engine != "nfqws1" && instance.Engine != "nfqws2" {
+		if !contains(DesyncEngines, instance.Engine) {
 			return fmt.Errorf("desync instance %q has unknown engine %q", name, instance.Engine)
 		}
 	}

@@ -25,12 +25,8 @@ func (r *Rule) Validate() error {
 	if strings.TrimSpace(r.ID) == "" {
 		return fmt.Errorf("rule has no id")
 	}
-	if r.Probe != nil {
-		switch r.Probe.Type {
-		case "http", "tcp", "stun", "quic":
-		default:
-			return fmt.Errorf("rule %q has unknown probe type %q", r.ID, r.Probe.Type)
-		}
+	if r.Probe != nil && !contains(ProbeTypes, r.Probe.Type) {
+		return fmt.Errorf("rule %q has unknown probe type %q", r.ID, r.Probe.Type)
 	}
 	if len(r.Chain) == 0 {
 		return fmt.Errorf("rule %q has an empty chain", r.ID)
