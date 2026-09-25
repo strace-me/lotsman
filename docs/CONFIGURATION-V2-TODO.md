@@ -100,6 +100,7 @@
 - [x] Проверить, что nfqws2 `--blob=name:@file` и `--lua-desync=@file` не проходят через nfqws1 validator.
 - [x] Добавить отдельный nfqws2 validator и `Prepare` без nfqws1-флага fwmark.
 - [x] Проверить, что absolute asset paths допускаются только внутри bundle или явно разрешённого каталога.
+- [x] Проверять каталог через map engine adapters; generic loader не знает о конкретных движках.
 
 **Готово когда:** один и тот же bundle loader читает nfqws1 и nfqws2, но разные engine adapters принимают только свои capabilities.
 
@@ -146,6 +147,8 @@
 - [ ] Не вводить пользовательские `general/streaming/voice/gaming` profiles.
 - [ ] Не создавать blanket UDP filter для игр.
 - [ ] Порты и L7-фильтры остаются в engine-specific strategy bundle либо в явно утверждённом traffic field.
+- [x] Зафиксировать решение: пользовательских `general/streaming/voice/gaming` profiles не вводим.
+- [x] Зафиксировать решение: blanket UDP-фильтр для игр не включаем.
 - [ ] Решить, нужен ли отдельный `traffic` block для игровых портов или bundle достаточно.
 
 ### 3.2 Chain actions
