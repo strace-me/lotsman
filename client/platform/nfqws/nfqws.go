@@ -28,6 +28,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/strace-me/lotsman/pkg/strategystore"
 	"github.com/strace-me/lotsman/pkg/zapret"
 )
 
@@ -40,6 +41,14 @@ const desyncFwmark = zapret.DesyncFwmark
 type Engine struct {
 	bin  string
 	inst zapret.Instance
+	// engine names which desync engine this instance runs, and adapters resolves
+	// it to the strategy-store contract that knows its flags. The launch argv is
+	// built by the adapter, not here: nfqws1 and nfqws2 spell the same intent
+	// differently (--dpi-desync-fwmark vs --fwmark), and a second hand-written
+	// prefix here is how an engine ends up launched with another engine's flags.
+	engine   string
+	adapters map[string]strategystore.EngineAdapter
+	fwmark   int
 	// baseCapture is the spec the engine was built with — the floor the derived
 	// capture is unioned onto, so recomposition can widen the queue but never
 	// narrow it below the ports the deployment always wants carried.
@@ -88,11 +97,88 @@ func (e *Engine) SetWANResolver(f func(context.Context) (string, error)) {
 	e.wanFunc = f
 }
 
-func New(bin string, inst zapret.Instance, nftOpts zapret.NftOptions, fakeDir string, log *slog.Logger) *Engine {
-	if bin == "" {
-		bin = "nfqws"
+// DefaultAdapters is the engine registry a client gets when the caller names no
+// other. It is the same set the daemon and the strategy store validate against,
+// so an instance cannot be built for an engine nothing knows how to launch.
+func DefaultAdapters() map[string]strategystore.EngineAdapter {
+	return map[string]strategystore.EngineAdapter{
+		zapret.NfqwsEngine{}.Engine():  zapret.NfqwsEngine{},
+		zapret.Nfqws2Engine{}.Engine(): zapret.Nfqws2Engine{},
 	}
-	return &Engine{bin: bin, inst: inst, baseCapture: inst.Capture, nftOpts: nftOpts, fakeDir: fakeDir, log: log}
+}
+
+func New(bin string, inst zapret.Instance, nftOpts zapret.NftOptions, fakeDir string, log *slog.Logger) *Engine {
+	return NewForEngine(bin, zapret.NfqwsEngine{}.Engine(), inst, nftOpts, fakeDir, DefaultAdapters(), log)
+}
+
+// NewForEngine returns an Engine for one instance of a named desync engine. Each
+// Engine is one process: the instance's own qnum, its own fwmark, its own crash
+// log. Several Engines are how v2 runs several desync instances side by side.
+func NewForEngine(bin string, engine string, inst zapret.Instance, nftOpts zapret.NftOptions, fakeDir string, adapters map[string]strategystore.EngineAdapter, log *slog.Logger) *Engine {
+	if adapters == nil {
+		adapters = DefaultAdapters()
+	}
+	if engine == "" {
+		engine = zapret.NfqwsEngine{}.Engine()
+	}
+	if bin == "" {
+		bin = engine // the binary ships under the engine's own name
+	}
+	return &Engine{
+		bin: bin, inst: inst, baseCapture: inst.Capture, nftOpts: nftOpts,
+		fakeDir: fakeDir, log: log, engine: engine, adapters: adapters,
+		fwmark: desyncFwmark,
+	}
+}
+
+// Engine reports which desync engine this instance runs.
+func (e *Engine) Engine() string { return e.engine }
+
+// effectiveAdapter resolves the engine's adapter, defaulting an Engine that was
+// built as a struct literal rather than through New.
+func (e *Engine) effectiveAdapter() (strategystore.EngineAdapter, error) {
+	engine := e.engine
+	if engine == "" {
+		engine = zapret.NfqwsEngine{}.Engine()
+	}
+	adapters := e.adapters
+	if adapters == nil {
+		adapters = DefaultAdapters()
+	}
+	adapter, ok := adapters[engine]
+	if !ok {
+		return nil, fmt.Errorf("nfqws: no adapter for engine %q", engine)
+	}
+	return adapter, nil
+}
+
+// launchArgs renders the full argv through the engine's adapter. The strategy is
+// the argv slice the caller composed, so it is handed over as a bundle whose only
+// content is those args: the adapter still gets to reject an nfqws1 recipe handed
+// to nfqws2, which is the whole point of routing argv through one contract.
+func (e *Engine) launchArgs(args []string) ([]string, error) {
+	adapter, err := e.effectiveAdapter()
+	if err != nil {
+		return nil, err
+	}
+	engine := e.engine
+	if engine == "" {
+		engine = adapter.Engine()
+	}
+	bundle := strategystore.Bundle{
+		Root:     e.fakeDir,
+		Manifest: strategystore.Manifest{ID: e.inst.Name, Engine: engine, Args: "command.args"},
+		Args:     strategystore.Args{Values: args},
+	}
+	full, err := adapter.Prepare(bundle, strategystore.PrepareOptions{
+		QNum:    e.inst.QNum,
+		Fwmark:  e.fwmark,
+		WorkDir: e.fakeDir,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("nfqws: %w", err)
+	}
+	return full, nil
 }
 
 // Apply installs the nft rules (idempotent) and (re)starts nfqws with args — the
@@ -156,12 +242,10 @@ func (e *Engine) settleFor() time.Duration {
 // leaves the engine's recorded identity matching whatever is actually running —
 // this project's recurring defect is a field asserting a state nobody observed.
 func (e *Engine) launchLocked(args []string) error {
-	full := append([]string{
-		fmt.Sprintf("--qnum=%d", e.inst.QNum),
-		// Pin the mark nfqws stamps on injected packets, so ensureFwmarkBypass's
-		// rule provably matches it rather than trusting a build's default.
-		fmt.Sprintf("--dpi-desync-fwmark=0x%x", desyncFwmark),
-	}, args...)
+	full, err := e.launchArgs(args)
+	if err != nil {
+		return err
+	}
 	cmd := exec.Command(e.bin, full...)
 	// nfqws resolves fake-payload files (--dpi-desync-fake-tls=tls_clienthello_*.bin)
 	// relative to its working dir. Point it at the dir that holds them, else it exits
