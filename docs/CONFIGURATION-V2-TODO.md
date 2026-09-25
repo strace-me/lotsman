@@ -83,7 +83,7 @@
 - [x] Не создавать третий parser: существующий `loadPreset` должен быть общей primitive.
 - [x] Сделать parse/write bundle manifest.
 - [x] Сделать parse/write `command.args` с comments и blank lines.
-- [ ] Сделать atomic write: temp file, fsync, rename.
+- [x] Сделать atomic write: temp file, fsync, rename.
 - [x] Сделать content revision/hash.
 - [x] Сделать last-known-good snapshot при reload с ошибкой.
 - [x] Ограничить id регулярным выражением и запретить traversal.
