@@ -15,12 +15,33 @@ const (
 )
 
 type Configuration struct {
-	Version     int                   `yaml:"version"`
-	Proxy       Proxy                 `yaml:"proxy"`
-	Desync      Desync                `yaml:"desync"`
-	Runtime     Runtime               `yaml:"runtime"`
-	DataSources map[string]DataSource `yaml:"data_sources"`
-	Lists       Lists                 `yaml:"lists"`
+	Version       int                   `yaml:"version"`
+	Proxy         Proxy                 `yaml:"proxy"`
+	Desync        Desync                `yaml:"desync"`
+	Runtime       Runtime               `yaml:"runtime"`
+	DataSources   map[string]DataSource `yaml:"data_sources"`
+	Lists         Lists                 `yaml:"lists"`
+	Pools         map[string]Pool       `yaml:"pools"`
+	Subscriptions []Subscription        `yaml:"subscriptions"`
+}
+
+type Pool struct {
+	Type        string   `yaml:"type"`
+	Caps        []string `yaml:"caps"`
+	TagsInclude []string `yaml:"tags_include"`
+	TagsExclude []string `yaml:"tags_exclude"`
+	Warmup      bool     `yaml:"warmup"`
+	Interval    Duration `yaml:"interval"`
+	IdleTimeout Duration `yaml:"idle_timeout"`
+}
+
+type Subscription struct {
+	Name    string   `yaml:"name"`
+	URL     string   `yaml:"url"`
+	Format  string   `yaml:"format"`
+	Tags    []string `yaml:"tags"`
+	Enabled bool     `yaml:"enabled"`
+	Expires string   `yaml:"expires"`
 }
 
 type Proxy struct {

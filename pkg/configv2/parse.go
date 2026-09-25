@@ -87,5 +87,10 @@ func (c *Configuration) Validate() error {
 			}
 		}
 	}
+	for name, pool := range c.Pools {
+		if pool.Type == "" {
+			return fmt.Errorf("pool %q has no type", name)
+		}
+	}
 	return nil
 }
