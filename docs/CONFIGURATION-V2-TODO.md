@@ -131,7 +131,7 @@
 - [x] Один source → compiled representation для sing-box (rule-set source JSON).
 - [x] Один source → compiled representation для nfqws1.
 - [x] Один source → compiled representation для nfqws2.
-- [ ] Сохранять generated files в runtime dir, не перезаписывая пользовательские `/etc` assets.
+- [x] Сохранять generated files в runtime dir, не перезаписывая пользовательские `/etc` assets (`WriteRepresentations` отказывается писать в `/etc`).
 - [x] Проверять, что domain-only list не обещает desync для IP-only трафика (hostlist compiler отвергает IP list).
 - [ ] Добавить coherence warning для `GapIPZapret` и `GapRuleSetZapret`.
 
