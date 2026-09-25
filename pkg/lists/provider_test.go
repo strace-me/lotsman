@@ -13,8 +13,8 @@ type fakeProvider struct {
 
 func (fakeProvider) Name() string { return "runetfreedom" }
 
-func (p fakeProvider) Load(context.Context, Reference, subscription.Fetcher) ([][]byte, error) {
-	return [][]byte{p.values}, nil
+func (p fakeProvider) Load(context.Context, Reference, subscription.Fetcher) (Payload, error) {
+	return Payload{Data: [][]byte{p.values}}, nil
 }
 
 func TestLoadWithProvider(t *testing.T) {

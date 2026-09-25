@@ -3,9 +3,11 @@ package lists
 import (
 	"context"
 	"fmt"
+	"os"
 	"path/filepath"
 	"regexp"
 	"strings"
+	"time"
 
 	"github.com/strace-me/lotsman/pkg/rulesets"
 	"github.com/strace-me/lotsman/pkg/subscription"
@@ -21,12 +23,12 @@ type SRSProvider struct {
 
 func (p SRSProvider) Name() string { return p.ProviderName }
 
-func (p SRSProvider) Load(_ context.Context, ref Reference, _ subscription.Fetcher) ([][]byte, error) {
+func (p SRSProvider) Load(_ context.Context, ref Reference, _ subscription.Fetcher) (Payload, error) {
 	if p.Decompiler == nil {
-		return nil, fmt.Errorf("provider %q has no srs decompiler", p.ProviderName)
+		return Payload{}, fmt.Errorf("provider %q has no srs decompiler", p.ProviderName)
 	}
 	if ref.Category == "" || !categoryPattern.MatchString(ref.Category) {
-		return nil, fmt.Errorf("invalid provider category %q", ref.Category)
+		return Payload{}, fmt.Errorf("invalid provider category %q", ref.Category)
 	}
 	var rel string
 	switch ref.Dataset {
@@ -35,11 +37,12 @@ func (p SRSProvider) Load(_ context.Context, ref Reference, _ subscription.Fetch
 	case "geoip":
 		rel = filepath.Join("rule-set-geoip", "geoip-"+ref.Category+".srs")
 	default:
-		return nil, fmt.Errorf("unsupported provider dataset %q", ref.Dataset)
+		return Payload{}, fmt.Errorf("unsupported provider dataset %q", ref.Dataset)
 	}
-	domains, cidrs, err := p.Decompiler.Entries(filepath.Join(p.LiveDir, rel))
+	path := filepath.Join(p.LiveDir, rel)
+	domains, cidrs, err := p.Decompiler.Entries(path)
 	if err != nil {
-		return nil, err
+		return Payload{}, err
 	}
 	var values []string
 	switch ref.Kind {
@@ -48,7 +51,11 @@ func (p SRSProvider) Load(_ context.Context, ref Reference, _ subscription.Fetch
 	case IPs:
 		values = cidrs
 	default:
-		return nil, fmt.Errorf("unsupported list kind %q", ref.Kind)
+		return Payload{}, fmt.Errorf("unsupported list kind %q", ref.Kind)
 	}
-	return [][]byte{[]byte(strings.Join(values, "\n"))}, nil
+	updated := time.Time{}
+	if info, err := os.Stat(path); err == nil {
+		updated = info.ModTime()
+	}
+	return Payload{Data: [][]byte{[]byte(strings.Join(values, "\n"))}, UpdatedAt: updated}, nil
 }

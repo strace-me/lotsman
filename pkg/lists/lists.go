@@ -6,6 +6,7 @@ import (
 	"os"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/strace-me/lotsman/pkg/aggregate"
 	"github.com/strace-me/lotsman/pkg/subscription"
@@ -44,18 +45,20 @@ func (d Definition) Validate() error {
 }
 
 type SourceRef struct {
-	Kind     Kind
-	Type     string
-	Location string
+	Kind      Kind
+	Type      string
+	Location  string
+	UpdatedAt time.Time
 }
 
 type Snapshot struct {
-	Name    string
-	Kind    Kind
-	Values  []string
-	Sources int
-	Invalid int
-	Refs    []SourceRef
+	Name      string
+	Kind      Kind
+	Values    []string
+	Sources   int
+	Invalid   int
+	Refs      []SourceRef
+	UpdatedAt time.Time
 }
 
 func (d Definition) Load(ctx context.Context, fetcher subscription.Fetcher) (Snapshot, error) {
@@ -68,13 +71,15 @@ func (d Definition) LoadWith(ctx context.Context, providers Providers, fetcher s
 	}
 	raw := make([][]byte, 0, len(d.Files)+len(d.URLs)+1)
 	refs := make([]SourceRef, 0, len(d.Files)+len(d.URLs)+2)
+	var updated time.Time
 	if d.Source != "" {
-		provided, err := providers.Load(ctx, d.Source, Reference{Kind: d.Kind, Dataset: d.Dataset, Category: d.Category}, fetcher)
+		payload, err := providers.Load(ctx, d.Source, Reference{Kind: d.Kind, Dataset: d.Dataset, Category: d.Category}, fetcher)
 		if err != nil {
 			return Snapshot{}, err
 		}
-		raw = append(raw, provided...)
-		refs = append(refs, SourceRef{Kind: d.Kind, Type: "provider", Location: d.Source + "/" + d.Dataset + "/" + d.Category})
+		raw = append(raw, payload.Data...)
+		refs = append(refs, SourceRef{Kind: d.Kind, Type: "provider", Location: d.Source + "/" + d.Dataset + "/" + d.Category, UpdatedAt: payload.UpdatedAt})
+		updated = laterOf(updated, payload.UpdatedAt)
 	}
 	if len(d.Domains) > 0 || len(d.CIDRs) > 0 {
 		var values []string
@@ -93,19 +98,26 @@ func (d Definition) LoadWith(ctx context.Context, providers Providers, fetcher s
 			return Snapshot{}, err
 		}
 		raw = append(raw, data)
-		refs = append(refs, SourceRef{Kind: d.Kind, Type: "file", Location: file})
+		modified := time.Time{}
+		if info, err := os.Stat(file); err == nil {
+			modified = info.ModTime()
+		}
+		refs = append(refs, SourceRef{Kind: d.Kind, Type: "file", Location: file, UpdatedAt: modified})
+		updated = laterOf(updated, modified)
 	}
 	if len(d.URLs) > 0 && fetcher == nil {
 		return Snapshot{}, fmt.Errorf("list %q has URL sources but no fetcher", d.Name)
 	}
 	if fetcher != nil {
+		fetched := time.Now()
 		for _, url := range d.URLs {
 			data, err := fetcher.Fetch(ctx, url)
 			if err != nil {
 				return Snapshot{}, err
 			}
 			raw = append(raw, data)
-			refs = append(refs, SourceRef{Kind: d.Kind, Type: "url", Location: url})
+			refs = append(refs, SourceRef{Kind: d.Kind, Type: "url", Location: url, UpdatedAt: fetched})
+			updated = laterOf(updated, fetched)
 		}
 	}
 	var parsed [][]string
@@ -123,7 +135,23 @@ func (d Definition) LoadWith(ctx context.Context, providers Providers, fetcher s
 		}
 	}
 	values := merge(d.Kind, parsed)
-	return Snapshot{Name: d.Name, Kind: d.Kind, Values: values, Sources: len(raw), Invalid: invalid, Refs: refs}, nil
+	return Snapshot{Name: d.Name, Kind: d.Kind, Values: values, Sources: len(raw), Invalid: invalid, Refs: refs, UpdatedAt: updated}, nil
+}
+
+func laterOf(a, b time.Time) time.Time {
+	if b.After(a) {
+		return b
+	}
+	return a
+}
+
+// Stale reports whether the snapshot's newest data is older than the refresh
+// interval. A zero UpdatedAt (pure inline list) is never stale.
+func (s Snapshot) Stale(interval time.Duration) bool {
+	if interval <= 0 || s.UpdatedAt.IsZero() {
+		return false
+	}
+	return time.Since(s.UpdatedAt) > interval
 }
 
 func merge(kind Kind, lists [][]string) []string {
