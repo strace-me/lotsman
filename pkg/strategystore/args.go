@@ -55,3 +55,22 @@ func ReadArgs(file, declaredName string, single bool) (Args, error) {
 	}
 	return parsed, nil
 }
+
+func WriteArgs(file string, values []string) error {
+	if len(values) == 0 {
+		return fmt.Errorf("args file %q holds no arguments", file)
+	}
+	if err := os.MkdirAll(filepath.Dir(file), 0o755); err != nil {
+		return err
+	}
+	data := []byte(strings.Join(values, "\n") + "\n")
+	tmp := file + ".tmp"
+	if err := os.WriteFile(tmp, data, 0o644); err != nil {
+		return err
+	}
+	if err := os.Rename(tmp, file); err != nil {
+		_ = os.Remove(tmp)
+		return err
+	}
+	return nil
+}
