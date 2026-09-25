@@ -39,8 +39,9 @@ func (Nfqws2Engine) Prepare(b strategystore.Bundle, opts strategystore.PrepareOp
 	if opts.QNum <= 0 {
 		return nil, fmt.Errorf("nfqws2 strategy %q has no queue number", b.Manifest.ID)
 	}
+	args := []string{"--qnum=" + fmt.Sprint(opts.QNum)}
 	if opts.Fwmark != 0 {
-		return nil, fmt.Errorf("nfqws2 strategy %q does not accept the nfqws1 fwmark option", b.Manifest.ID)
+		args = append(args, fmt.Sprintf("--fwmark=0x%x", opts.Fwmark))
 	}
-	return append([]string{"--qnum=" + fmt.Sprint(opts.QNum)}, b.Args.Values...), nil
+	return append(args, b.Args.Values...), nil
 }
