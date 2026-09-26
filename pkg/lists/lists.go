@@ -123,16 +123,9 @@ func (d Definition) LoadWith(ctx context.Context, providers Providers, fetcher s
 	var parsed [][]string
 	invalid := 0
 	for _, data := range raw {
-		switch d.Kind {
-		case Domains:
-			values, bad := aggregate.ParseList(data)
-			parsed = append(parsed, values)
-			invalid += bad
-		case IPs:
-			values, bad := aggregate.ParseIPList(data)
-			parsed = append(parsed, values)
-			invalid += bad
-		}
+		values, bad := ParseValues(d.Kind, data)
+		parsed = append(parsed, values)
+		invalid += bad
 	}
 	values := merge(d.Kind, parsed)
 	return Snapshot{Name: d.Name, Kind: d.Kind, Values: values, Sources: len(raw), Invalid: invalid, Refs: refs, UpdatedAt: updated}, nil
@@ -152,6 +145,19 @@ func (s Snapshot) Stale(interval time.Duration) bool {
 		return false
 	}
 	return time.Since(s.UpdatedAt) > interval
+}
+
+// ParseValues parses one raw source into entries of the given kind. It is the
+// single parse path: providers, files and URLs all go through it, so a rule
+// spelled the same way means the same thing wherever it came from.
+func ParseValues(kind Kind, data []byte) ([]string, int) {
+	switch kind {
+	case Domains:
+		return aggregate.ParseList(data)
+	case IPs:
+		return aggregate.ParseIPList(data)
+	}
+	return nil, 0
 }
 
 func merge(kind Kind, lists [][]string) []string {

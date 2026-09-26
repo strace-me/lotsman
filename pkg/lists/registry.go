@@ -20,6 +20,9 @@ type SourceConfig struct {
 	// whichever other source happens to have it.
 	Categories []string
 	Decompiler rulesets.EntryDecompiler
+	// PlainPath, when set, serves this source from a plain rule-set file instead
+	// of a compiled .srs directory. The two are alternatives, never merged.
+	PlainPath string
 }
 
 // Registry builds the providers for a configuration and keeps each source's
@@ -39,6 +42,10 @@ func NewRegistry(sources []SourceConfig) (*Registry, error) {
 			return nil, fmt.Errorf("duplicate data source %q", source.Name)
 		}
 		registry.sources[source.Name] = source
+		if source.PlainPath != "" {
+			registry.providers[source.Name] = &PlainProvider{ProviderName: source.Name, Path: source.PlainPath}
+			continue
+		}
 		registry.providers[source.Name] = SRSProvider{
 			ProviderName: source.Name,
 			LiveDir:      source.LiveDir,

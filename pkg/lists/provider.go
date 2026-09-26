@@ -17,6 +17,10 @@ type Reference struct {
 type Payload struct {
 	Data      [][]byte
 	UpdatedAt time.Time
+	// Skipped counts entries the source carried that the requested kind cannot
+	// express — regex and keyword rules in a hostlist, say. Non-zero means the
+	// list is narrower than the source, which the caller has to be able to see.
+	Skipped int
 }
 
 type Provider interface {
