@@ -48,6 +48,8 @@ func main() {
 		scan(os.Args[2:])
 	case "status":
 		status(os.Args[2:])
+	case "v2-check":
+		v2Check(os.Args[2:])
 	default:
 		usage()
 		os.Exit(2)
@@ -62,6 +64,7 @@ func usage() {
 	fmt.Fprintln(os.Stderr, "  lotsmanctl doctor -config <path> [-nfqws-exclude <list-exclude.txt>]")
 	fmt.Fprintln(os.Stderr, "  lotsmanctl scan -config <path> [-timeout 6s] [-concurrency 8]   (run ON the router)")
 	fmt.Fprintln(os.Stderr, "  lotsmanctl status [-metrics-addr 127.0.0.1:9101] [-clash-base http://127.0.0.1:9090]   (live daemon)")
+	fmt.Fprintln(os.Stderr, "  lotsmanctl v2-check -config /etc/lotsman/configuration.yaml [-rules /etc/lotsman/rules] [-from v1.yaml]   (read-only)")
 }
 
 // scan probes each service's inline domains over this host's own path (which

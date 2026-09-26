@@ -18,15 +18,20 @@ func Coherence(rules []Rule, domains, ips map[string]ListShape) []coherence.Gap 
 		if !rule.Enabled || !usesDesync(rule) {
 			continue
 		}
+		// An IP match on a desync rule is a gap WHENEVER it exists, not only when
+		// the list is empty: nfqws matches the SNI hostname, and a bare-IP packet
+		// carries none, so those matches are never desynced either way. Only a
+		// non-empty list even has something behind it.
 		for _, name := range rule.Match.IPLists {
-			shape, ok := ips[name]
-			if !ok {
-				gaps = append(gaps, coherence.Gap{Service: rule.ID, Kind: coherence.GapIPZapret, Detail: name + " (unknown ip list)"})
-				continue
+			shape, known := ips[name]
+			detail := name
+			switch {
+			case !known:
+				detail += " (unknown ip list)"
+			case shape.Empty:
+				detail += " (empty)"
 			}
-			if shape.Empty {
-				gaps = append(gaps, coherence.Gap{Service: rule.ID, Kind: coherence.GapIPZapret, Detail: name + " (empty)"})
-			}
+			gaps = append(gaps, coherence.Gap{Service: rule.ID, Kind: coherence.GapIPZapret, Detail: detail})
 		}
 		if len(rule.Match.CIDRs) > 0 {
 			gaps = append(gaps, coherence.Gap{Service: rule.ID, Kind: coherence.GapIPZapret, Detail: strings.Join(rule.Match.CIDRs, ",")})
