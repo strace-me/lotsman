@@ -29,7 +29,14 @@ the component split is mechanical (event contracts already separate them).
 - `pkg/events` — cross-component message contract + in-proc bus. [ProductionVerdict, DesiredStateChanged, ActualStateObserved, Bus] [the network-split seam]
 - `pkg/registry` — services, categories, denormalized strategy chain (STATE_CHAINS). [Service, Device, State, Position]
 - `pkg/strategy` — strategy classes + cold-start seed order; leaf, no lotsman imports. [ClassZapret, ClassByeDPI, ClassVPN, ...]
-- `pkg/config` — declarative YAML → registry + subscriptions + pools; composition root, assigns chain positions, validates. A service with `disabled: true` is validated like any other and then dropped, so no consumer needs a guard. `toggle.go` flips that bit by editing the YAML node, preserving comments and layout — the dashboard switch must not reformat a hand-kept file. [Config, Parse, SetServiceEnabledYAML]
+- `pkg/atomicfile` — write-then-rename with fsync; shared by the store and the list writer so both survive a crash mid-write. [Write]
+- `pkg/config` — declarative YAML → registry + subscriptions + pools; composition root, assigns chain positions, validates. A service with `disabled: true` is validated like any other and then dropped, so no consumer needs a guard. `toggle.go` flips that bit by editing the YAML node, preserving comments and layout — the dashboard switch must not reformat a hand-kept file. `MigrateToV2` reads a v1 document as v2 and reports everything v2 cannot express in `Warnings` instead of dropping it silently. [Config, Parse, SetServiceEnabledYAML, MigrateToV2]
+- `pkg/configv2` — the v2 shape: `configuration.yaml` + one file per rule under `rules/`. No `behavior` profiles — a rule states `match`/`probe`/`volume`/`chain` explicitly, tiers are `preferred`/`fallback`/`emergency`, actions are `desync`/`vpn`/`direct`/`bypass`. The enum tables are the single source of truth: validation checks against them and `BuildMetadata` serves them to the GUI, so a UI cannot offer a value the loader rejects. [Configuration, Rule, ValidateReferences, BuildMetadata]
+
+### Strategy store and lists
+- `pkg/strategystore` — one strategy = one BUNDLE on disk (`strategy.yaml` + `command.args` + assets), because a strategy is not only argv. `EngineAdapter` is the capability contract: each engine validates its own flags and renders its own launch argv, so nfqws1 and nfqws2 can share one loader without sharing one flag vocabulary. Content revision + last-known-good make a hand edit recoverable. [Store, Bundle, EngineAdapter, ContentRevision]
+- `pkg/lists` — named domain/IP lists → one source, several engine representations. `SRSProvider` reads compiled `.srs`, `PlainProvider` reads plain rule-sets (no converter binary needed), and `Registry` keeps data sources apart: a category one source lacks is an error, never borrowed from another. Compiled output goes to a runtime dir and refuses to write into `/etc`. [Definition, Snapshot, Registry, HostlistCompiler, SingboxRuleSetCompiler]
+
 
 ### Data model / generation
 - `pkg/subscription` — parse VPN subscriptions (several formats) into Nodes. Node IDENTITY is the subtle part: hashing address alone merged 50 exits into 6 (one provider sells many cities behind few IPs, keyed by REALITY shortId), while hashing the credential alone would restart the fleet on every fetch for a provider that rotates it. Identity therefore widens only for addresses carrying several nodes in ONE snapshot — see `identity.go` and LOT-1. [Node, Parse, assignIDs]
@@ -221,7 +228,14 @@ NFQUEUE rules need root.
   managed child; pid recorded so a SIGKILLed client's orphan is reclaimed.
 - `client/platform/nfqws` — zapret desync on Linux: nft NFQUEUE rules via
   `zapret.GenerateNft` (same renderer the router's init script uses) plus nfqws as
-  a child taking argv, not a generated shell line.
+  a child taking argv, not a generated shell line. The launch argv is built by
+  the engine's `strategystore.EngineAdapter`, NOT here: nfqws1 and nfqws2 spell the
+  same intent differently (`--dpi-desync-fwmark` vs `--fwmark`), and a second
+  hand-written prefix is how an engine gets launched with another engine's flags.
+  `NewForEngine` picks the engine; `New` stays nfqws1. One Engine is one PROCESS,
+  carrying every service as a `--new` block — deliberately not one process per
+  service, which `zapret.Validate` forbids anyway (two instances cannot both
+  capture tcp/443, and every service on the rung rides it). [Engine, NewForEngine, launchArgs]
 - `client/platform/winws` — the same desync on Windows, via zapret's winws. The
   strategy flags are identical (which is why `strategyimport` drops capture args
   from every recipe); the difference is that winws carries its own WinDivert
