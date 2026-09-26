@@ -1,5 +1,7 @@
 package configv2
 
+import "regexp"
+
 // The enum tables below are the single source of truth: validation checks
 // against them, and the GUI/LuCI metadata endpoint serves them, so a UI can
 // never offer a value the loader would reject.
@@ -10,6 +12,11 @@ var (
 	ProbeTypes    = []string{"http", "tcp", "stun", "quic"}
 	ChainTiers    = []string{"preferred", "fallback", "emergency"}
 )
+
+// nftTablePattern is one family/table pair, the form `table <family> <name>`
+// takes. Anything looser would be rejected by nft at install time, on a box
+// where the failure is "desync silently absent".
+var nftTablePattern = regexp.MustCompile(`^(inet|ip|ip6|bridge|netdev|mangle) [A-Za-z0-9_.-]+$`)
 
 type ChainActionMeta struct {
 	Name        string   `json:"name"`

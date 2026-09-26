@@ -29,6 +29,12 @@ func Parse(data []byte) (*Configuration, error) {
 }
 
 func (c *Configuration) ApplyDefaults() {
+	for name, instance := range c.Desync.Instances {
+		if instance.Table == "" {
+			instance.Table = "inet nfqueue-" + name
+			c.Desync.Instances[name] = instance
+		}
+	}
 	if c.Runtime.StateDir == "" {
 		c.Runtime.StateDir = DefaultStateDir
 	}
@@ -56,6 +62,9 @@ func (c *Configuration) Validate() error {
 	for name, instance := range c.Desync.Instances {
 		if !contains(DesyncEngines, instance.Engine) {
 			return fmt.Errorf("desync instance %q has unknown engine %q", name, instance.Engine)
+		}
+		if instance.Table != "" && !nftTablePattern.MatchString(instance.Table) {
+			return fmt.Errorf("desync instance %q has invalid nft table %q", name, instance.Table)
 		}
 	}
 	for name, source := range c.DataSources {

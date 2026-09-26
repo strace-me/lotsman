@@ -56,6 +56,12 @@ type Desync struct {
 type Instance struct {
 	Engine  string `yaml:"engine"`
 	Enabled bool   `yaml:"enabled"`
+	// Table is this instance's own nft table. It is per-instance on purpose: each
+	// instance installs by deleting and replacing its table, so a shared name would
+	// let one instance tear down another's rules. Defaults to
+	// `inet nfqueue-<instance>`; set it explicitly when a deployment already owns
+	// a table name.
+	Table string `yaml:"table"`
 }
 
 type Runtime struct {
