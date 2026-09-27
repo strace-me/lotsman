@@ -91,6 +91,8 @@ func main() {
 		// Windows looking for a binary that does not exist there.
 		nfqwsBin      = flag.String("nfqws-bin", "", `desync engine binary ("" = nfqws on Linux, winws.exe on Windows)`)
 		zapretFiles   = flag.String("zapret-files", "", "dir with zapret's fake payload .bin files (recipes naming a missing payload are skipped)")
+		desyncEngine  = flag.String("desync-engine", "nfqws1", "desync engine: nfqws1 or nfqws2")
+		nfqws2Lua     = flag.String("nfqws2-lua", "", "zapret2 share/lua dir (for checking desync function names)")
 		qnum          = flag.Int("qnum", 200, "NFQUEUE queue number for nfqws")
 		wan           = flag.String("wan", "", "egress interface for the desync nft rules (empty = autodetect the default route)")
 		desyncExclude = flag.String("desync-exclude", "", "comma-separated IPs/CIDRs the desync must never touch (the servers of another VPN sharing this host)")
@@ -208,6 +210,8 @@ func main() {
 		RuleSetDir:        *ruleSetDir,
 		NfqwsBin:          *nfqwsBin,
 		ZapretFiles:       *zapretFiles,
+		DesyncEngine:      *desyncEngine,
+		Nfqws2Lua:         *nfqws2Lua,
 		HostlistDir:       *hostlistDir,
 		SingboxBin:        *singboxBin,
 		SingboxConfig:     *singboxCfg,

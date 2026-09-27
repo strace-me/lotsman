@@ -107,8 +107,15 @@ type Options struct {
 	// Desync (zapret/nfqws) — Linux only, and only when the config actually has
 	// zapret chain steps. NFQUEUE needs root, which this service already has for
 	// the tun, so it costs nothing extra where it works at all.
-	NfqwsBin      string // nfqws binary ("" = "nfqws" on PATH)
-	ZapretFiles   string // dir holding zapret's fake payload .bin files ("" = skip the availability check)
+	NfqwsBin    string // nfqws binary ("" = the engine's own name on PATH)
+	ZapretFiles string // dir holding zapret's fake payload .bin files ("" = skip the availability check)
+	// DesyncEngine names which engine this host runs, "nfqws1" or "nfqws2".
+	// Empty means nfqws1, which is what every existing deployment runs.
+	DesyncEngine string
+	// Nfqws2Lua is zapret2's share/lua dir. It is what the desync-function index
+	// is read from, so a strategy naming a function this build does not define is
+	// reported before it is picked rather than at launch.
+	Nfqws2Lua     string
 	HostlistDir   string // dir for per-service nfqws hostlist files ("" = inline domains into argv, which forces an engine restart on every membership change)
 	SingboxBin    string // sing-box binary, used to decompile rule-sets into domains ("" = "sing-box")
 	SingboxConfig string // path of the live sing-box config the reconciler swaps
@@ -367,6 +374,7 @@ func New(conf *config.Config, box ProxyCore, opts Options, log *slog.Logger) *Co
 		opts.CanaryGoodputBytes = 64 << 10
 	}
 	opts.ZapretFiles = absDir(opts.ZapretFiles)
+	opts.Nfqws2Lua = absDir(opts.Nfqws2Lua)
 	opts.SingboxConfig = absDir(opts.SingboxConfig)
 	return &Core{
 		conf: conf, reg: conf.Registry, box: box, opts: opts, log: log,
@@ -2360,9 +2368,22 @@ func (c *Core) newNfqwsEngine(ctx context.Context, inst zapret.Instance) desyncP
 	// whose payloads aren't there, and setting it as CWD is what actually lets nfqws
 	// FIND them — a bare --dpi-desync-fake-tls=tls_clienthello_*.bin resolves relative
 	// to CWD, so without this nfqws exits immediately even for a payload we vetted.
-	e := nfqws.New(c.opts.NfqwsBin, inst, zapret.NftOptions{
+	// The engine is named, not inferred. nfqws1 stays the default so every
+	// existing deployment is unchanged; nfqws2 goes through the same adapter, so
+	// its argv is rendered by the engine that will actually run it.
+	engineName := c.opts.DesyncEngine
+	if engineName == "" {
+		engineName = "nfqws1"
+	}
+	if _, known := nfqws.DefaultAdapters()[engineName]; !known {
+		c.log.Warn("unknown desync engine requested, falling back to nfqws1", "requested", engineName, "known", "nfqws1, nfqws2")
+		engineName = "nfqws1"
+	}
+	e := nfqws.NewForEngine(c.opts.NfqwsBin, engineName, inst, zapret.NftOptions{
 		Table: "inet lotsman", WAN: wan, VPNServers: excluded,
-	}, c.opts.ZapretFiles, c.log)
+		// nil adapters: the engine resolves its own from the default registry, so
+		// the two places that name an engine cannot drift apart.
+	}, c.opts.ZapretFiles, nil, c.log)
 	// Only when the operator did not pin one: -wan is an instruction, and
 	// re-deriving over it would silently ignore what they asked for.
 	if c.opts.WAN == "" {
