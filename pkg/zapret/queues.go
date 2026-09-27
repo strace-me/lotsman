@@ -24,28 +24,35 @@ const (
 	RoleCanary     = "canary"
 )
 
-// roleOffsets must stay within a short run so the queues land in a range a router
-// will carry and no nft rule diverts to by accident. They are contiguous so a
-// reader can see at a glance that nothing is shared.
-var roleOffsets = map[string]int{
-	RoleProduction: 0,
-	RoleSandbox:    1,
-	RoleProspect:   2,
-	RoleCanary:     3,
+// auxOffsets are the gaps between each auxiliary role and the first FREE queue
+// after the production run. They are contiguous so a reader can see at a glance
+// that nothing is shared.
+//
+// They are offsets from the END of production, not from its first queue: a box
+// may run several production instances, and anchoring the auxiliaries to
+// production[0] put the second instance on the test lane's queue.
+var auxOffsets = map[string]int{
+	RoleSandbox:  0,
+	RoleProspect: 1,
+	RoleCanary:   2,
 }
 
-// QueueFor derives the queue number for a role from the production queue.
-func QueueFor(production int, role string) (int, error) {
-	offset, ok := roleOffsets[role]
+// QueueFor derives the queue number for a role from the production base, given
+// how many production instances are running.
+func QueueFor(production int, productionCount int, role string) (int, error) {
+	offset, ok := auxOffsets[role]
 	if !ok {
 		return 0, fmt.Errorf("zapret: unknown queue role %q", role)
 	}
 	if production <= 0 {
 		return 0, fmt.Errorf("zapret: production queue %d is not a usable number", production)
 	}
-	q := production + offset
+	if productionCount < 1 {
+		productionCount = 1
+	}
+	q := production + productionCount + offset
 	if q <= 0 || q > 65535 {
-		return 0, fmt.Errorf("zapret: queue %d for role %q falls outside the usable range (production=%d)", q, role, production)
+		return 0, fmt.Errorf("zapret: queue %d for role %q falls outside the usable range (production=%d, instances=%d)", q, role, production, productionCount)
 	}
 	return q, nil
 }
@@ -62,7 +69,7 @@ type QueuePlan struct {
 // auxiliary role is allowed — a box may need a queue far from the run — but a
 // collision is REFUSED rather than discovered as two engines fighting over one
 // nfqueue.
-func PlanQueues(production int, overrides map[string]int) (QueuePlan, error) {
+func PlanQueues(production int, productionCount int, overrides map[string]int) (QueuePlan, error) {
 	plan := QueuePlan{Production: production, ByRole: map[string]int{}}
 	owner := map[int]string{}
 
@@ -70,8 +77,22 @@ func PlanQueues(production int, overrides map[string]int) (QueuePlan, error) {
 		return QueuePlan{}, fmt.Errorf("zapret: %q is the input, not something to override; pass it as the production queue", RoleProduction)
 	}
 
-	roles := make([]string, 0, len(roleOffsets))
-	for role := range roleOffsets {
+	if productionCount < 1 {
+		productionCount = 1
+	}
+	// The production run is claimed FIRST and by construction, so an auxiliary
+	// role can never be handed a number one of them already holds.
+	for i := 0; i < productionCount; i++ {
+		q := production + i
+		if _, taken := owner[q]; taken {
+			return QueuePlan{}, fmt.Errorf("zapret: derived production queues collide at %d", q)
+		}
+		owner[q] = fmt.Sprintf("production[%d]", i)
+		plan.ByRole[fmt.Sprintf("production[%d]", i)] = q
+	}
+
+	roles := make([]string, 0, len(auxOffsets))
+	for role := range auxOffsets {
 		roles = append(roles, role)
 	}
 	sort.Strings(roles)
@@ -79,7 +100,7 @@ func PlanQueues(production int, overrides map[string]int) (QueuePlan, error) {
 	for _, role := range roles {
 		number, ok := overrides[role]
 		if !ok {
-			derived, err := QueueFor(production, role)
+			derived, err := QueueFor(production, productionCount, role)
 			if err != nil {
 				return QueuePlan{}, err
 			}

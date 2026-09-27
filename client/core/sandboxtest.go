@@ -286,7 +286,7 @@ func (c *Core) sandbox() (*zapret.Sandbox, error) {
 		return nil, fmt.Errorf("egress interface unknown, cannot scope the sandbox table")
 	}
 	prod := c.qnum()
-	sandboxQNum, err := zapret.QueueFor(prod, zapret.RoleSandbox)
+	sandboxQNum, err := zapret.QueueFor(prod, 1, zapret.RoleSandbox)
 	if err != nil {
 		return nil, fmt.Errorf("cannot allocate the test lane's queue: %w", err)
 	}

@@ -559,12 +559,26 @@ func loadPreset(file, declaredName string, single bool) (*ZapretPreset, error) {
 	return &ZapretPreset{Name: parsed.Name, Args: parsed.Values}, nil
 }
 
+// buildZapret turns the declared instances into engine instances.
+//
+// A queue number is DERIVED, not chosen. An operator naming several instances
+// almost cannot pick disjoint numbers, and the collision it produces is the worst
+// kind: two engines on one nfqueue steal each other's packets, so everything
+// downstream still reads healthy while a measured result belongs to neither. An
+// explicit qnum is still honoured (a deployment may have a reason this code
+// cannot see), but omitting it is the normal way to say it, and the first
+// instance keeps the base so an existing single-instance config is unaffected.
 func buildZapret(z zapretYAML) ([]zapret.Instance, error) {
+	const baseQNum = 200 // the router's historical production queue
 	out := make([]zapret.Instance, 0, len(z.Instances))
-	for _, in := range z.Instances {
+	for i, in := range z.Instances {
+		qnum := in.QNum
+		if qnum == 0 {
+			qnum = baseQNum + i
+		}
 		out = append(out, zapret.Instance{
 			Name:      in.Name,
-			QNum:      in.QNum,
+			QNum:      qnum,
 			Capture:   zapret.Capture{TCP: portList(in.Capture.TCP), UDP: portList(in.Capture.UDP)},
 			Connbytes: in.Connbytes,
 		})

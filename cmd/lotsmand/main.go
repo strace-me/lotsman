@@ -360,7 +360,7 @@ func main() {
 		if *flowsealCanaryQNum > 0 {
 			overrides[zapret.RoleCanary] = *flowsealCanaryQNum
 		}
-		planned, err := zapret.PlanQueues(conf.Zapret[0].QNum, overrides)
+		planned, err := zapret.PlanQueues(conf.Zapret[0].QNum, len(conf.Zapret), overrides)
 		if err != nil {
 			// Refused, not repaired: an operator who named a queue that collides
 			// must be told which two, because the alternative is two engines on one
