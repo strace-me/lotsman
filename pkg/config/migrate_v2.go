@@ -202,6 +202,17 @@ func migrateChain(ruleID string, steps []chainStepYAML, instance string, desyncS
 			if step.StrategyID == "" {
 				return nil, nil, fmt.Errorf("rule %q: class %q without strategy_id cannot name a pool", ruleID, step.Class)
 			}
+			if step.Class == strategy.ClassEmergency {
+				// v1 had an `emergency` class with NO executor, so a rule that
+				// reached this rung failed with "no executor for class" — the
+				// incident CHANGELOG records. v2 carries the pool on the vpn action,
+				// which makes the rung reachable. That is a fix, and it IS a change
+				// of behaviour, so it is reported rather than discovered later as a
+				// rule that suddenly routes somewhere it never did.
+				warnings = append(warnings, fmt.Sprintf(
+					"rule %q: the emergency rung %q had no executor in v1 and is dead; it now runs as a vpn pool",
+					ruleID, step.StrategyID))
+			}
 			out = append(out, configv2.ChainStep{Tier: tier, Action: configv2.Action{VPN: &configv2.VPNAction{Pool: step.StrategyID}}})
 		case strategy.ClassZapret:
 			// An empty strategy_id in v1 meant "the KB picks" — ALT_ZAPRET's whole
