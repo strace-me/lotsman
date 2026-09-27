@@ -4,6 +4,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 
 	"github.com/strace-me/lotsman/pkg/strategycat"
@@ -43,7 +44,7 @@ func usablePayloadRecipes(recipes []strategycat.Recipe, dir string, log *slog.Lo
 		return recipes
 	}
 	out := make([]strategycat.Recipe, 0, len(recipes))
-	var dropped []string
+	var dropped, missingFiles []string
 	for _, r := range recipes {
 		// A multi-block recipe whose later profile an earlier one already claims does
 		// not do what its author wrote: nfqws stops at the first match, so the block
@@ -57,8 +58,12 @@ func usablePayloadRecipes(recipes []strategycat.Recipe, dir string, log *slog.Lo
 		}
 		missing := false
 		for _, f := range payloadRefs(r) {
-			if _, err := os.Stat(filepath.Join(dir, filepath.Base(f))); err != nil {
+			base := filepath.Base(f)
+			if _, err := os.Stat(filepath.Join(dir, base)); err != nil {
 				missing = true
+				if !slices.Contains(missingFiles, base) {
+					missingFiles = append(missingFiles, base)
+				}
 				break
 			}
 		}
@@ -68,9 +73,16 @@ func usablePayloadRecipes(recipes []strategycat.Recipe, dir string, log *slog.Lo
 		}
 		out = append(out, r)
 	}
+	// Warn, and name the FILES, not just the recipes. A dropped recipe is
+	// indistinguishable from one that never worked: the search is quietly
+	// narrower, and the symptom is "the desync stopped finding anything" hours
+	// later, with nothing in between pointing at a missing file. The old Info
+	// line with three examples buried that.
 	if len(dropped) > 0 {
-		log.Info("desync recipes unavailable on this host (payload files missing)",
-			"count", len(dropped), "dir", dir, "examples", firstN(dropped, 3))
+		log.Warn("desync recipes UNAVAILABLE on this host: their fake-payload files are missing, so these strategies cannot be tried at all",
+			"recipes_dropped", len(dropped), "of", len(recipes), "dir", dir,
+			"missing_files", firstN(missingFiles, 5), "examples", firstN(dropped, 3),
+			"fix", "install the payload files into dir, or point -payload-dir at a directory that has them")
 	}
 	return out
 }

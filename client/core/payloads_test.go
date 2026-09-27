@@ -1,10 +1,12 @@
 package core
 
 import (
+	"bytes"
 	"log/slog"
 	"os"
 	"path/filepath"
 	"slices"
+	"strings"
 	"testing"
 
 	"github.com/strace-me/lotsman/pkg/strategycat"
@@ -69,5 +71,29 @@ func TestAbsolutizePayloadsLeavesArgsAloneWithoutADir(t *testing.T) {
 	args := []string{"--dpi-desync-split-seqovl-pattern=x.bin"}
 	if got := absolutizePayloads(args, ""); !slices.Equal(got, args) {
 		t.Errorf("got %v, want the args unchanged", got)
+	}
+}
+
+func TestMissingPayloadNamesTheFileItWants(t *testing.T) {
+	// The dropped recipe is indistinguishable from one that never worked unless
+	// the log says WHICH FILE was absent — that is the only actionable thing in it.
+	dir := t.TempDir()
+	present := filepath.Join(dir, "quic_initial_default.bin")
+	if err := os.WriteFile(present, []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	var buf bytes.Buffer
+	log := slog.New(slog.NewTextHandler(&buf, nil))
+	in := []strategycat.Recipe{
+		recipe("missing-payload", "--dpi-desync-split-seqovl-pattern=tls_clienthello_absent.bin"),
+	}
+	if got := usablePayloadRecipes(in, dir, log); len(got) != 0 {
+		t.Fatalf("recipe with an absent payload was kept: %#v", got)
+	}
+	text := buf.String()
+	for _, want := range []string{"level=WARN", "tls_clienthello_absent.bin", "UNAVAILABLE"} {
+		if !strings.Contains(text, want) {
+			t.Errorf("warning is missing %q: %s", want, text)
+		}
 	}
 }
