@@ -19,6 +19,9 @@ import (
 //go:embed catalog.yaml
 var catalogYAML []byte
 
+//go:embed catalog2.yaml
+var catalog2YAML []byte
+
 // TargetClass identifies the kind of traffic a recipe targets.
 type TargetClass string
 
@@ -49,7 +52,14 @@ type Recipe struct {
 	// It is not decoration. The two engines share no flag vocabulary — nfqws1 says
 	// `--dpi-desync=fake` and nfqws2 says `--lua-desync=fakedsplit` — so a recipe
 	// carried to the wrong engine does not fail validation, it fails to desync.
-	Engine      string      `yaml:"engine,omitempty"`
+	Engine string `yaml:"engine,omitempty"`
+	// MinEngine is the lowest engine version a recipe was read and checked
+	// against, for the nfqws2 catalog. It is NOT a claim the recipe beats any
+	// DPI: a static check cannot make that claim. It says the arguments are ones
+	// that version accepts — and nfqws2 does not validate desync function names
+	// at startup, so a recipe from a NEWER engine reads as a typo and only shows
+	// up as a desync that stopped working.
+	MinEngine   string      `yaml:"min_engine,omitempty"`
 	Provenance  string      `yaml:"provenance"`
 	TargetClass TargetClass `yaml:"target_class"`
 	Protocol    Protocol    `yaml:"protocol"`
@@ -137,6 +147,28 @@ func load() ([]Recipe, error) {
 	var c catalog
 	if err := yaml.Unmarshal(catalogYAML, &c); err != nil {
 		return nil, fmt.Errorf("unmarshal catalog: %w", err)
+	}
+	out := c.Recipes
+	// The nfqws2 recipes live in a hand-maintained file and are appended, not
+	// merged into the generated one: gen.py owns catalog.yaml and would drop them
+	// on its next run. Order is nfqws1 first so nothing about the existing
+	// catalogue's cold-start order changes.
+	nfqws2, err := loadNfqws2()
+	if err != nil {
+		return nil, err
+	}
+	return append(out, nfqws2...), nil
+}
+
+func loadNfqws2() ([]Recipe, error) {
+	var c catalog
+	if err := yaml.Unmarshal(catalog2YAML, &c); err != nil {
+		return nil, fmt.Errorf("unmarshal nfqws2 catalog: %w", err)
+	}
+	for _, r := range c.Recipes {
+		if r.EngineOf() != "nfqws2" {
+			return nil, fmt.Errorf("nfqws2 catalog holds recipe %q for engine %q", r.ID, r.EngineOf())
+		}
 	}
 	return c.Recipes, nil
 }

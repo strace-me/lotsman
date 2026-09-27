@@ -75,8 +75,17 @@ func TestRecipesWellFormed(t *testing.T) {
 	}
 }
 
+// This is an nfqws1 invariant: its techniques ARE its flags, so a tag without a
+// matching flag means gen.py derived the tag wrong. It does not extend to nfqws2,
+// which passes its parameters INSIDE --lua-desync= (`:repeats=6`) — there is no
+// --dpi-desync-repeats to find, and pretending otherwise would either fail here or
+// force a second, invented tag vocabulary. An nfqws2 recipe's techniques are
+// declared, and what they are checked against is the engine, not this test.
 func TestDeriveTagsConsistentWithArgs(t *testing.T) {
 	for _, r := range Load() {
+		if r.EngineOf() != "nfqws1" {
+			continue
+		}
 		joined := strings.Join(r.AllArgs(), " ")
 		for _, tag := range r.Techniques {
 			switch {

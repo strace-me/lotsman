@@ -1,0 +1,72 @@
+# nfqws2 (zapret2) strategies — hand-maintained, NOT generated.
+#
+# Why this file exists next to the generated catalog.yaml: the two are different
+# kinds of thing. catalog.yaml is derived from third-party nfqws1 bundles, so it is
+# regenerated and must not be hand-edited. These recipes are derived from the
+# INSTALLED ENGINE'S OWN release (share/zapret2/blockcheck2.d), which is a
+# different problem: they are only correct for the version they were read from.
+# A regenerated file would silently replace them with nfqws1 entries, and a copied
+# one would let an nfqws2 recipe outlive the engine it was written for.
+#
+# `min_engine` records the zapret2 version each recipe was read and checked
+# against. It is NOT a claim that the recipe works against that DPI — no static
+# check can make that claim — only that its arguments are ones that version
+# accepts. A recipe whose min_engine is NEWER than the installed engine is reported
+# as unusable rather than tried, because nfqws2 does not validate desync function
+# names at startup and an argument from a future version reads as a typo that only
+# shows up as "the desync stopped working".
+#
+# Verified with `nfqws2 --dry-run` on v0.9.5.2. Note what that proves and what it
+# does not: dry-run checks SYNTAX — flags, ranges, files, identifier-shaped names.
+# It does NOT check that the lua function exists, that a blob name is known, that a
+# split marker exists, or that the strategy beats anything. Acceptance is the
+# canary's job, not this file's.
+
+schema: 2
+recipes:
+  - id: "z2-tls-md5-badseq-disorder"
+    engine: "nfqws2"
+    min_engine: "0.9.5"
+    provenance: "zapret2 share/zapret2/config.default — the engine's own default TLS profile"
+    target_class: "general_tls"
+    protocol: "tcp"
+    techniques: ["fake", "multidisorder", "fooling:md5sig", "fooling:badseq"]
+    nfqws_args:
+      - "--filter-tcp=443"
+      - "--filter-l7=tls"
+      - "--hostlist-domains={{DOMAINS}}"
+      - "--payload=tls_client_hello"
+      - "--lua-desync=fake:blob=fake_default_tls:tcp_md5:tcp_seq=-10000"
+      - "--lua-desync=multidisorder:pos=1,midsld"
+    notes: "The engine's own default TLS profile. fake_default_tls is initialised by the engine, so no --blob is needed and naming it as a FILE is a duplicate the engine refuses."
+
+  - id: "z2-http-md5-split-method2"
+    engine: "nfqws2"
+    min_engine: "0.9.5"
+    provenance: "zapret2 share/zapret2/config.default — the engine's own default HTTP profile"
+    target_class: "other"
+    protocol: "tcp"
+    techniques: ["fake", "multisplit", "fooling:md5sig"]
+    nfqws_args:
+      - "--filter-tcp=80"
+      - "--filter-l7=http"
+      - "--hostlist-domains={{DOMAINS}}"
+      - "--payload=http_req"
+      - "--lua-desync=fake:blob=fake_default_http:tcp_md5"
+      - "--lua-desync=multisplit:pos=method+2"
+    notes: "The engine's own default HTTP profile; the split marker is the HTTP method boundary."
+
+  - id: "z2-quic-fake-repeats6"
+    engine: "nfqws2"
+    min_engine: "0.9.5"
+    provenance: "zapret2 share/zapret2/config.default — the engine's own default QUIC profile"
+    target_class: "quic"
+    protocol: "udp"
+    techniques: ["fake", "fake-quic", "repeats:6"]
+    nfqws_args:
+      - "--filter-udp=443"
+      - "--filter-l7=quic"
+      - "--hostlist-domains={{DOMAINS}}"
+      - "--payload=quic_initial"
+      - "--lua-desync=fake:blob=fake_default_quic:repeats=6"
+    notes: "The engine's own default QUIC profile. Included because a TCP-only ladder leaves QUIC video uncarried — the same gap that made a service pass its TCP probe while carrying nothing."
