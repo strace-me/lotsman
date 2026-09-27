@@ -280,6 +280,18 @@ func (c *Client) RefreshSubscriptions(ctx context.Context, name string) ([]SubRe
 	return out.Subscriptions, nil
 }
 
+// Schema fetches the configuration schema/metadata document: the enums, chain
+// actions, pools, data sources and strategies THIS box has. The window and tray
+// read nothing from disk, so this is how they learn what the loader accepts — a
+// frontend copy of those lists is the drift this exists to prevent.
+func (c *Client) Schema(ctx context.Context) (any, error) {
+	var out any
+	if err := c.getJSON(ctx, "/schema", &out); err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 func (c *Client) Stop(ctx context.Context) error {
 	return c.post(ctx, "/stop")
 }

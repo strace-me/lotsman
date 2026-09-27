@@ -106,8 +106,17 @@ func (s *ControlServer) Serve(path string) error {
 		return err
 	}
 
+	s.start(s.routes(), ln, path)
+	return nil
+}
+
+// routes is the control API, separated from Serve so it can be exercised without a
+// unix socket. Every path an unprivileged UI may call is here, which is what makes
+// "the window touches only client/control" checkable.
+func (s *ControlServer) routes() *http.ServeMux {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /status", s.handleStatus)
+	mux.HandleFunc("GET /schema", s.handleSchema)
 	mux.HandleFunc("POST /stop", s.handleStop)
 	mux.HandleFunc("POST /service/{name}/recheck", s.handleRecheck)
 	mux.HandleFunc("POST /service/{name}/enabled", s.handleSetEnabled)
@@ -117,7 +126,10 @@ func (s *ControlServer) Serve(path string) error {
 	mux.HandleFunc("POST /config/validate", s.handleValidateConfig)
 	mux.HandleFunc("POST /subscriptions/refresh", s.handleRefreshSubs)
 	mux.HandleFunc("POST /subscriptions/{name}/refresh", s.handleRefreshSubs)
+	return mux
+}
 
+func (s *ControlServer) start(mux *http.ServeMux, ln net.Listener, path string) {
 	s.ln = ln
 	s.srv = &http.Server{Handler: mux, ReadHeaderTimeout: 5 * time.Second}
 	go func() {
@@ -126,7 +138,6 @@ func (s *ControlServer) Serve(path string) error {
 		}
 	}()
 	s.log.Info("control socket listening", "path", path)
-	return nil
 }
 
 // lockSocket sets who may drive the tunnel through the control socket. The socket
