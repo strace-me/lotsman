@@ -286,13 +286,18 @@ func (c *Core) sandbox() (*zapret.Sandbox, error) {
 		return nil, fmt.Errorf("egress interface unknown, cannot scope the sandbox table")
 	}
 	prod := c.qnum()
+	sandboxQNum, err := zapret.QueueFor(prod, zapret.RoleSandbox)
+	if err != nil {
+		return nil, fmt.Errorf("cannot allocate the test lane's queue: %w", err)
+	}
 	c.sb = &zapret.Sandbox{
 		Opts: zapret.IsolateOptions{
 			Table: "inet lotsman_probe",
 			WAN:   wan,
-			// One above production's. Sandbox refuses to share it, and sharing would
-			// hand real traffic to a candidate nobody has measured.
-			QNum:  prod + 1,
+			// Derived by ROLE, not hand-picked. Sharing production's queue would hand
+			// real traffic to a candidate nobody has measured, and `prod + 1` is not
+			// a promise — it landed on the prospector's own default.
+			QNum:  sandboxQNum,
 			TCP:   []string{"80", "443", "2053", "2083", "2087", "2096", "8443"},
 			UDP:   []string{"443"},
 			Bytes: defaultConnbytes,

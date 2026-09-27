@@ -133,11 +133,11 @@ func main() {
 		prospectWAN        = flag.String("prospect-wan", "eth0", "WAN interface the sandbox table matches on")
 		prospectNfqws      = flag.String("prospect-nfqws", "nfqws", "engine binary the sandbox launches")
 		prospectFiles      = flag.String("prospect-files", "", "payload dir the sandbox engine runs in, so bare .bin filenames resolve")
-		prospectQNum       = flag.Int("prospect-qnum", 201, "NFQUEUE the sandbox engine binds; must differ from the production queue")
+		prospectQNum       = flag.Int("prospect-qnum", 0, "NFQUEUE the prospecting sandbox binds; 0 = derive from the production queue (production+2)")
 		prospectInterval   = flag.Duration("prospect-interval", 30*time.Minute, "how often a prospecting pass is CONSIDERED; the gate and the idle check decide whether one actually runs")
 		nodeGoodputKBps    = flag.Float64("node-goodput", 1, "measure node THROUGHPUT while ranking, not just latency (a frozen node answers fast and carries nothing). 0 disables; probes are skipped whenever a live UDP session is on the link.")
 		nodeGoodputURL     = flag.String("node-goodput-url", "", "DEPRECATED, ignored: throughput is now OBSERVED per exit from the connection table instead of pulled from a URL (LOT-67). Still accepted so an init script passing it does not fail to start.")
-		flowsealCanaryQNum = flag.Int("flowseal-canary-qnum", 299, "NFQUEUE the bundle canary binds; must be one no nft rule diverts to, so the canary sees no traffic")
+		flowsealCanaryQNum = flag.Int("flowseal-canary-qnum", 0, "NFQUEUE the bundle canary binds; 0 = derive from the production queue (production+3). It must be one no nft rule diverts to, so the canary sees no traffic")
 		flowsealUpdate     = flag.Bool("flowseal-update", true, "auto-install new Flowseal releases. This has no off switch before now, and an unvalidated bundle swap has stopped the desync engine three times; set false to pin the bundle and update it by hand.")
 		reconcileSB        = flag.Bool("reconcile", false, "daemon owns the sing-box config: regenerate from config+subs and apply on structural change (needs -singbox-config + a config with subscriptions; -dry-run gates whether it actually applies)")
 		singboxConfig      = flag.String("singbox-config", "", "path to the sing-box config the daemon reconciles/owns")
@@ -342,6 +342,36 @@ func main() {
 		qnum := conf.Zapret[0].QNum
 		zapretEx.VerifyWith(func(context.Context) bool { return nfqueueBound(qnum) })
 		log.Info("zapret switches are verified against the engine", "qnum", qnum)
+	}
+
+	// Every auxiliary queue is DERIVED from the production one by role, so none of
+	// them can land on another by accident. The old shipped defaults did exactly
+	// that — production 200, the test lane at 201, the prospector's own default at
+	// 201 — and two engines on one nfqueue steal each other's packets, so a
+	// candidate is measured wearing another recipe's name. An explicit override is
+	// still honoured, but a collision is refused here rather than discovered later
+	// as an unexplained measurement.
+	queuePlan := zapret.QueuePlan{}
+	if conf != nil && len(conf.Zapret) > 0 {
+		overrides := map[string]int{}
+		if *prospectQNum > 0 {
+			overrides[zapret.RoleProspect] = *prospectQNum
+		}
+		if *flowsealCanaryQNum > 0 {
+			overrides[zapret.RoleCanary] = *flowsealCanaryQNum
+		}
+		planned, err := zapret.PlanQueues(conf.Zapret[0].QNum, overrides)
+		if err != nil {
+			// Refused, not repaired: an operator who named a queue that collides
+			// must be told which two, because the alternative is two engines on one
+			// nfqueue and an uninterpretable measurement.
+			log.Error("nfqueue allocation refused", "err", err)
+			os.Exit(1)
+		}
+		queuePlan = planned
+		log.Info("nfqueues allocated by role", "plan", queuePlan.Describe())
+		*prospectQNum = planned.ByRole[zapret.RoleProspect]
+		*flowsealCanaryQNum = planned.ByRole[zapret.RoleCanary]
 	}
 	byedpiEx := executor.NewByeDPI(executor.ExecRunner{}, *byedpiDir, *byedpiActive, *byedpiInit, *dryRun, log)
 	// When the daemon owns a per-service config (reconcile), a zapret/byedpi step
