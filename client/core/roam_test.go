@@ -26,11 +26,11 @@ func roamCore(t *testing.T) (*Core, string) {
 func TestMaybeRoamDebouncesThenSwapsTheKB(t *testing.T) {
 	c, dir := roamCore(t)
 	ctx := context.Background()
-	c.kb.RecordOutcome("youtube", "recipeA", true, 10) // learned on network A
+	c.kb.RecordOutcome(kb.Nfqws1Scope("youtube", "recipeA"), true, 10) // learned on network A
 
 	// Seed network B's store with different learning.
 	kbB := kb.New()
-	kbB.RecordOutcome("discord", "recipeB", true, 10)
+	kbB.RecordOutcome(kb.Nfqws1Scope("discord", "recipeB"), true, 10)
 	if err := kbB.Save(filepath.Join(dir, "netB.json")); err != nil {
 		t.Fatal(err)
 	}
@@ -51,10 +51,10 @@ func TestMaybeRoamDebouncesThenSwapsTheKB(t *testing.T) {
 		t.Errorf("after swap: net=%s kb=%s", c.currentNetID, c.kbFile)
 	}
 	// Live KB is now B's, and A's is gone from memory.
-	if !c.kb.Stats("discord", "recipeB").Seen {
+	if !c.kb.Stats(kb.Nfqws1Scope("discord", "recipeB")).Seen {
 		t.Error("network B's learning must be loaded after the swap")
 	}
-	if c.kb.Stats("youtube", "recipeA").Seen {
+	if c.kb.Stats(kb.Nfqws1Scope("youtube", "recipeA")).Seen {
 		t.Error("network A's learning must be discarded from the live KB")
 	}
 	// A's learning was persisted before the swap.
@@ -62,7 +62,7 @@ func TestMaybeRoamDebouncesThenSwapsTheKB(t *testing.T) {
 	if err := back.Load(filepath.Join(dir, "netA.json")); err != nil {
 		t.Fatal(err)
 	}
-	if !back.Stats("youtube", "recipeA").Seen {
+	if !back.Stats(kb.Nfqws1Scope("youtube", "recipeA")).Seen {
 		t.Error("network A's KB must have been saved to disk before swapping away")
 	}
 }
@@ -93,7 +93,7 @@ func TestMaybeRoamIgnoresSameNetworkAndTransientDisconnect(t *testing.T) {
 func TestMaybeRoamToAColdNetworkStartsEmpty(t *testing.T) {
 	c, _ := roamCore(t)
 	ctx := context.Background()
-	c.kb.RecordOutcome("youtube", "recipeA", true, 10)
+	c.kb.RecordOutcome(kb.Nfqws1Scope("youtube", "recipeA"), true, 10)
 
 	c.maybeRoam(ctx, netid.Network{Id: "cafe"})
 	c.maybeRoam(ctx, netid.Network{Id: "cafe"}) // debounce satisfied -> swap
@@ -101,7 +101,7 @@ func TestMaybeRoamToAColdNetworkStartsEmpty(t *testing.T) {
 	if c.currentNetID != "cafe" {
 		t.Fatalf("expected swap to cafe, got %s", c.currentNetID)
 	}
-	if c.kb.Stats("youtube", "recipeA").Seen {
+	if c.kb.Stats(kb.Nfqws1Scope("youtube", "recipeA")).Seen {
 		t.Error("a never-seen network must start from an empty KB, not the previous network's")
 	}
 }

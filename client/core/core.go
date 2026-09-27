@@ -2200,8 +2200,8 @@ func (c *Core) waitControlReady(ctx context.Context, timeout time.Duration) erro
 // rung for the first time should try what already worked on this network before
 // falling back to catalog order, and steer clear of what already failed here.
 func (c *Core) recipeScore(service, recipeID string) float64 {
-	own := c.kb.Stats(service, recipeID)
-	prior, priorN := c.kb.NetworkPrior(recipeID, service)
+	own := c.kb.Stats(kb.Nfqws1Scope(service, recipeID))
+	prior, priorN := c.kb.NetworkPrior(kb.EngineNfqws1, kb.LegacyDefaultPool, recipeID, service)
 	return blendRecipePrior(own.Success, own.Count, prior, priorN)
 }
 
@@ -2275,7 +2275,7 @@ func (c *Core) newZapretExec(ctx context.Context) *zapretExec {
 		// work on that network.
 		life:    func() context.Context { return c.loopCtx() },
 		canary:  c.canaryProbe,
-		record:  func(service, recipe string, ok bool) { c.kb.RecordOutcome(service, recipe, ok, 0) },
+		record:  func(service, recipe string, ok bool) { c.kb.RecordOutcome(kb.Nfqws1Scope(service, recipe), ok, 0) },
 		rotate:  c.rotateRecipe,
 		gate:    c.gateEnable,
 		active:  c.zapretServices,

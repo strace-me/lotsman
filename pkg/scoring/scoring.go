@@ -69,7 +69,7 @@ func Score(s kb.Stats, p Profile) float64 {
 func ScorerFor(k *kb.KB, service, category string) func(strategyID string) float64 {
 	p := ProfileFor(category)
 	return func(strategyID string) float64 {
-		return Score(k.Stats(service, strategyID), p)
+		return Score(k.Stats(kb.Nfqws1Scope(service, strategyID)), p)
 	}
 }
 

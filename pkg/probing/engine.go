@@ -221,7 +221,7 @@ func (e *Engine) runProbe(ctx context.Context, service string, position int, kin
 	// strategy when statically known, else by state name (M0; ALT_ZAPRET's
 	// strategy is KB-resolved at runtime and not load-bearing for ranking yet).
 	strat := e.strategyKey(service, position)
-	ewma := e.kb.RecordOutcome(service, strat, v.OK, v.RTTms)
+	ewma := e.kb.RecordOutcome(kb.Nfqws1Scope(service, strat), v.OK, v.RTTms)
 
 	if e.obs != nil {
 		e.obs.ObserveProbe(service, v.OK, v.RTTms)

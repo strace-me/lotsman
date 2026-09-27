@@ -3,6 +3,7 @@ package core
 import (
 	"context"
 	"fmt"
+	"github.com/strace-me/lotsman/pkg/kb"
 	"net"
 	"net/http"
 	"net/url"
@@ -489,7 +490,7 @@ func (c *Core) provenCandidateFor(ctx context.Context, svc registry.Service, exc
 		// ask" as a failure would demote a recipe for the sandbox's own breakage —
 		// a verdict about something the measurement did not touch.
 		if measured {
-			c.kb.RecordOutcome(svc.Name, cand, ok, 0)
+			c.kb.RecordOutcome(kb.Nfqws1Scope(svc.Name, cand), ok, 0)
 		}
 		// Re-checked AFTER too: a measurement takes seconds and the brain moves on
 		// its own tick, so the rung was ours when we asked and may not be when we

@@ -16,6 +16,43 @@ import (
 	"github.com/strace-me/lotsman/pkg/strategy"
 )
 
+// Engine names the desync engine a learned result belongs to. It is part of the
+// record key because two engines ship strategies with the SAME id — nfqws1 and
+// nfqws2 both have something called alt12 — and a verdict from one is evidence
+// about that engine alone. Keying on (service, strategy) alone blends them, and
+// the blend is silent: the ranker just gets worse and nothing reports why. This
+// is the same class as the incident CHANGELOG records as "the knowledge base
+// could recommend what this machine cannot run".
+const (
+	EngineNfqws1 = "nfqws1"
+	EngineNfqws2 = "nfqws2"
+	// LegacyDefaultPool is the pool older records were learned under: a v1 chain
+	// step could name a strategy without naming a pool.
+	LegacyDefaultPool = "legacy-default"
+)
+
+// Scope is what a learned record is filed under. Every read and write takes one,
+// so a verdict cannot be filed against an engine nobody ran it on.
+type Scope struct {
+	Service    string
+	Engine     string
+	Pool       string
+	StrategyID string
+}
+
+// Nfqws1Scope is the scope a v1 zapret rung files under: the router and the
+// client each run exactly ONE nfqws1 instance, and a zapret chain step names no
+// pool. It is deliberately the ONE place that knows that, so when a second engine
+// becomes selectable the change lands here rather than in every caller.
+func Nfqws1Scope(service, strategyID string) Scope {
+	return Scope{Service: service, Engine: EngineNfqws1, Pool: LegacyDefaultPool, StrategyID: strategyID}
+}
+
+// Key is the on-disk record key.
+func (s Scope) Key() string {
+	return s.Service + "|" + s.Engine + "|" + s.Pool + "|" + s.StrategyID
+}
+
 // alpha weights fresh samples in the EWMA: 10% new, 90% history.
 const alpha = 0.1
 
@@ -117,13 +154,8 @@ func (k *KB) Load(path string) error {
 	}
 	k.mu.Lock()
 	defer k.mu.Unlock()
-	for key, r := range in.Records {
-		k.ewma[key] = r.EWMA
-		k.rtt[key] = r.RTT
-		k.jitter[key] = r.Jitter
-		k.count[key] = r.Count
-		k.cfail[key] = r.CFail
-		k.quar[key] = r.Quar
+	for stored, r := range in.Records {
+		k.storeLocked(migrateKey(stored), r)
 	}
 	return nil
 }
@@ -148,10 +180,10 @@ type Stats struct {
 }
 
 // Stats returns the learned metrics for a (service, strategy).
-func (k *KB) Stats(service, strategyID string) Stats {
+func (k *KB) Stats(scope Scope) Stats {
 	k.mu.Lock()
 	defer k.mu.Unlock()
-	key := service + "|" + strategyID
+	key := scope.Key()
 	s, seen := k.ewma[key]
 	if !seen {
 		s = prior
@@ -191,15 +223,34 @@ func (k *KB) Reload(path string) error {
 	k.count = make(map[string]float64, len(in.Records))
 	k.cfail = make(map[string]int, len(in.Records))
 	k.quar = make(map[string]int, len(in.Records))
-	for key, r := range in.Records {
-		k.ewma[key] = r.EWMA
-		k.rtt[key] = r.RTT
-		k.jitter[key] = r.Jitter
-		k.count[key] = r.Count
-		k.cfail[key] = r.CFail
-		k.quar[key] = r.Quar
+	for stored, r := range in.Records {
+		k.storeLocked(migrateKey(stored), r)
 	}
 	return nil
+}
+
+// storeLocked files one learned record. Caller holds k.mu.
+func (k *KB) storeLocked(recordKey string, r record) {
+	k.ewma[recordKey] = r.EWMA
+	k.rtt[recordKey] = r.RTT
+	k.jitter[recordKey] = r.Jitter
+	k.count[recordKey] = r.Count
+	k.cfail[recordKey] = r.CFail
+	k.quar[recordKey] = r.Quar
+}
+
+// migrateKey upgrades a key written before the engine and pool were part of it.
+// Every such record was learned through the router's single nfqws1 instance with
+// no pool named on the step, so nfqws1 + legacy-default is what it means — a
+// fact, not a guess. Dropping them instead would discard the measured experience
+// that persisting the file was for; the file keeps its name on disk, so a rollback
+// to the older binary still finds what it expects.
+func migrateKey(stored string) string {
+	if strings.Count(stored, "|") >= 3 {
+		return stored
+	}
+	service, strategyID, _ := strings.Cut(stored, "|")
+	return Scope{Service: service, Engine: EngineNfqws1, Pool: LegacyDefaultPool, StrategyID: strategyID}.Key()
 }
 
 // NetworkPrior aggregates a strategy's observed success across every OTHER
@@ -209,10 +260,19 @@ func (k *KB) Reload(path string) error {
 // experience rather than blind catalog order. exceptService is excluded so a
 // service never primes its own prior. n is the total weight behind the average
 // (0 = no other service has tried it — no prior available).
-func (k *KB) NetworkPrior(strategyID, exceptService string) (success, n float64) {
+// scopeKey is the scope with the service left empty: every service's record for
+// this (engine, pool, strategy).
+func scopeKey(engine, pool, strategyID string) string {
+	return "|" + engine + "|" + pool + "|" + strategyID
+}
+
+func (k *KB) NetworkPrior(engine, pool, strategyID, exceptService string) (success, n float64) {
 	k.mu.Lock()
 	defer k.mu.Unlock()
-	suffix := "|" + strategyID
+	// Matched on the WHOLE engine|pool|strategy tail, not just the strategy id: a
+	// nfqws2 alt12 must never be averaged into an nfqws1 prior, and matching only
+	// the id would be exactly that.
+	suffix := scopeKey(engine, pool, strategyID)
 	var wsum, csum float64
 	for key, e := range k.ewma {
 		if !strings.HasSuffix(key, suffix) {
@@ -239,7 +299,13 @@ func (k *KB) NetworkPrior(strategyID, exceptService string) (success, n float64)
 // tiebreak. Unobserved strategies carry the prior (0.5), so a cold-start KB
 // returns pure seed order; as strategies prove or fail in production they rise
 // or sink. exclude skips strategies already used higher in the chain.
+// TopNZapret ranks the seed strategies for a service. It takes the SERVICE, not
+// a scope: the caller asking "what should I try for this service" does not know
+// or care which engine will carry it — the KB is the thing that knows, and
+// keeping the engine inside here is what stops a caller's guess from silently
+// filing a verdict against the wrong engine.
 func (k *KB) TopNZapret(service string, n int, exclude ...string) []string {
+	scope := Nfqws1Scope(service, "")
 	skip := make(map[string]bool, len(exclude))
 	for _, e := range exclude {
 		skip[e] = true
@@ -260,12 +326,12 @@ func (k *KB) TopNZapret(service string, n int, exclude ...string) []string {
 			if skip[id] {
 				continue
 			}
-			key := service + "|" + id
+			key := Scope{Service: scope.Service, Engine: scope.Engine, Pool: scope.Pool, StrategyID: id}.Key()
 			if honorQuarantine && k.quar[key] > 0 {
 				continue // circuit breaker: skip a quarantined (proven-dead) strategy (LOT-41 inc3)
 			}
 			n := k.count[key]
-			out = append(out, cand{id: id, seedIdx: i, rate: k.rateLocked(service, id), n: n})
+			out = append(out, cand{id: id, seedIdx: i, rate: k.rateLocked(Scope{Service: scope.Service, Engine: scope.Engine, Pool: scope.Pool, StrategyID: id}), n: n})
 			totalN += n
 		}
 		return out
@@ -329,10 +395,10 @@ func (k *KB) Decay(factor float64) {
 	}
 }
 
-// rateLocked returns the EWMA for (service, strategyID), or the prior if unseen.
-// Caller holds k.mu.
-func (k *KB) rateLocked(service, strategyID string) float64 {
-	if v, ok := k.ewma[service+"|"+strategyID]; ok {
+// rateLocked returns the EWMA for a scope, or the prior if unseen. Caller holds
+// k.mu.
+func (k *KB) rateLocked(scope Scope) float64 {
+	if v, ok := k.ewma[scope.Key()]; ok {
 		return v
 	}
 	return prior
@@ -341,10 +407,10 @@ func (k *KB) rateLocked(service, strategyID string) float64 {
 // RecordOutcome folds a probe result into the success EWMA for
 // (service, strategyID) and, on success, into the latency EWMA. Returns the
 // updated success rate. A never-seen pair starts at the prior.
-func (k *KB) RecordOutcome(service, strategyID string, ok bool, rttMs int) float64 {
+func (k *KB) RecordOutcome(scope Scope, ok bool, rttMs int) float64 {
 	k.mu.Lock()
 	defer k.mu.Unlock()
-	key := service + "|" + strategyID
+	key := scope.Key()
 	cur, seen := k.ewma[key]
 	if !seen {
 		cur = prior
@@ -393,10 +459,10 @@ func (k *KB) RecordOutcome(service, strategyID string, ok bool, rttMs int) float
 // Score ranks a (service, strategy) by success rate, lightly penalized by
 // latency, so a fast working strategy outranks a slow working one while success
 // stays dominant. Range roughly [0,1]; unseen pairs score at the prior.
-func (k *KB) Score(service, strategyID string) float64 {
+func (k *KB) Score(scope Scope) float64 {
 	k.mu.Lock()
 	defer k.mu.Unlock()
-	key := service + "|" + strategyID
+	key := scope.Key()
 	success, seen := k.ewma[key]
 	if !seen {
 		success = prior

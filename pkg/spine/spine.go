@@ -51,7 +51,7 @@ func Smarts(knowledge *kb.KB, catalog *strategy.Catalog, cfg brain.Config, servi
 			if knowledge == nil {
 				return cfg.EscalateFails
 			}
-			rel := knowledge.Stats(s, activeStrategy).Success
+			rel := knowledge.Stats(kb.Nfqws1Scope(s, activeStrategy)).Success
 			return tuner.Tune(rel, damp.Count(s, time.Now())).EscalateAt
 		},
 		Systemic:    corr.Systemic,

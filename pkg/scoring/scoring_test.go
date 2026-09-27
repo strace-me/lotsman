@@ -43,13 +43,13 @@ func TestStreamingWeighsSuccessOverLatency(t *testing.T) {
 func TestScorerForWithSelector(t *testing.T) {
 	k := kb.New()
 	for i := 0; i < 30; i++ {
-		k.RecordOutcome("disc", "steady", true, 60)
+		k.RecordOutcome(kb.Nfqws1Scope("disc", "steady"), true, 60)
 		// jittery: alternate 60/260 to build jitter on "rough"
 		rtt := 60
 		if i%2 == 0 {
 			rtt = 260
 		}
-		k.RecordOutcome("disc", "rough", true, rtt)
+		k.RecordOutcome(kb.Nfqws1Scope("disc", "rough"), true, rtt)
 	}
 	cands := []selector.Candidate{
 		{StrategyID: "steady", Class: strategy.ClassZapret},

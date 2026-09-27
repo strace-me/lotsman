@@ -700,7 +700,7 @@ func main() {
 				zsvcs = append(zsvcs, s)
 			}
 			kbPick := zaptune.KBPicker(func(service, recipeID string) float64 {
-				return knowledge.Stats(service, recipeID).Success
+				return knowledge.Stats(kb.Nfqws1Scope(service, recipeID)).Success
 			})
 			// Recipe pool = curated strategycat catalog + operator-classified
 			// discovered strategies (LOT-10a harvest -target-class), so harvested
@@ -768,7 +768,7 @@ func main() {
 					// discord.com while the LAN path was broken by a composed recipe — this
 					// catches that per-service regression so the arm rolls back.
 					Probe:        func(c context.Context, svc registry.Service) bool { return prober.Probe(c, svc.Name, 0).OK },
-					Record:       func(svc, id string, ok bool) { knowledge.RecordOutcome(svc, id, ok, 0) },
+					Record:       func(svc, id string, ok bool) { knowledge.RecordOutcome(kb.Nfqws1Scope(svc, id), ok, 0) },
 					Settle:       5 * time.Second,
 					CanaryProbes: 3,
 				})

@@ -144,7 +144,7 @@ func TestRecordOutcomeInvoked(t *testing.T) {
 		t.Fatal("no verdict published")
 	}
 
-	s := k.Stats("youtube", "alt12")
+	s := k.Stats(kb.Nfqws1Scope("youtube", "alt12"))
 	if !s.Seen {
 		t.Fatalf("KB has no record for youtube|alt12; RecordOutcome was not invoked")
 	}
@@ -299,7 +299,7 @@ func TestUnmeasuredProbeIsNeitherSuccessNorFailure(t *testing.T) {
 	}
 
 	for _, pos := range []int{0, 1} {
-		if s := k.Stats("youtube", e.strategyKey("youtube", pos)); s.Seen {
+		if s := k.Stats(kb.Nfqws1Scope("youtube", e.strategyKey("youtube", pos))); s.Seen {
 			t.Errorf("position %d was never measured, but the KB learned from it", pos)
 		}
 	}

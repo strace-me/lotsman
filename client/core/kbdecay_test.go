@@ -18,7 +18,7 @@ func TestKBDecayLoopAgesTheStoreAndLiftsQuarantines(t *testing.T) {
 	k.SetZapretSeed([]string{"good", "bad"})
 	// Drive one strategy past the breaker threshold.
 	for i := 0; i < 5; i++ {
-		k.RecordOutcome("youtube", "bad", false, 0)
+		k.RecordOutcome(kb.Nfqws1Scope("youtube", "bad"), false, 0)
 	}
 	if got := k.TopNZapret("youtube", 5); contains(got, "bad") {
 		t.Fatalf("a persistently failing strategy should be quarantined, got %v", got)

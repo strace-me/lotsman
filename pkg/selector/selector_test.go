@@ -47,14 +47,14 @@ func TestFallsBackWhenNoClassMatch(t *testing.T) {
 func TestWithKBScoreFavorsFastWorking(t *testing.T) {
 	k := kb.New()
 	for i := 0; i < 30; i++ {
-		k.RecordOutcome("yt", "fast", true, 20)  // works, 20ms
-		k.RecordOutcome("yt", "slow", true, 400) // works, 400ms
+		k.RecordOutcome(kb.Nfqws1Scope("yt", "fast"), true, 20)  // works, 20ms
+		k.RecordOutcome(kb.Nfqws1Scope("yt", "slow"), true, 400) // works, 400ms
 	}
 	cands := []Candidate{
 		{StrategyID: "fast", Class: strategy.ClassZapret},
 		{StrategyID: "slow", Class: strategy.ClassZapret},
 	}
-	got, _ := Select(cands, strategy.ClassZapret, func(id string) float64 { return k.Score("yt", id) })
+	got, _ := Select(cands, strategy.ClassZapret, func(id string) float64 { return k.Score(kb.Nfqws1Scope("yt", id)) })
 	if got.StrategyID != "fast" {
 		t.Errorf("got %+v, want fast (lower latency)", got)
 	}

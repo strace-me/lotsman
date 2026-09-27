@@ -28,7 +28,7 @@ func TestBlendRecipePrior(t *testing.T) {
 func TestRecipeScorePrefersNetworkWinnerForColdService(t *testing.T) {
 	k := kb.New()
 	for i := 0; i < 5; i++ {
-		k.RecordOutcome("youtube", "winner", true, 10)
+		k.RecordOutcome(kb.Nfqws1Scope("youtube", "winner"), true, 10)
 	}
 	c := &Core{kb: k}
 
@@ -44,7 +44,7 @@ func TestRecipeScorePrefersNetworkWinnerForColdService(t *testing.T) {
 func TestRecipeScoreAvoidsNetworkLoserForColdService(t *testing.T) {
 	k := kb.New()
 	for i := 0; i < 5; i++ {
-		k.RecordOutcome("youtube", "loser", false, 0)
+		k.RecordOutcome(kb.Nfqws1Scope("youtube", "loser"), false, 0)
 	}
 	c := &Core{kb: k}
 

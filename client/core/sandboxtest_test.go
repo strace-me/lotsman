@@ -88,11 +88,11 @@ func TestRotationMovesProductionOnlyOntoAPassingCandidate(t *testing.T) {
 	// Every verdict was a real measurement of that recipe on this network, so all
 	// of them belong in the knowledge base — not just the winner.
 	for _, id := range tried {
-		if !c.kb.Stats("youtube", id).Seen {
+		if !c.kb.Stats(kb.Nfqws1Scope("youtube", id)).Seen {
 			t.Errorf("sandbox verdict for %q was not recorded", id)
 		}
 	}
-	if s := c.kb.Stats("youtube", "charlie"); s.Success <= 0.5 {
+	if s := c.kb.Stats(kb.Nfqws1Scope("youtube", "charlie")); s.Success <= 0.5 {
 		t.Errorf("the passing candidate scored %v, want above the prior", s.Success)
 	}
 }
@@ -114,7 +114,7 @@ func TestRotationLeavesProductionAloneWhenNothingPasses(t *testing.T) {
 	// recipe while the rule is already down.
 	tried := 0
 	for _, r := range c.zapExec.recipes {
-		if c.kb.Stats("youtube", r.ID).Seen {
+		if c.kb.Stats(kb.Nfqws1Scope("youtube", r.ID)).Seen {
 			tried++
 		}
 	}
@@ -189,7 +189,7 @@ func TestGateAppliesUnverifiedWhenTheLaneCannotMeasure(t *testing.T) {
 	// about the recipe, and recording it would demote a strategy for the sandbox's
 	// own breakage.
 	for _, r := range c.zapExec.recipes {
-		if c.kb.Stats("youtube", r.ID).Seen {
+		if c.kb.Stats(kb.Nfqws1Scope("youtube", r.ID)).Seen {
 			t.Errorf("recorded an outcome for %q though nothing was measured", r.ID)
 		}
 	}
