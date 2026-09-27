@@ -181,7 +181,6 @@ func migrateService(service serviceYAML, cfg *configv2.Configuration, instance s
 func migrateChain(ruleID string, steps []chainStepYAML, instance string, desyncStrategy DesyncStrategyFor) ([]configv2.ChainStep, []string, error) {
 	var out []configv2.ChainStep
 	var warnings []string
-	seenTier := map[string]bool{}
 	for _, step := range steps {
 		tier, ok := tierFor(step.State)
 		if !ok {
@@ -191,10 +190,6 @@ func migrateChain(ruleID string, steps []chainStepYAML, instance string, desyncS
 			}
 			return nil, nil, fmt.Errorf("rule %q: unknown chain state %q", ruleID, step.State)
 		}
-		if seenTier[tier] {
-			return nil, nil, fmt.Errorf("rule %q: chain repeats tier %q after migration; v2 allows one step per tier", ruleID, tier)
-		}
-		seenTier[tier] = true
 		switch step.Class {
 		case strategy.ClassDirect:
 			out = append(out, configv2.ChainStep{Tier: tier, Action: configv2.Action{Direct: true}})
@@ -204,16 +199,20 @@ func migrateChain(ruleID string, steps []chainStepYAML, instance string, desyncS
 			}
 			out = append(out, configv2.ChainStep{Tier: tier, Action: configv2.Action{VPN: &configv2.VPNAction{Pool: Slug(step.StrategyID)}}})
 		case strategy.ClassZapret:
-			bundle := step.StrategyID
-			if bundle == "" && desyncStrategy != nil {
+			// An empty strategy_id in v1 meant "the KB picks" — ALT_ZAPRET's whole
+			// purpose. v2 says that out loud as `auto` rather than leaving the rung
+			// looking like a pinned strategy it never was.
+			bundle := "auto"
+			if step.StrategyID != "" {
+				bundle = step.StrategyID
+			} else if desyncStrategy != nil {
 				resolved, err := desyncStrategy(instance)
 				if err != nil {
 					return nil, nil, fmt.Errorf("rule %q: %w", ruleID, err)
 				}
-				bundle = resolved
-			}
-			if bundle == "" {
-				return nil, nil, fmt.Errorf("rule %q: class zapret needs a strategy bundle; supply DesyncStrategyFor", ruleID)
+				if resolved != "" {
+					bundle = resolved
+				}
 			}
 			out = append(out, configv2.ChainStep{Tier: tier, Action: configv2.Action{Desync: &configv2.DesyncAction{Instance: instance, Strategy: bundle}}})
 		case strategy.ClassByeDPI:

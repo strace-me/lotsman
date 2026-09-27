@@ -43,13 +43,8 @@ match:
   domain_lists: [example]
   ip_lists: [example]
 chain:
-  - preferred:
-      desync:
-        instance: nfqws1-main
-        strategy: alt12
-  - fallback:
-      vpn:
-        pool: vpn_a
+  - {tier: preferred, desync: {instance: nfqws1-main, strategy: alt12}}
+  - {tier: fallback, vpn: {pool: vpn_a}}
 `)
 	if err := rule.ValidateReferences(cfg, map[string][]string{"nfqws1-main": {"alt12", "alt4"}}); err != nil {
 		t.Fatal(err)
@@ -68,53 +63,40 @@ id: example
 match:
   domain_lists: [missing]
 chain:
-  - preferred:
-      direct: true
+  - {tier: preferred, desync: {instance: nfqws1-main, strategy: alt12}}
 `,
 		"unknown pool": `
 id: example
 match:
   domains: [a.example]
 chain:
-  - preferred:
-      vpn:
-        pool: missing
+  - {tier: fallback, vpn: {pool: missing}}
 `,
 		"unknown instance": `
 id: example
 match:
   domains: [a.example]
 chain:
-  - preferred:
-      desync:
-        instance: missing
-        strategy: alt12
+  - {tier: preferred, desync: {instance: missing, strategy: alt12}}
 `,
 		"unknown strategy": `
 id: example
 match:
   domains: [a.example]
 chain:
-  - preferred:
-      desync:
-        instance: nfqws1-main
-        strategy: missing
+  - {tier: preferred, desync: {instance: nfqws1-main, strategy: alt99}}
 `,
 		"disabled instance": `
 id: example
 match:
   domains: [a.example]
 chain:
-  - preferred:
-      desync:
-        instance: nfqws1-off
-        strategy: alt12
+  - {tier: preferred, desync: {instance: nfqws1-off, strategy: alt12}}
 `,
 		"empty match": `
 id: example
 chain:
-  - preferred:
-      direct: true
+  - {tier: preferred, direct: true}
 `,
 	} {
 		rule := ruleWith(t, body)

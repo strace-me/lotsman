@@ -31,17 +31,39 @@ func (r *Rule) Validate() error {
 	if len(r.Chain) == 0 {
 		return fmt.Errorf("rule %q has an empty chain", r.ID)
 	}
-	seenTier := map[string]bool{}
+	// Repeating a tier is fine and expected. Going BACKWARDS is not: the tiers
+	// name how safe a rung is, so `emergency` followed by `preferred` reads as
+	// "climb back to the best path after the last resort", which is the opposite
+	// of what the ladder does.
+	previousRank, previousTier := 0, ""
 	for _, step := range r.Chain {
-		if seenTier[step.Tier] {
-			return fmt.Errorf("rule %q repeats chain tier %q", r.ID, step.Tier)
-		}
-		seenTier[step.Tier] = true
 		if err := step.Action.validate(r.ID); err != nil {
 			return err
 		}
+		if step.Tier == "" {
+			continue // unlabelled: order alone carries it
+		}
+		rank := tierRank(step.Tier)
+		if rank < previousRank {
+			return fmt.Errorf("rule %q steps back from tier %q to %q; tiers may repeat but not go backwards",
+				r.ID, previousTier, step.Tier)
+		}
+		previousRank, previousTier = rank, step.Tier
 	}
 	return nil
+}
+
+func tierRank(tier string) int {
+	return indexOf(ChainTiers, tier)
+}
+
+func indexOf(values []string, want string) int {
+	for i, value := range values {
+		if value == want {
+			return i
+		}
+	}
+	return -1
 }
 
 func (a Action) validate(ruleID string) error {
@@ -70,7 +92,12 @@ func (a Action) validate(ruleID string) error {
 	return nil
 }
 
-// LoadRules reads every *.yaml rule in dir, ordered by priority (descending).
+// LoadRules reads every *.yaml rule in dir in EFFECTIVE order: priority first,
+// then name. It is the same order v1 emits routes in (pkg/singbox.Generate
+// comments it as "first-match-wins, so emit by Priority (lower first), then name
+// for a stable tie-break"), and matching it is what keeps a migrated rule landing
+// where the live config put it. An earlier version of this loader sorted priority
+// DESCENDING, which silently reversed every rule's precedence.
 func LoadRules(dir string) ([]Rule, error) {
 	entries, err := os.ReadDir(dir)
 	if err != nil {
@@ -94,6 +121,11 @@ func LoadRules(dir string) ([]Rule, error) {
 		}
 		rules = append(rules, *rule)
 	}
-	sort.SliceStable(rules, func(i, j int) bool { return rules[i].Priority > rules[j].Priority })
+	sort.SliceStable(rules, func(i, j int) bool {
+		if rules[i].Priority != rules[j].Priority {
+			return rules[i].Priority < rules[j].Priority
+		}
+		return rules[i].ID < rules[j].ID
+	})
 	return rules, nil
 }

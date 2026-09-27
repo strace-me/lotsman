@@ -22,13 +22,8 @@ volume:
   targets: [https://example.com/]
   min_bytes: 65536
 chain:
-  - preferred:
-      desync:
-        instance: nfqws1-main
-        strategy: alt12
-  - fallback:
-      vpn:
-        pool: vpn_url_test_udp
+  - {tier: preferred, desync: {instance: nfqws1-main, strategy: alt12}}
+  - {tier: fallback, vpn: {pool: vpn_url_test_udp}}
 `
 
 func TestParseRule(t *testing.T) {
@@ -75,22 +70,42 @@ func TestLoadRulesOrdersByPriority(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	write("low", "id: low\npriority: 10\nchain:\n  - preferred:\n      direct: true\n")
-	write("high", "id: high\npriority: 900\nchain:\n  - preferred:\n      bypass: true\n")
+	write("catchall", "id: catchall\npriority: 10\nchain:\n  - {tier: fallback, vpn: {pool: vpn_a}}\n")
+	write("specific", "id: specific\npriority: -10\nchain:\n  - {tier: preferred, direct: true}\n")
+	write("tie-b", "id: tie-b\npriority: 0\nchain:\n  - {tier: preferred, direct: true}\n")
+	write("tie-a", "id: tie-a\npriority: 0\nchain:\n  - {tier: preferred, direct: true}\n")
 	_ = os.WriteFile(filepath.Join(dir, "notes.txt"), []byte("scratch"), 0o644)
 
 	rules, err := LoadRules(dir)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(rules) != 2 || rules[0].ID != "high" || rules[1].ID != "low" {
-		t.Fatalf("rules = %#v", rules)
+	// LOWER priority first, matching what v1 emits: a protective rule with a
+	// negative priority must land before a broad catch-all, or sing-box's
+	// first-match routing puts the catch-all first and a domain in both sets
+	// goes the wrong way.
+	want := []string{"specific", "tie-a", "tie-b", "catchall"}
+	if len(rules) != len(want) {
+		t.Fatalf("rules = %d, want %d", len(rules), len(want))
 	}
+	for i, id := range want {
+		if rules[i].ID != id {
+			t.Fatalf("order = %v, want %v", ids(rules), want)
+		}
+	}
+}
+
+func ids(rules []Rule) []string {
+	out := make([]string, 0, len(rules))
+	for _, rule := range rules {
+		out = append(out, rule.ID)
+	}
+	return out
 }
 
 func TestLoadRulesRejectsIDFileNameMismatch(t *testing.T) {
 	dir := t.TempDir()
-	if err := os.WriteFile(filepath.Join(dir, "other.yaml"), []byte("id: example\nchain:\n  - preferred:\n      direct: true\n"), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(dir, "other.yaml"), []byte("id: example\nchain:\n  - {tier: preferred, direct: true}\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := LoadRules(dir); err == nil {

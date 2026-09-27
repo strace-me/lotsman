@@ -34,9 +34,21 @@ type Volume struct {
 	MinBytes int64    `yaml:"min_bytes"`
 }
 
+// AutoStrategy is the desync strategy value that defers to the knowledge base:
+// this rung uses whatever has been proven to work here, so no bundle file carries
+// the name. v1 spelled it as an empty strategy_id on an ALT_ZAPRET rung, which
+// read as pinned to whatever happened to be selected.
+const AutoStrategy = "auto"
+
+// ChainStep is one rung: an action, optionally labelled with the tier it belongs
+// to. The LIST order is the escalation order — that is the whole semantics, and
+// it is unbounded. A tier is a label for the UI and the status line, not a slot:
+// the ladder an operator writes is routinely preferred×2, fallback×2, emergency,
+// because a desync rung can name a pinned strategy and then fall back to whatever
+// the KB prefers, and a tier can carry a UDP-native pool before a TCP one.
 type ChainStep struct {
-	Tier   string
-	Action Action
+	Tier   string `yaml:"tier"`
+	Action Action `yaml:",inline"`
 }
 
 type Action struct {
@@ -55,18 +67,27 @@ type VPNAction struct {
 	Pool string `yaml:"pool"`
 }
 
+// Unmarshalling is hand-rolled because the step is a flat mapping with an
+// optional `tier` key plus exactly one action key, which a struct tag cannot
+// express.
 func (s *ChainStep) UnmarshalYAML(node *yaml.Node) error {
-	if node.Kind != yaml.MappingNode || len(node.Content) != 2 {
-		return fmt.Errorf("chain step must be a single tier mapping")
-	}
-	tier := node.Content[0].Value
-	if !contains(ChainTiers, tier) {
-		return fmt.Errorf("unknown chain tier %q", tier)
+	if node.Kind != yaml.MappingNode {
+		return fmt.Errorf("chain step must be a mapping")
 	}
 	var action Action
-	if err := node.Content[1].Decode(&action); err != nil {
+	if err := node.Decode(&action); err != nil {
 		return err
 	}
-	s.Tier, s.Action = tier, action
+	for i := 0; i+1 < len(node.Content); i += 2 {
+		if node.Content[i].Value != "tier" {
+			continue
+		}
+		tier := node.Content[i+1].Value
+		if tier != "" && !contains(ChainTiers, tier) {
+			return fmt.Errorf("unknown chain tier %q", tier)
+		}
+		s.Tier = tier
+	}
+	s.Action = action
 	return nil
 }

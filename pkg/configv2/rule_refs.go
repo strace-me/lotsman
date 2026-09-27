@@ -30,7 +30,10 @@ func (r *Rule) ValidateReferences(cfg *Configuration, strategies map[string][]st
 			if !instance.Enabled {
 				return fmt.Errorf("rule %q uses disabled desync instance %q", r.ID, desync.Instance)
 			}
-			if !contains(strategies[desync.Instance], desync.Strategy) {
+			// "auto" is not a bundle: it is the rung deferring to what the KB has
+			// learned, and the store never holds a file by that name. Looking it up
+			// would reject exactly the rungs v1 left unpinned.
+			if desync.Strategy != AutoStrategy && !contains(strategies[desync.Instance], desync.Strategy) {
 				return fmt.Errorf("rule %q references unknown strategy %q on instance %q", r.ID, desync.Strategy, desync.Instance)
 			}
 		}

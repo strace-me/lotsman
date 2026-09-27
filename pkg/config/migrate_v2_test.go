@@ -105,37 +105,70 @@ func TestMigrateDropsRuntimeOnlyState(t *testing.T) {
 	}
 }
 
-func TestMigrateRejectsRepeatedTier(t *testing.T) {
-	doc, err := ParseDocument([]byte(`
-services:
-  - name: Two VPNs
-    chain:
-      - { state: VPN, class: vpn, strategy_id: a }
-      - { state: VPN, class: vpn, strategy_id: b }
-`))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := MigrateToV2(doc, nil); err == nil {
-		t.Fatal("two VPN rungs collapsed into one tier without an error")
-	}
-}
-
-func TestMigrateRejectsMissingDesyncPolicy(t *testing.T) {
+func TestMigrateKeepsRepeatedTiers(t *testing.T) {
 	doc, err := ParseDocument([]byte(`
 zapret:
   instances: [{ name: nfqws1-main }]
 services:
-  - name: YouTube
-    domains: [googlevideo.com]
+  - name: Discord
     chain:
+      - { state: VPN, class: vpn, strategy_id: vpn_url_test_udp }
       - { state: PREFERRED, class: zapret }
+      - { state: VPN, class: vpn, strategy_id: vpn_url_test }
+      - { state: EMERGENCY, class: emergency, strategy_id: emergency_pool }
 `))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := MigrateToV2(doc, nil); err == nil {
-		t.Fatal("zapret rung without a strategy policy was silently accepted")
+	migration, err := MigrateToV2(doc, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	chain := migration.Rules[0].Chain
+	// The two VPN rungs are DIFFERENT pools: the UDP-native one first, then the
+	// TCP one. Collapsing them into one tier loses the ordering, and merging them
+	// into one pool loses the transport distinction.
+	want := []string{"fallback", "preferred", "fallback", "emergency"}
+	if len(chain) != len(want) {
+		t.Fatalf("chain = %#v", chain)
+	}
+	for i, tier := range want {
+		if chain[i].Tier != tier {
+			t.Fatalf("chain[%d] tier = %q, want %q (%#v)", i, chain[i].Tier, tier, chain)
+		}
+	}
+	if chain[0].Action.VPN.Pool != "vpn-url-test-udp" || chain[2].Action.VPN.Pool != "vpn-url-test" {
+		t.Errorf("the two VPN pools collapsed: %#v", chain)
+	}
+}
+
+func TestMigrateMakesAnUnpinnedZapretRungAuto(t *testing.T) {
+	// v1 left strategy_id empty on ALT_ZAPRET rungs to mean "let the KB choose".
+	// v2 has to say that out loud: a rung that named nothing used to look pinned
+	// to whatever happened to be selected.
+	doc, err := ParseDocument([]byte(`
+zapret:
+  instances: [{ name: nfqws1-main }]
+services:
+  - name: gaming-epic
+    domains: [epicgames.com]
+    chain:
+      - { state: PREFERRED, class: zapret, strategy_id: alt12 }
+      - { state: ALT_ZAPRET, class: zapret }
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	migration, err := MigrateToV2(doc, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	chain := migration.Rules[0].Chain
+	if chain[0].Action.Desync.Strategy != "alt12" {
+		t.Errorf("the pinned rung lost its strategy: %#v", chain[0].Action.Desync)
+	}
+	if chain[1].Action.Desync.Strategy != "auto" {
+		t.Errorf("the unpinned rung did not become auto: %#v", chain[1].Action.Desync)
 	}
 }
 

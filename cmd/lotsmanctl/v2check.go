@@ -273,6 +273,9 @@ func reportMigration(path, desyncStrategy string, note func(string, ...any)) {
 		return
 	}
 	fmt.Printf("migration of %s: %d rule(s), %d warning(s)\n", path, len(migration.Rules), len(migration.Warnings))
+	for _, rule := range migration.Rules {
+		fmt.Printf("  %-14s prio=%-4d %s\n", rule.ID, rule.Priority, chainSummary(rule))
+	}
 	for _, warning := range migration.Warnings {
 		fmt.Printf("  ! %s\n", warning)
 	}
