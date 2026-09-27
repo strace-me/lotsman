@@ -159,10 +159,22 @@ func main() {
 	// make a bug report answerable and a rollback something other than a hunt; the
 	// flag is the half that was missing.
 	showVersion := flag.Bool("version", false, "print the build identity and exit")
+	// Declared before Parse, like every other flag: registering afterwards is a
+	// silent "flag provided but not defined".
+	v2 := registerV2Flags(flag.CommandLine)
 	flag.Parse()
 	if *showVersion {
 		fmt.Println(version.String())
 		return
+	}
+
+	// A v2 config is validated and reported, and the process exits. It never starts
+	// the daemon: no socket, no queue, no engine, no rule installed. A preflight that
+	// had side effects would not be a preflight.
+	if *v2.config != "" {
+		// A preflight has side effects only if it lets the daemon run afterwards.
+		// Both outcomes exit: a valid config is a report, not a boot.
+		os.Exit(runV2Preflight(v2))
 	}
 
 	log := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelInfo}))
