@@ -61,7 +61,7 @@ func TestMigrateToV2(t *testing.T) {
 	if _, ok := m.Configuration.Desync.Instances["nfqws1-main"]; !ok {
 		t.Errorf("desync instances = %#v", m.Configuration.Desync.Instances)
 	}
-	if m.Configuration.Pools["vpn-url-test-udp"].Type != "urltest" {
+	if m.Configuration.Pools["vpn_url_test_udp"].Type != "urltest" {
 		t.Errorf("pools = %#v", m.Configuration.Pools)
 	}
 	if list := m.Configuration.Lists.Domains["youtube"]; list.Source != "runetfreedom" || list.Category != "youtube" {
@@ -82,7 +82,7 @@ func TestMigrateToV2(t *testing.T) {
 	if m.Rules[0].Chain[0].Action.Desync.Instance != "nfqws1-main" || m.Rules[0].Chain[0].Action.Desync.Strategy != "alt12" {
 		t.Errorf("desync rung = %#v", m.Rules[0].Chain[0])
 	}
-	if m.Rules[0].Chain[1].Tier != "fallback" || m.Rules[0].Chain[1].Action.VPN.Pool != "vpn-url-test-udp" {
+	if m.Rules[0].Chain[1].Tier != "fallback" || m.Rules[0].Chain[1].Action.VPN.Pool != "vpn_url_test_udp" {
 		t.Errorf("vpn rung = %#v", m.Rules[0].Chain[1])
 	}
 	if m.Rules[1].Enabled {
@@ -137,7 +137,9 @@ services:
 			t.Fatalf("chain[%d] tier = %q, want %q (%#v)", i, chain[i].Tier, tier, chain)
 		}
 	}
-	if chain[0].Action.VPN.Pool != "vpn-url-test-udp" || chain[2].Action.VPN.Pool != "vpn-url-test" {
+	// Pool names are the OPERATOR's, kept verbatim. Slugging them renames something
+	// of theirs in silence; the audit on the real config caught exactly that.
+	if chain[0].Action.VPN.Pool != "vpn_url_test_udp" || chain[2].Action.VPN.Pool != "vpn_url_test" {
 		t.Errorf("the two VPN pools collapsed: %#v", chain)
 	}
 }

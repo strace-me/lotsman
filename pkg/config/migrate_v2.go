@@ -47,7 +47,12 @@ func MigrateToV2(doc *Document, desyncStrategy DesyncStrategyFor) (*V2Migration,
 
 	m.Configuration.Pools = map[string]configv2.Pool{}
 	for name, pool := range doc.Pools {
-		m.Configuration.Pools[Slug(name)] = configv2.Pool{
+		// NOT slugged. A rule id becomes a file name, so it must be a safe token; a
+		// pool is a reference to a name the OPERATOR chose, and rewriting it renames
+		// something of theirs without saying so. The migration audit caught this:
+		// vpn_url_test_udp came out as vpn-url-test-udp, so every rule's fallback
+		// pointed at a name the operator never wrote.
+		m.Configuration.Pools[name] = configv2.Pool{
 			Type:        pool.Type,
 			Caps:        pool.Filter.Caps,
 			TagsInclude: pool.Filter.TagsInclude,
@@ -197,7 +202,7 @@ func migrateChain(ruleID string, steps []chainStepYAML, instance string, desyncS
 			if step.StrategyID == "" {
 				return nil, nil, fmt.Errorf("rule %q: class %q without strategy_id cannot name a pool", ruleID, step.Class)
 			}
-			out = append(out, configv2.ChainStep{Tier: tier, Action: configv2.Action{VPN: &configv2.VPNAction{Pool: Slug(step.StrategyID)}}})
+			out = append(out, configv2.ChainStep{Tier: tier, Action: configv2.Action{VPN: &configv2.VPNAction{Pool: step.StrategyID}}})
 		case strategy.ClassZapret:
 			// An empty strategy_id in v1 meant "the KB picks" — ALT_ZAPRET's whole
 			// purpose. v2 says that out loud as `auto` rather than leaving the rung
