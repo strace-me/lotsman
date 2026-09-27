@@ -253,6 +253,11 @@ for id, cls, proto, prov, raw, notes in RAW:
         continue
     rec = {
         "id": id,
+        # nfqws1 is the default rather than an omitted key: the generator only
+        # ever reads nfqws1 bundles today, and writing the engine out makes the
+        # field's existence visible before the first nfqws2 source is added —
+        # instead of a catalog whose one field about the engine is implicit.
+        "engine": "nfqws1",
         "provenance": prov,
         "target_class": cls,
         "protocol": proto,

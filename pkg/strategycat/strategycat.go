@@ -40,9 +40,16 @@ const (
 	ProtoQUIC Protocol = "quic"
 )
 
-// Recipe is one nfqws "--new" block plus its metadata.
+// Recipe is one desync "--new" block plus its metadata.
 type Recipe struct {
-	ID          string      `yaml:"id"`
+	ID string `yaml:"id"`
+	// Engine names the engine this recipe is written for, "nfqws1" or "nfqws2".
+	// Empty means nfqws1, so every existing entry keeps its meaning.
+	//
+	// It is not decoration. The two engines share no flag vocabulary — nfqws1 says
+	// `--dpi-desync=fake` and nfqws2 says `--lua-desync=fakedsplit` — so a recipe
+	// carried to the wrong engine does not fail validation, it fails to desync.
+	Engine      string      `yaml:"engine,omitempty"`
 	Provenance  string      `yaml:"provenance"`
 	TargetClass TargetClass `yaml:"target_class"`
 	Protocol    Protocol    `yaml:"protocol"`
@@ -109,6 +116,15 @@ type catalog struct {
 
 // Load parses the embedded catalog and returns all recipes in catalog order.
 // It panics if the embedded data is malformed (it is generated and tested).
+// EngineOf reports which engine a recipe is written for, defaulting to nfqws1 so
+// the 70 existing entries keep their meaning without being rewritten.
+func (r Recipe) EngineOf() string {
+	if r.Engine == "" {
+		return "nfqws1"
+	}
+	return r.Engine
+}
+
 func Load() []Recipe {
 	recipes, err := load()
 	if err != nil {
