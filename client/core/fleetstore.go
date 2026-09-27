@@ -3,6 +3,7 @@ package core
 import (
 	"context"
 	"encoding/json"
+	"github.com/strace-me/lotsman/pkg/atomicfile"
 	"os"
 	"path/filepath"
 	"time"
@@ -57,16 +58,10 @@ func (c *Core) saveFleet(nodes []subscription.Node) {
 	if err != nil {
 		return
 	}
-	tmp := p + ".tmp"
 	// 0600 and root-only: these carry node credentials, exactly like the config and
 	// the generated sing-box file next to them.
-	if err := os.WriteFile(tmp, b, 0o600); err != nil {
+	if err := atomicfile.Write(p, b, 0o600); err != nil {
 		c.log.Warn("could not save the fleet snapshot", "path", p, "err", err)
-		return
-	}
-	if err := os.Rename(tmp, p); err != nil {
-		os.Remove(tmp)
-		c.log.Warn("could not replace the fleet snapshot", "path", p, "err", err)
 	}
 }
 

@@ -29,6 +29,7 @@ package hostdns
 import (
 	"context"
 	"fmt"
+	"github.com/strace-me/lotsman/pkg/atomicfile"
 	"log/slog"
 	"net"
 	"os"
@@ -267,28 +268,11 @@ func (m *Manager) usableResolvers(raw []byte) []string {
 	return out
 }
 
-// writeFileAtomic writes via a temp file in the same directory and renames, so a
-// reader never sees a half-written resolv.conf. Same-dir keeps the rename on one
-// filesystem. The file is world-readable (resolv.conf must be) at 0644.
+// writeFileAtomic writes through the shared helper: a reader must never see a
+// half-written resolv.conf, and the file has to be world-readable (resolv.conf
+// is read by everything on the box) — hence 0644.
 func writeFileAtomic(path string, data []byte) error {
-	dir := filepath.Dir(path)
-	tmp, err := os.CreateTemp(dir, ".resolv.conf.*")
-	if err != nil {
-		return err
-	}
-	tmpName := tmp.Name()
-	defer os.Remove(tmpName) // no-op after a successful rename
-	if _, err := tmp.Write(data); err != nil {
-		tmp.Close()
-		return err
-	}
-	if err := tmp.Close(); err != nil {
-		return err
-	}
-	if err := os.Chmod(tmpName, 0o644); err != nil {
-		return err
-	}
-	return os.Rename(tmpName, path)
+	return atomicfile.Write(path, data, 0o644)
 }
 
 // Sentinel reports the in-tun address the host is (or will be) pointed at.

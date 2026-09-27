@@ -3,6 +3,7 @@ package core
 import (
 	"encoding/json"
 	"fmt"
+	"github.com/strace-me/lotsman/pkg/atomicfile"
 	"io"
 	"log/slog"
 	"net"
@@ -430,9 +431,5 @@ func readConfigDoc(r *http.Request) (configDoc, error) {
 // writeFileAtomic writes via a temp file + rename, so a crash mid-write cannot
 // leave a half-written (unparseable) config that the next start would choke on.
 func writeFileAtomic(path string, data []byte, perm os.FileMode) error {
-	tmp := path + ".tmp"
-	if err := os.WriteFile(tmp, data, perm); err != nil {
-		return err
-	}
-	return os.Rename(tmp, path)
+	return atomicfile.Write(path, data, perm)
 }

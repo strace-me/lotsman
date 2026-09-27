@@ -6,6 +6,7 @@ package kb
 
 import (
 	"encoding/json"
+	"github.com/strace-me/lotsman/pkg/atomicfile"
 	"math"
 	"os"
 	"sort"
@@ -96,11 +97,7 @@ func (k *KB) Save(path string) error {
 	if err != nil {
 		return err
 	}
-	tmp := path + ".tmp"
-	if err := os.WriteFile(tmp, data, 0o644); err != nil {
-		return err
-	}
-	return os.Rename(tmp, path)
+	return atomicfile.Write(path, data, 0o644)
 }
 
 // Load merges saved records into the KB. A missing file is a cold start (nil,

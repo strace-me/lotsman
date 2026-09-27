@@ -6,6 +6,7 @@ package state
 
 import (
 	"encoding/json"
+	"github.com/strace-me/lotsman/pkg/atomicfile"
 	"os"
 	"path/filepath"
 	"strings"
@@ -38,11 +39,7 @@ func (s *FileStore) Save(positions map[string]int) error {
 	if err != nil {
 		return err
 	}
-	tmp := s.path + ".tmp"
-	if err := os.WriteFile(tmp, data, 0o644); err != nil {
-		return err
-	}
-	return os.Rename(tmp, s.path)
+	return atomicfile.Write(s.path, data, 0o644)
 }
 
 // PathFor derives a per-network store path from a base one: /var/lib/lotsman/

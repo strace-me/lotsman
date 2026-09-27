@@ -2,6 +2,7 @@ package reconcile
 
 import (
 	"encoding/json"
+	"github.com/strace-me/lotsman/pkg/atomicfile"
 	"os"
 )
 
@@ -43,9 +44,5 @@ func (s *BaselineStore) Save(n int) error {
 	if err != nil {
 		return err
 	}
-	tmp := s.path + ".tmp"
-	if err := os.WriteFile(tmp, data, 0o644); err != nil {
-		return err
-	}
-	return os.Rename(tmp, s.path)
+	return atomicfile.Write(s.path, data, 0o644)
 }

@@ -1,9 +1,8 @@
 package remctl
 
 import (
-	"fmt"
+	"github.com/strace-me/lotsman/pkg/atomicfile"
 	"log/slog"
-	"os"
 
 	"github.com/strace-me/lotsman/pkg/singbox"
 )
@@ -72,17 +71,10 @@ func (h HotActions) write(tag string, body []byte) error {
 	return atomicWrite(path, body)
 }
 
-// atomicWrite writes body to path via a temp file + rename (so a reader/sing-box
-// never sees a half-written rule_set).
+// atomicWrite writes body through the shared helper, so a reader (or sing-box
+// hot-reloading the rule_set) never sees a half-written file.
 func atomicWrite(path string, body []byte) error {
-	tmp := path + ".tmp"
-	if err := os.WriteFile(tmp, body, 0o644); err != nil {
-		return fmt.Errorf("write %s: %w", tmp, err)
-	}
-	if err := os.Rename(tmp, path); err != nil {
-		return fmt.Errorf("rename %s: %w", path, err)
-	}
-	return nil
+	return atomicfile.Write(path, body, 0o644)
 }
 
 func (h HotActions) log() *slog.Logger {

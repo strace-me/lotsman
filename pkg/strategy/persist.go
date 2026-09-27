@@ -3,6 +3,7 @@ package strategy
 import (
 	"encoding/json"
 	"fmt"
+	"github.com/strace-me/lotsman/pkg/atomicfile"
 	"os"
 )
 
@@ -40,15 +41,7 @@ func SaveDefinitions(path string, defs []Definition) error {
 	if err != nil {
 		return err
 	}
-	tmp := path + ".tmp"
-	if err := os.WriteFile(tmp, data, 0o644); err != nil {
-		return err
-	}
-	if err := os.Rename(tmp, path); err != nil {
-		os.Remove(tmp)
-		return err
-	}
-	return nil
+	return atomicfile.Write(path, data, 0o644)
 }
 
 // MergeDefinitions merges incoming over existing by ID (incoming wins for a

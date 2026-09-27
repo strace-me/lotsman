@@ -16,6 +16,7 @@ package prospect
 import (
 	"encoding/json"
 	"fmt"
+	"github.com/strace-me/lotsman/pkg/atomicfile"
 	"maps"
 	"os"
 	"path/filepath"
@@ -282,11 +283,7 @@ func (s *Store) Save() error {
 	if err := os.MkdirAll(filepath.Dir(s.path), 0o755); err != nil {
 		return err
 	}
-	tmp := s.path + ".tmp"
-	if err := os.WriteFile(tmp, append(body, '\n'), 0o644); err != nil {
-		return err
-	}
-	return os.Rename(tmp, s.path)
+	return atomicfile.Write(s.path, append(body, '\n'), 0o644)
 }
 
 func contains(hay []string, s string) bool {
