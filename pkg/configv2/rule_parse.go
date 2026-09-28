@@ -28,6 +28,9 @@ func (r *Rule) Validate() error {
 	if r.Probe != nil && !contains(ProbeTypes, r.Probe.Type) {
 		return fmt.Errorf("rule %q has unknown probe type %q", r.ID, r.Probe.Type)
 	}
+	if err := r.Behavior.Validate(r.ID); err != nil {
+		return err
+	}
 	if len(r.Chain) == 0 {
 		return fmt.Errorf("rule %q has an empty chain", r.ID)
 	}

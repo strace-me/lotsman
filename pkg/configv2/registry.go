@@ -99,6 +99,25 @@ func buildService(cfg *Configuration, rule Rule, domains, ips map[string]listVal
 		service.ProbeType = rule.Probe.Type
 		service.ProbeTarget = rule.Probe.Target
 	}
+	// The behaviour knobs carry across as they are. Two of them need care, and the
+	// care is the point: `sticky` is a POINTER in v1 so that unset (take the
+	// default) is distinct from false (override a default of true), and a plain bool
+	// here would turn every rule that says nothing into a rule that asks to flap.
+	if rule.Behavior.Sticky != nil {
+		service.Sticky = *rule.Behavior.Sticky
+	}
+	service.Profile = rule.Behavior.Profile
+	service.SpreadClients = append([]string{}, rule.Behavior.SpreadClients...)
+	service.EscalateAfter = rule.Behavior.EscalateAfter
+	service.RecoverAfter = rule.Behavior.RecoverAfter
+	service.TLSFragment = rule.Behavior.TLSFragment
+	// ExcludeDomains is deliberately NOT set. In v1 it was a per-service list fed
+	// to the composer as --hostlist-exclude-domains. v2 carries no such field: an
+	// exclusion is a property of the STRATEGY BUNDLE, which declares its own
+	// --hostlist-exclude, because the exclusion exists to survive the moment the
+	// strategy is applied and the rule is the only thing that applies it. Leaving
+	// it empty here keeps the rule from re-asserting something the bundle already
+	// owns.
 	if rule.Volume != nil {
 		service.VolumeTarget, service.VolumeTargets = volumeTargets(rule.Volume)
 		service.VolumeBytes = int(rule.Volume.MinBytes)

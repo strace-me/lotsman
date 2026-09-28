@@ -1,6 +1,10 @@
 package configv2
 
-import "testing"
+import (
+	"testing"
+
+	"gopkg.in/yaml.v3"
+)
 
 func sampleRule(id string, priority int, chain ...ChainStep) Rule {
 	return Rule{
@@ -116,5 +120,73 @@ func TestBuildRegistryPicksTheFirstVolumeTargetAsPrimary(t *testing.T) {
 	}
 	if service.VolumeBytes != 65536 {
 		t.Errorf("volume bytes = %d", service.VolumeBytes)
+	}
+}
+
+func TestBridgeCarriesBehaviourAcross(t *testing.T) {
+	// The bridge is the seam that makes a v2 cutover a parser swap instead of a
+	// rewrite, so a field it forgets is a field the operator sets and the runtime
+	// never sees. Measured once already: the first bridge dropped all seven of
+	// these. This is the guard against it happening quietly again.
+	sticky, unpinned := true, false
+	rule := sampleRule("a", 0, ChainStep{Tier: "preferred", Action: Action{VPN: &VPNAction{Pool: "p"}}})
+	rule.Behavior = Behavior{
+		Sticky:        &sticky,
+		Profile:       "voice",
+		SpreadClients: []string{"192.168.1.0/24"},
+		EscalateAfter: 3,
+		RecoverAfter:  5,
+		TLSFragment:   true,
+	}
+	reg, err := BuildRegistry(nil, []Rule{rule}, nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := reg.Services["a"]
+	if !got.Sticky || got.Profile != "voice" || got.EscalateAfter != 3 || got.RecoverAfter != 5 || !got.TLSFragment {
+		t.Errorf("behaviour did not survive the bridge: %+v", got)
+	}
+	if len(got.SpreadClients) != 1 || got.SpreadClients[0] != "192.168.1.0/24" {
+		t.Errorf("spread clients = %#v", got.SpreadClients)
+	}
+
+	// Unset must not read as an opinion. A rule that says nothing about sticky
+	// takes the global default, and a plain bool would have turned every silent
+	// rule into one that asks to flap by latency.
+	quiet := sampleRule("b", 0, ChainStep{Tier: "preferred", Action: Action{VPN: &VPNAction{Pool: "p"}}})
+	reg, err = BuildRegistry(nil, []Rule{quiet}, nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if reg.Services["b"].Sticky {
+		t.Error("a rule that never mentioned sticky came out sticky")
+	}
+
+	// An explicit false is not the same as unset and must not be lost either.
+	rule = quiet
+	rule.Behavior.Sticky = &unpinned
+	reg, err = BuildRegistry(nil, []Rule{rule}, nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if reg.Services["b"].Sticky {
+		t.Error("an explicit sticky:false was dropped")
+	}
+}
+
+func TestRuleRejectsAnUnknownTrafficClass(t *testing.T) {
+	// A class the balancer does not know would be treated as general, and the
+	// rule would quietly get the wrong node weighting — the enum table is the
+	// single source of truth, so an unknown value must fail the load.
+	rule := sampleRule("a", 0, ChainStep{Tier: "preferred", Action: Action{VPN: &VPNAction{Pool: "p"}}})
+	rule.Behavior.Profile = "cinema"
+	rule.ID = "a"
+	data, err := yaml.Marshal(rule)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// ParseRule validates on the way in, which is the path a real load takes.
+	if _, err := ParseRule(data); err == nil {
+		t.Fatal("an unknown traffic class was accepted")
 	}
 }
