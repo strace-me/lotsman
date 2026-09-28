@@ -1115,3 +1115,33 @@ func Generate(services []registry.Service, devices []registry.Device, nodes []su
 	res.JSON = out
 	return res, nil
 }
+
+// ThroughputByNodeID re-keys per-exit throughput measurements from sing-box
+// outbound tags onto subscription node IDs.
+//
+// The two spaces are different and the mismatch is silent, which is why this
+// function exists rather than a caller doing the lookup itself. `observe` counts
+// bytes per `Conn.Chains[0]`, which is an outbound TAG; `pools` ranks membership
+// by `Node.ID`. A map passed straight from one to the other matches nothing, the
+// pool quietly keeps every node, and the defect returns as "I configured a
+// speedtest_top pool and nothing happened" — which is exactly how a broken
+// throughput ranking survived a release.
+//
+// Entries whose tag belongs to no node in `nodes` are dropped rather than
+// guessed: "direct" and the selector groups come out of the same connection
+// table, and inventing a member for them would rank a pool on the local exit.
+func ThroughputByNodeID(nodes []subscription.Node, byTag map[string]float64) map[string]float64 {
+	out := make(map[string]float64, len(byTag))
+	for _, n := range nodes {
+		tag, ok := NodeTag(n)
+		if !ok {
+			continue
+		}
+		kbps, measured := byTag[tag]
+		if !measured || kbps <= 0 {
+			continue
+		}
+		out[n.ID] = kbps
+	}
+	return out
+}
