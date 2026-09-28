@@ -44,6 +44,26 @@ pools:
   vpn_url_test_udp: { type: url_test, warmup: true, filter: { caps: [udp_native], tags_exclude: [emergency], countries_exclude: [ru] } } # hy2 (UDP-native), foreign exit; warmup=always hot for instant voice/QUIC failover
   emergency_pool:   { type: url_test, filter: { tags_include: [emergency] } }
 
+  # A SECOND exit for volume. A url_test pool answers with ONE node, so every rule
+  # pointed at vpn_url_test shares that exit — measured on the live fleet as 11
+  # rules on one node and ~330 KiB/s shared, while every target answered 200 in
+  # under 0.3s (LOT-69). Declaring another pool is the only existing lever, and
+  # giving the bulk rules their own is what breaks the monoculture today.
+  #
+  # Two things are deliberately NOT hidden here:
+  #
+  #  - `limit` with type speedtest_top is NOT this pool. sing-box has exactly two
+  #    selectors (selector, urltest) and BOTH pick by latency, so "the fastest
+  #    exit" cannot be expressed as a selector. speedtest_top instead narrows the
+  #    MEMBER LIST by measured throughput and lets urltest choose inside it. That
+  #    needs the out-of-band scan, and below is the plain urltest form that works
+  #    today with no measurement at all. Swap in speedtest_top when coverage is up.
+  #
+  #  - countries_exclude is the crude half: it keeps volume off RU exits and off
+  #    the owner's own server, which is where the saturation showed up. It does
+  #    not know a node is fast, only that it is somewhere else.
+  vpn_bulk:        { type: url_test, warmup: true, filter: { caps: [tcp], tags_exclude: [emergency], countries_exclude: [ru, de] } }
+
 services:
   # RU-direct — Russian sites (banks, gov, RU content) ALWAYS direct, никогда в VPN.
   # priority: -10 emits this FIRST, so a domain that appears in BOTH geosite-ru and
@@ -67,6 +87,12 @@ services:
     sticky: true
     profile: streaming
     chain:
+      # Volume goes to its OWN pool, not the shared one. This is the whole point
+      # of vpn_bulk: a url_test pool answers with a single node, so YouTube
+      # sharing vpn_url_test with the other ten rules is what put eleven rules on
+      # one exit at ~330 KiB/s (LOT-69). Streaming is the heaviest rule here, so
+      # it is the one that gets the second exit.
+      - { state: VPN,       class: vpn,       strategy_id: vpn_bulk }         # own exit: volume off the shared pool
       - { state: VPN,       class: vpn,       strategy_id: vpn_url_test_udp } # hy2, native UDP
       - { state: VPN,       class: vpn,       strategy_id: vpn_url_test }     # VLESS fallback if hy2 dies
       - { state: EMERGENCY, class: emergency, strategy_id: emergency_pool }
