@@ -46,6 +46,32 @@ func (r *Rule) ValidateReferences(cfg *Configuration, strategies map[string][]st
 	return nil
 }
 
+// ValidateDevices checks a device block: it must name sources, and its policy
+// must be a reserved keyword or a pool that exists. A policy naming an undeclared
+// pool is a load error rather than a device that quietly gets no override at
+// all — which would read as "the PS5 is not going through VPN any more" with
+// nothing in the log to say why.
+func ValidateDevices(cfg *Configuration) error {
+	for _, d := range cfg.Devices {
+		if d.Name == "" {
+			return fmt.Errorf("a device has no name")
+		}
+		if len(d.Sources) == 0 {
+			return fmt.Errorf("device %q has no sources", d.Name)
+		}
+		if d.Policy == "" {
+			return fmt.Errorf("device %q has no policy", d.Name)
+		}
+		if d.Policy == "direct" || d.Policy == "block" {
+			continue
+		}
+		if _, ok := cfg.Pools[d.Policy]; !ok {
+			return fmt.Errorf("device %q names unknown pool %q", d.Name, d.Policy)
+		}
+	}
+	return nil
+}
+
 // ValidateReferencesAll reports the first broken reference across rules.
 func ValidateReferencesAll(cfg *Configuration, rules []Rule, strategies map[string][]string) error {
 	for _, rule := range rules {

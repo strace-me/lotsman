@@ -105,3 +105,35 @@ chain:
 		}
 	}
 }
+
+func TestDevicesAcceptARealConsoleAndRefuseADanglingPool(t *testing.T) {
+	// The owner runs a console that will not work on a Russian ISP and sends it
+	// through the tunnel; that is the whole reason this block exists. It is an
+	// EGRESS override, not a way to pick per-flow treatment, which the treatment
+	// matrix forbids and which rules already do.
+	cfg := &Configuration{Pools: map[string]Pool{"vpn_url_test": {Type: "url_test"}}}
+	cfg.Devices = []Device{{Name: "ps5", Sources: []string{"192.168.1.50"}, Policy: "vpn_url_test"}}
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("a device pointing at a declared pool was refused: %v", err)
+	}
+	for _, keyword := range []string{"direct", "block"} {
+		cfg.Devices = []Device{{Name: "ps5", Sources: []string{"192.168.1.50"}, Policy: keyword}}
+		if err := cfg.Validate(); err != nil {
+			t.Errorf("policy %q was refused: %v", keyword, err)
+		}
+	}
+
+	// A device naming a pool nobody declared is a load error, NOT a device that
+	// quietly gets no override: the symptom would be "the PS5 stopped going
+	// through VPN" with nothing in the log to explain it.
+	cfg.Devices = []Device{{Name: "ps5", Sources: []string{"192.168.1.50"}, Policy: "typo_pool"}}
+	if err := cfg.Validate(); err == nil {
+		t.Error("a device naming an undeclared pool was accepted")
+	}
+	// No sources means no client matches, and a device that matches nothing is
+	// indistinguishable from one that was never written.
+	cfg.Devices = []Device{{Name: "ps5", Policy: "direct"}}
+	if err := cfg.Validate(); err == nil {
+		t.Error("a device with no sources was accepted")
+	}
+}

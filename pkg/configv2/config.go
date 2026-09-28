@@ -22,7 +22,23 @@ type Configuration struct {
 	DataSources   map[string]DataSource `yaml:"data_sources"`
 	Lists         Lists                 `yaml:"lists"`
 	Pools         map[string]Pool       `yaml:"pools"`
+	Devices       []Device              `yaml:"devices"`
 	Subscriptions []Subscription        `yaml:"subscriptions"`
+}
+
+// Device is a per-LAN-client egress override: every source IP or CIDR listed
+// here leaves through Policy, whatever the rules say.
+//
+// This is the OWNER'S escape hatch and it is deliberately coarse: a console that
+// will not work on a Russian ISP goes to the tunnel, and that is the whole point.
+// The treatment matrix says a device may not decide how a specific FLOW is
+// handled — the mode is a property of the traffic, not of the source — and this
+// type does not do that. It only moves the exit. Per-flow treatment belongs to
+// rules.
+type Device struct {
+	Name    string   `yaml:"name"`
+	Sources []string `yaml:"sources"`
+	Policy  string   `yaml:"policy"` // "direct" | "block" | a pool name
 }
 
 type Pool struct {

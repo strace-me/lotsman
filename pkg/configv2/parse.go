@@ -67,6 +67,9 @@ func (c *Configuration) Validate() error {
 			return fmt.Errorf("desync instance %q has invalid nft table %q", name, instance.Table)
 		}
 	}
+	if err := ValidateDevices(c); err != nil {
+		return err
+	}
 	for name, source := range c.DataSources {
 		if source.Type == "" {
 			return fmt.Errorf("data source %q has no type", name)
