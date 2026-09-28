@@ -269,9 +269,10 @@ func (r *Reconciler) Reconcile(ctx context.Context) error {
 		// every node reads exactly like a narrowed one from the config alone, and
 		// "I configured it and nothing happened" is the symptom that let this
 		// survive a release.
-		if report.Unmeasured > 0 {
+		if report.Unknown > 0 {
 			r.Log.Warn("reconcile: throughput pool not fully ranked",
-				"pool", name, "unmeasured", report.Unmeasured, "ranked", report.Ranked, "kept", report.Kept)
+				"pool", name, "unknown", report.Unknown, "frozen", report.Frozen,
+				"ranked", report.Ranked, "kept", report.Kept)
 		}
 		if report.Uncovered {
 			// The dangerous one. The measurement is inbound, so a pool observed
@@ -279,8 +280,8 @@ func (r *Reconciler) Reconcile(ctx context.Context) error {
 			// collapse to one member — the very monoculture the pool was meant to
 			// break up, wearing the costume of a successful narrowing.
 			r.Log.Warn("reconcile: throughput pool not narrowed, too few exits measured",
-				"pool", name, "coverage", report.Coverage, "measured", report.Ranked,
-				"unmeasured", report.Unmeasured, "kept", report.Kept,
+				"pool", name, "coverage", report.Coverage, "measured", report.Measured,
+				"ranked", report.Ranked, "unknown", report.Unknown, "kept", report.Kept,
 				"note", "throughput is observed per exit, so exits nobody is using are invisible; seeding them needs an out-of-band probe")
 		}
 		if report.Filled {

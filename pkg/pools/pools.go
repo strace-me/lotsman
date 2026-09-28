@@ -196,7 +196,7 @@ func (s *Set) Memberships(nodes []subscription.Node) map[string][]subscription.N
 		if p.Type == TypeSpeedtestTop {
 			// A throughput pool with no measurements at all: the filter's members
 			// are kept, and the report records that the ranking never ran.
-			reports[name] = ThroughputReport{Unmeasured: len(members), Ranked: 0, Kept: len(members), Filled: true}
+			reports[name] = ThroughputReport{Unknown: len(members), Measured: 0, Ranked: 0, Kept: len(members), Filled: true}
 		}
 	}
 	if s.Reports == nil {
@@ -241,10 +241,20 @@ type ThroughputReport struct {
 	// Uncovered marks a decision that was NOT made, so the caller can say so
 	// instead of the config looking identical to a successful narrowing.
 	Uncovered bool
-	// Unmeasured is how many nodes the filter admitted but no measurement covers.
-	// They are NOT ranked: guessing a band from an absent measurement is how a
-	// dead node wins a throughput race.
-	Unmeasured int
+	// Unknown is how many admitted nodes carry no measurement at all. They are
+	// NOT ranked: guessing a band from an absent measurement is how a dead node
+	// wins a throughput race.
+	Unknown int
+	// Frozen is how many were MEASURED and carried nothing. This is the opposite
+	// of Unknown — a known rate of zero — and the two must never share a counter,
+	// because conflating them understates coverage: a fleet of 20 where 15 carry
+	// and 5 are frozen is fully measured, and calling it 75% covered makes the
+	// gate refuse a decision it has the data for. quality.GoodputKnown exists for
+	// the same reason.
+	Frozen int
+	// Measured is how many were measured at all, zero or not. Coverage is computed
+	// from this, never from the ranked subset.
+	Measured int
 	// Ranked is how many nodes the ranking actually ordered.
 	Ranked int
 	// Kept is the resulting member count.
@@ -280,8 +290,14 @@ func (p Pool) TopByThroughput(nodes []subscription.Node, goodput map[string]floa
 	var measured []ranked
 	for _, n := range admitted {
 		kbps, ok := goodput[n.ID]
-		if !ok || kbps <= 0 {
-			report.Unmeasured++
+		if !ok {
+			report.Unknown++
+			continue
+		}
+		if kbps <= 0 {
+			// Measured, and it carried nothing: a known rate of zero. Counted as
+			// measured, ranked as nothing.
+			report.Frozen++
 			continue
 		}
 		measured = append(measured, ranked{node: n, kbps: kbps})
@@ -295,7 +311,8 @@ func (p Pool) TopByThroughput(nodes []subscription.Node, goodput map[string]floa
 	// Coverage gate. This is a THIRD outcome, distinct from "nothing measured":
 	// here some exits are measured and some are not, and ranking on the measured
 	// subset alone would silently reward being the only one in use.
-	coverage := float64(len(measured)) / float64(len(admitted))
+	report.Measured = len(measured) + report.Frozen
+	coverage := float64(report.Measured) / float64(len(admitted))
 	report.Coverage = coverage
 	minCoverage := p.MinCoverage
 	if minCoverage <= 0 {
