@@ -73,6 +73,18 @@ type Reconciler struct {
 	// The controller updates the backing map and calls Reconcile to apply/revert.
 	Remediations func() map[string]singbox.Remediation
 
+	// Throughput supplies per-exit throughput keyed by sing-box outbound tag —
+	// `observe` already counts it that way, from byte deltas in the connection
+	// table, so nothing is probed. nil means no measurement, and a speedtest_top
+	// pool then keeps its whole filter and says so.
+	//
+	// This is the ONE link that was missing between measuring a node and acting
+	// on it. The ranker recorded the same numbers and deliberately did not let
+	// them touch ranking or membership ("acts_on_ranking=false"); `balancer`
+	// weights a Bandwidth term that no producer ever filled, which is why ranking
+	// collapsed to latency and 108 nodes used one exit (LOT-69).
+	Throughput func() map[string]float64
+
 	// ActiveRealtimeUDP, when set, reports whether a live voice/RTC UDP flow is
 	// currently in progress (and one such service name, for logging). A sing-box
 	// restart tears active UDP conntrack/NAT, breaking a live call until the client
@@ -241,7 +253,28 @@ func (r *Reconciler) Reconcile(ctx context.Context) error {
 		}
 	}
 
+	// Feed the measurements in before membership is computed, because membership
+	// is what reads them. Done here, in the component that owns the live config,
+	// so the daemon and the client get it identically — a hook wired in only one
+	// root is the failure this project has already paid for (LOT-65).
+	if r.Throughput != nil {
+		r.Pools.Goodput = singbox.ThroughputByNodeID(nodes, r.Throughput())
+	}
 	memberships := r.Pools.Memberships(nodes)
+	for name, report := range r.Pools.Reports {
+		// Say what the ranking could not decide. A speedtest_top pool that kept
+		// every node reads exactly like a narrowed one from the config alone, and
+		// "I configured it and nothing happened" is the symptom that let this
+		// survive a release.
+		if report.Unmeasured > 0 {
+			r.Log.Warn("reconcile: throughput pool not fully ranked",
+				"pool", name, "unmeasured", report.Unmeasured, "ranked", report.Ranked, "kept", report.Kept)
+		}
+		if report.Filled {
+			r.Log.Warn("reconcile: throughput pool fell back to its whole filter (no ranking ran)",
+				"pool", name, "kept", report.Kept, "reason", "no per-exit throughput measured")
+		}
+	}
 	opts := r.Opts
 	opts.PoolOpts = singbox.PoolOptionsFrom(r.Pools)
 	if r.TunExcludes != nil && opts.Tun != nil {
