@@ -73,16 +73,19 @@ type Reconciler struct {
 	// The controller updates the backing map and calls Reconcile to apply/revert.
 	Remediations func() map[string]singbox.Remediation
 
-	// Throughput supplies per-exit throughput keyed by sing-box outbound tag —
-	// `observe` already counts it that way, from byte deltas in the connection
-	// table, so nothing is probed. nil means no measurement, and a speedtest_top
-	// pool then keeps its whole filter and says so.
+	// Throughput supplies measured per-node throughput, keyed by
+	// subscription.Node ID — the node's own identity, not a sing-box tag.
 	//
-	// This is the ONE link that was missing between measuring a node and acting
-	// on it. The ranker recorded the same numbers and deliberately did not let
-	// them touch ranking or membership ("acts_on_ranking=false"); `balancer`
-	// weights a Bandwidth term that no producer ever filled, which is why ranking
-	// collapsed to latency and 108 nodes used one exit (LOT-69).
+	// Keying by Node ID is deliberate: the tag is a generator detail, and a
+	// reconciler that spoke tags would be coupled to how the outbound happens to
+	// be named. Two producers with different keyspaces (observe counts per exit
+	// tag; an out-of-band scanner measures per node) re-key at THEIR end.
+	//
+	// This is the link that was missing between measuring a node and acting on
+	// it. The ranker recorded the same numbers and deliberately did not let them
+	// touch ranking or membership ("acts_on_ranking=false"), and `balancer`
+	// weights a Bandwidth term no producer filled, which is why ranking collapsed
+	// to latency and 108 nodes used one exit (LOT-69).
 	Throughput func() map[string]float64
 
 	// ActiveRealtimeUDP, when set, reports whether a live voice/RTC UDP flow is
@@ -258,7 +261,7 @@ func (r *Reconciler) Reconcile(ctx context.Context) error {
 	// so the daemon and the client get it identically — a hook wired in only one
 	// root is the failure this project has already paid for (LOT-65).
 	if r.Throughput != nil {
-		r.Pools.Goodput = singbox.ThroughputByNodeID(nodes, r.Throughput())
+		r.Pools.Goodput = r.Throughput()
 	}
 	memberships := r.Pools.Memberships(nodes)
 	for name, report := range r.Pools.Reports {
