@@ -264,7 +264,10 @@ type chainStepYAML struct {
 }
 
 type poolYAML struct {
-	Type        string     `yaml:"type"`
+	Type string `yaml:"type"`
+	// Limit is speedtest_top's member cap: how many of the fastest nodes to keep.
+	// It is ignored by url_test, which is a selector and not a ranking.
+	Limit       int        `yaml:"limit"`
 	Filter      filterYAML `yaml:"filter"`
 	Warmup      bool       `yaml:"warmup"`       // keep this pool always-hot (idle_timeout 0s) for instant failover
 	Interval    string     `yaml:"interval"`     // url-test probe period, e.g. "1m" (empty = default)
@@ -978,6 +981,7 @@ func buildPools(in map[string]poolYAML) (*pools.Set, error) {
 		set.Pools[name] = pools.Pool{
 			Name:        name,
 			Type:        p.Type,
+			Limit:       p.Limit,
 			Warmup:      p.Warmup,
 			Interval:    p.Interval,
 			IdleTimeout: p.IdleTimeout,

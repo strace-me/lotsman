@@ -46,6 +46,7 @@ type Filter struct {
 type Pool struct {
 	Name        string
 	Type        string
+	Limit       int // TypeSpeedtestTop: keep this many fastest nodes; 0/≥candidates = no narrowing
 	Filter      Filter
 	Warmup      bool   // never let this pool sleep; keep its nodes continuously probed for instant failover
 	Interval    string // url-test probe period (e.g. "1m"); "" = generator default (5m, or 1m when Warmup)
@@ -116,9 +117,30 @@ func hasAnyTag(n subscription.Node, tags []string) bool {
 	return false
 }
 
-// Set is a collection of pools keyed by name.
+// Set is a collection of pools keyed by name, plus the throughput measurements
+// that a speedtest_top pool ranks by.
+//
+// Goodput hangs off the Set rather than being a parameter to Memberships because
+// that function has six call sites across both roots (daemon, client, reconcile,
+// one-shot CLI, nodepass), and a new argument there is a change every front-end
+// has to remember to make. This project has already paid for a client that wired
+// a subset of the daemon for months (LOT-65): each root tested what it had, both
+// were green, and the only detector was a service misbehaving on the owner's
+// device. A measurement belongs where membership is computed, not in six
+// hand-ups.
+//
+// A pool that needs a ranking and finds no measurements degrades to its own
+// filter and says so in Reports. That is the one-shot CLI's honest state: it has
+// no measurements because it measured nothing, and it must not pretend
+// otherwise.
 type Set struct {
-	Pools map[string]Pool
+	Pools   map[string]Pool
+	Goodput map[string]float64 // node ID -> KiB/s; absent = unmeasured
+	// Reports carries what each pool could not decide, keyed by pool name, filled
+	// by Memberships. It exists so the "pool narrowed to nothing" and "nothing was
+	// measured" cases can be SAID by the caller instead of being inferred later
+	// from a config that looks fine.
+	Reports map[string]ThroughputReport
 }
 
 // Builtin returns the default pools from the spec (4.3.1):
@@ -145,8 +167,29 @@ func Builtin() *Set {
 // Memberships computes the node list for every pool in the set.
 func (s *Set) Memberships(nodes []subscription.Node) map[string][]subscription.Node {
 	out := make(map[string][]subscription.Node, len(s.Pools))
+	reports := make(map[string]ThroughputReport, len(s.Pools))
 	for name, p := range s.Pools {
-		out[name] = p.Members(nodes)
+		// Only a speedtest_top pool consults measurements, and only when it has
+		// some. Every other type is membership by filter, exactly as before.
+		if p.Type == TypeSpeedtestTop && len(s.Goodput) > 0 {
+			members, report := p.TopByThroughput(nodes, s.Goodput, p.Limit)
+			out[name] = members
+			reports[name] = report
+			continue
+		}
+		members := p.Members(nodes)
+		out[name] = members
+		if p.Type == TypeSpeedtestTop {
+			// A throughput pool with no measurements at all: the filter's members
+			// are kept, and the report records that the ranking never ran.
+			reports[name] = ThroughputReport{Unmeasured: len(members), Ranked: 0, Kept: len(members), Filled: true}
+		}
+	}
+	if s.Reports == nil {
+		s.Reports = make(map[string]ThroughputReport, len(reports))
+	}
+	for name, report := range reports {
+		s.Reports[name] = report
 	}
 	return out
 }

@@ -135,3 +135,43 @@ func TestTopByThroughputSkipsTheExerciseWhenThereIsNothingToNarrow(t *testing.T)
 		t.Errorf("report = %+v, want a plain un-narrowed pass", report)
 	}
 }
+
+func TestMembershipsRanksOnlyThroughputPoolsAndOnlyWithMeasurements(t *testing.T) {
+	// Memberships has six call sites across both roots, so the measurements hang
+	// off the Set instead of becoming an argument every front-end must remember
+	// to pass. That makes the "no measurements" state the normal one for the
+	// one-shot CLI, and it must degrade to the filter rather than narrow on
+	// nothing.
+	all := byID("a", "b", "c", "d")
+	goodput := map[string]float64{"a": 900, "b": 500, "c": 100, "d": 700}
+
+	set := &Set{Pools: map[string]Pool{
+		"bulk":    {Name: "bulk", Type: TypeSpeedtestTop, Limit: 2},
+		"latency": {Name: "latency", Type: TypeURLTest},
+	}, Goodput: goodput}
+	out := set.Memberships(all)
+	if want := []string{"a", "d"}; !equal(nodeIDs(out["bulk"]), want) {
+		t.Errorf("bulk = %v, want %v", nodeIDs(out["bulk"]), want)
+	}
+	// A url_test pool is a selector, not a ranking: it must be untouched, or a
+	// throughput measurement would quietly shrink the pool every failover path
+	// depends on.
+	if len(out["latency"]) != 4 {
+		t.Errorf("latency pool was narrowed: %v", nodeIDs(out["latency"]))
+	}
+	if set.Reports["bulk"].Unmeasured != 0 || set.Reports["bulk"].Filled {
+		t.Errorf("bulk report = %+v", set.Reports["bulk"])
+	}
+
+	// No measurements at all: the filter's members stand, and the report says the
+	// ranking never ran instead of leaving a normal-looking config behind.
+	bare := &Set{Pools: map[string]Pool{"bulk": {Name: "bulk", Type: TypeSpeedtestTop, Limit: 2}}}
+	out = bare.Memberships(all)
+	if len(out["bulk"]) != 4 {
+		t.Errorf("unmeasured bulk pool = %v, want the filter's own four", nodeIDs(out["bulk"]))
+	}
+	report := bare.Reports["bulk"]
+	if !report.Filled || report.Ranked != 0 || report.Unmeasured != 4 {
+		t.Errorf("report = %+v, want an unmeasured pool reported as such", report)
+	}
+}
