@@ -80,21 +80,25 @@ func TestTopByThroughputDoesNotRankOnAnAbsentMeasurement(t *testing.T) {
 	// Ranking it needs a number nobody has, and guessing one is how a dead exit
 	// wins a throughput race. So it is left out of the ranking AND counted, so
 	// the caller can say so out loud.
-	p := Pool{Name: "bulk", Type: TypeSpeedtestTop}
-	all := byID("measured", "unknown", "zeroed")
-	goodput := map[string]float64{"measured": 800, "zeroed": 0}
+	p := Pool{Name: "bulk", Type: TypeSpeedtestTop, Limit: 2}
+	// Enough measured candidates that the coverage gate is satisfied — this test
+	// is about what an unmeasured node does to the RANKING, not about the gate,
+	// which has its own case above. The limit still sits below the admitted count
+	// or this takes the early "nothing to narrow" path and never sorts.
+	all := byID("measured", "fastest", "middling", "unknown", "zeroed")
+	goodput := map[string]float64{"measured": 800, "fastest": 900, "middling": 600, "zeroed": 0}
 
-	// The limit must be BELOW the admitted count, or this takes the early
-	// "nothing to narrow" path and never reaches the ranking at all.
 	got, report := p.TopByThroughput(all, goodput, 2)
-	if len(got) != 1 || got[0].ID != "measured" {
-		t.Errorf("members = %v", nodeIDs(got))
+	// The zero measurement is a FROZEN exit and the absent one is merely idle;
+	// neither belongs in a throughput race, and neither outranks a real rate.
+	if want := []string{"fastest", "measured"}; !equal(nodeIDs(got), want) {
+		t.Errorf("members = %v, want %v", nodeIDs(got), want)
 	}
 	if report.Unmeasured != 2 {
 		t.Errorf("unmeasured = %d, want 2", report.Unmeasured)
 	}
-	if report.Ranked != 1 {
-		t.Errorf("ranked = %d, want 1", report.Ranked)
+	if report.Ranked != 3 {
+		t.Errorf("ranked = %d, want 3", report.Ranked)
 	}
 }
 
@@ -173,5 +177,81 @@ func TestMembershipsRanksOnlyThroughputPoolsAndOnlyWithMeasurements(t *testing.T
 	report := bare.Reports["bulk"]
 	if !report.Filled || report.Ranked != 0 || report.Unmeasured != 4 {
 		t.Errorf("report = %+v, want an unmeasured pool reported as such", report)
+	}
+}
+
+// The regression this gate exists to prevent, and it is the one that matters:
+// the measurement is inbound, so in LOT-69's own state — ten rules on one exit —
+// exactly one candidate is measured. Ranking on that subset alone keeps that one
+// exit, collapses the pool to a single member, and looks like a successful
+// narrowing while locking in the monoculture.
+func TestTopByThroughputRefusesToRankOnThinCoverage(t *testing.T) {
+	// 20 candidates, one of them ever used. Coverage is 5%.
+	var all []subscription.Node
+	for _, id := range []string{"used", "u2", "u3", "u4", "u5", "u6", "u7", "u8", "u9", "u10",
+		"u11", "u12", "u13", "u14", "u15", "u16", "u17", "u18", "u19", "u20"} {
+		all = append(all, subscription.Node{ID: id})
+	}
+	p := Pool{Name: "bulk", Type: TypeSpeedtestTop, Limit: 3}
+
+	got, report := p.TopByThroughput(all, map[string]float64{"used": 900}, 3)
+	if len(got) != 20 {
+		t.Fatalf("pool collapsed to %d members: %v", len(got), nodeIDs(got))
+	}
+	if !report.Uncovered {
+		t.Error("a pool covered by one candidate in twenty was ranked without saying so")
+	}
+	if report.Ranked != 0 {
+		t.Errorf("ranked = %d, want 0: the ranking must not have run", report.Ranked)
+	}
+	if report.Coverage < 0.05 || report.Coverage > 0.06 {
+		t.Errorf("coverage = %v, want ~0.05", report.Coverage)
+	}
+	// Unmeasured is still counted even though the ranking did not run: the
+	// operator needs to know how blind it is, not just that it was declined.
+	if report.Unmeasured != 19 {
+		t.Errorf("unmeasured = %d, want 19", report.Unmeasured)
+	}
+}
+
+func TestTopByThroughputRanksOnceCoverageIsReal(t *testing.T) {
+	// The gate must not be so high that it disables the feature it guards. A pool
+	// measured across most of its fleet ranks normally.
+	var all []subscription.Node
+	goodput := map[string]float64{}
+	for _, id := range []string{"a", "b", "c", "d", "e", "f", "g", "h"} {
+		all = append(all, subscription.Node{ID: id})
+		goodput[id] = 100
+	}
+	goodput["a"] = 900
+	goodput["b"] = 800
+	p := Pool{Name: "bulk", Type: TypeSpeedtestTop, Limit: 2}
+
+	got, report := p.TopByThroughput(all, goodput, 2)
+	if want := []string{"a", "b"}; !equal(nodeIDs(got), want) {
+		t.Errorf("members = %v, want %v", nodeIDs(got), want)
+	}
+	if report.Uncovered {
+		t.Error("a fully covered pool was declined as uncovered")
+	}
+}
+
+func TestCoverageThresholdIsConfigurable(t *testing.T) {
+	// An operator with a small, hand-managed fleet should be able to require
+	// strictly complete coverage, and one who trusts partial observations should
+	// be able to relax it. Neither is a judgement the code should make for them.
+	var all []subscription.Node
+	for _, id := range []string{"a", "b", "c", "d"} {
+		all = append(all, subscription.Node{ID: id})
+	}
+	measured := map[string]float64{"a": 10, "b": 20}
+
+	strict := Pool{Name: "bulk", Type: TypeSpeedtestTop, Limit: 1, MinCoverage: 1.0}
+	if _, report := strict.TopByThroughput(all, measured, 1); !report.Uncovered {
+		t.Error("a MinCoverage of one accepted only half the pool")
+	}
+	relaxed := Pool{Name: "bulk", Type: TypeSpeedtestTop, Limit: 1, MinCoverage: 0.25}
+	if _, report := relaxed.TopByThroughput(all, measured, 1); report.Uncovered {
+		t.Error("a low MinCoverage still rejected half the pool")
 	}
 }

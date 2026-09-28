@@ -270,6 +270,16 @@ func (r *Reconciler) Reconcile(ctx context.Context) error {
 			r.Log.Warn("reconcile: throughput pool not fully ranked",
 				"pool", name, "unmeasured", report.Unmeasured, "ranked", report.Ranked, "kept", report.Kept)
 		}
+		if report.Uncovered {
+			// The dangerous one. The measurement is inbound, so a pool observed
+			// through a single busy exit would otherwise rank that exit alone and
+			// collapse to one member — the very monoculture the pool was meant to
+			// break up, wearing the costume of a successful narrowing.
+			r.Log.Warn("reconcile: throughput pool not narrowed, too few exits measured",
+				"pool", name, "coverage", report.Coverage, "measured", report.Ranked,
+				"unmeasured", report.Unmeasured, "kept", report.Kept,
+				"note", "throughput is observed per exit, so exits nobody is using are invisible; seeding them needs an out-of-band probe")
+		}
 		if report.Filled {
 			r.Log.Warn("reconcile: throughput pool fell back to its whole filter (no ranking ran)",
 				"pool", name, "kept", report.Kept, "reason", "no per-exit throughput measured")

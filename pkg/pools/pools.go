@@ -44,8 +44,22 @@ type Filter struct {
 // singbox.PoolOptionsFrom): a warmup pool is kept always-hot so failover is
 // instant rather than waiting on a cold re-probe.
 type Pool struct {
-	Name        string
-	Type        string
+	Name string
+	Type string
+	// MinCoverage is the fraction of admitted candidates that must carry a
+	// measurement before a speedtest_top pool narrows at all.
+	//
+	// It exists because the measurement is INBOUND: `observe` counts bytes per
+	// exit, so it is blind to exits nobody is using. That blindness is correct for
+	// "which of the exits in play is better" and fatal for "who should be in
+	// play". Left unguarded, LOT-69's own state makes it worse instead of better:
+	// ten rules on one exit means only that exit is ever measured, so a
+	// throughput ranking keeps exactly that exit and the pool collapses to a
+	// single member — looking like the pool was narrowed successfully, while
+	// locking in the monoculture it was meant to break up.
+	//
+	// Below the threshold the pool keeps its whole filter and Reports says why.
+	MinCoverage float64
 	Limit       int // TypeSpeedtestTop: keep this many fastest nodes; 0/≥candidates = no narrowing
 	Filter      Filter
 	Warmup      bool   // never let this pool sleep; keep its nodes continuously probed for instant failover
@@ -211,9 +225,22 @@ func (s *Set) Memberships(nodes []subscription.Node) map[string][]subscription.N
 // once, and it answers in 40ms while carrying nothing.
 const TypeSpeedtestTop = "speedtest_top"
 
+// DefaultMinCoverage is the fraction of a pool's candidates that must be measured
+// before a throughput ranking is allowed to narrow it. Half: a pool measured
+// across a real fleet lands well above this, and a pool observed only through one
+// busy exit lands at a small fraction, which is the case the gate exists to catch.
+const DefaultMinCoverage = 0.5
+
 // ThroughputReport says what a membership decision could not decide, because a
 // pool that quietly shrunk is a pool that quietly stopped offering a fallback.
 type ThroughputReport struct {
+	// Coverage is the measured fraction of the admitted candidates, and
+	// Uncovered says whether it fell under MinCoverage and the ranking was
+	// therefore not attempted.
+	Coverage float64
+	// Uncovered marks a decision that was NOT made, so the caller can say so
+	// instead of the config looking identical to a successful narrowing.
+	Uncovered bool
 	// Unmeasured is how many nodes the filter admitted but no measurement covers.
 	// They are NOT ranked: guessing a band from an absent measurement is how a
 	// dead node wins a throughput race.
@@ -265,8 +292,20 @@ func (p Pool) TopByThroughput(nodes []subscription.Node, goodput map[string]floa
 		}
 		return measured[i].node.ID < measured[j].node.ID
 	})
-	report.Ranked = len(measured)
-
+	// Coverage gate. This is a THIRD outcome, distinct from "nothing measured":
+	// here some exits are measured and some are not, and ranking on the measured
+	// subset alone would silently reward being the only one in use.
+	coverage := float64(len(measured)) / float64(len(admitted))
+	report.Coverage = coverage
+	minCoverage := p.MinCoverage
+	if minCoverage <= 0 {
+		minCoverage = DefaultMinCoverage
+	}
+	if len(measured) > 0 && coverage < minCoverage {
+		report.Kept = len(admitted)
+		report.Uncovered = true
+		return admitted, report
+	}
 	if len(measured) == 0 {
 		// Every candidate is unmeasured. Returning empty would make the rung
 		// unreachable; returning the filter's nodes at least keeps the previous
@@ -283,6 +322,10 @@ func (p Pool) TopByThroughput(nodes []subscription.Node, goodput map[string]floa
 	for _, r := range measured[:limit] {
 		out = append(out, r.node)
 	}
+	// Only now, with the ranking actually done, is Ranked meaningful. Setting it
+	// earlier would make a DECLINED ranking indistinguishable from a small one:
+	// both would report a non-zero count of ordered nodes.
+	report.Ranked = len(measured)
 	report.Kept = len(out)
 	return out, report
 }
