@@ -73,13 +73,17 @@ type Reconciler struct {
 	// The controller updates the backing map and calls Reconcile to apply/revert.
 	Remediations func() map[string]singbox.Remediation
 
-	// Throughput supplies measured per-node throughput, keyed by
-	// subscription.Node ID — the node's own identity, not a sing-box tag.
+	// Throughput supplies measured per-exit throughput keyed by sing-box outbound
+	// tag, which is how observe counts it (byte deltas in the connection table).
+	// The reconciler re-keys onto node ids below, because it already holds the
+	// node list at that point — so a producer keyed by node id works too, by
+	// passing an empty map and a second hook, without the reconciler having to
+	// know the difference.
 	//
-	// Keying by Node ID is deliberate: the tag is a generator detail, and a
-	// reconciler that spoke tags would be coupled to how the outbound happens to
-	// be named. Two producers with different keyspaces (observe counts per exit
-	// tag; an out-of-band scanner measures per node) re-key at THEIR end.
+	// It is DEMAND, not capacity: it says an exit was moving bytes, never that the
+	// exit can carry more. So it may narrow a pool, and must never become a
+	// balancer weight or a demotion floor — "carried little because nobody asked"
+	// is not "carried little because the exit is throttled" (LOT-52).
 	//
 	// This is the link that was missing between measuring a node and acting on
 	// it. The ranker recorded the same numbers and deliberately did not let them
@@ -261,7 +265,7 @@ func (r *Reconciler) Reconcile(ctx context.Context) error {
 	// so the daemon and the client get it identically — a hook wired in only one
 	// root is the failure this project has already paid for (LOT-65).
 	if r.Throughput != nil {
-		r.Pools.Goodput = r.Throughput()
+		r.Pools.Goodput = singbox.ThroughputByNodeID(nodes, r.Throughput())
 	}
 	memberships := r.Pools.Memberships(nodes)
 	for name, report := range r.Pools.Reports {

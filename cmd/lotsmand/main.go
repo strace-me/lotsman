@@ -339,6 +339,28 @@ func main() {
 		bestNode = ranker.Best
 	}
 
+	// Passive per-exit carry, for pool membership only. It is the SAME number the
+	// ranker reads, so there is one measurement and two honest uses: which exit is
+	// carrying today, and which exits are carrying at all.
+	//
+	// It is deliberately NOT wired into the balancer or a demotion floor. Passive
+	// carry measures DEMAND — it cannot tell "carried little because nobody asked"
+	// from "carried little because the exit is throttled", and LOT-52 cost nine
+	// minutes of false verdicts to learn that. A pool may be narrowed by it; a node
+	// may not be demoted by it.
+	exitThroughput := func() map[string]float64 {
+		eyeMu.Lock()
+		snap := eyeSnap
+		eyeMu.Unlock()
+		out := make(map[string]float64, len(snap.Nodes))
+		for tag := range snap.Nodes {
+			if kbps, ok := snap.NodeGoodputKBps(tag, *observeInterval); ok {
+				out[tag] = kbps
+			}
+		}
+		return out
+	}
+
 	zapretEx := executor.NewZapret(executor.ExecRunner{}, *zapretDir, *zapretActive, *zapretInit, *dryRun, log)
 	// Confirm a strategy switch instead of assuming it. The init script returns 0
 	// whether or not the engine survived, so without this a strategy the engine
@@ -536,7 +558,7 @@ func main() {
 	// to apply/revert remediations even when -check-interval is off.
 	var rc *reconcile.Reconciler
 	if *reconcileSB && *singboxConfig != "" && conf != nil {
-		rc = newReconciler(conf, reg, clash, *singboxConfig, *singboxBin, *singboxRestart, *reconcileBackup, *reconcileBase, *probeProxy, *dryRun, log)
+		rc = newReconciler(conf, reg, clash, *singboxConfig, *singboxBin, *singboxRestart, *reconcileBackup, *reconcileBase, *probeProxy, *dryRun, exitThroughput, log)
 	}
 
 	// LOT-34 hot-reload remediation scaffold: when armed+hot, the reconciler emits
@@ -1329,7 +1351,7 @@ func newRulesetsUpdater(reg *registry.Registry, rc *reconcile.Reconciler, repo, 
 // generator Options match the R5S (socks probe-in mirrors -probe-proxy), the
 // Alive check waits for the Clash API to answer after a restart, and DryRun
 // follows the global -dry-run so a first deployment only logs what it would do.
-func newReconciler(conf *config.Config, reg *registry.Registry, clash *dataplane.ClashClient, cfgPath, sbBin, restartCmd, backupDir, baselineFile, socksProbe string, dryRun bool, log *slog.Logger) *reconcile.Reconciler {
+func newReconciler(conf *config.Config, reg *registry.Registry, clash *dataplane.ClashClient, cfgPath, sbBin, restartCmd, backupDir, baselineFile, socksProbe string, dryRun bool, throughput func() map[string]float64, log *slog.Logger) *reconcile.Reconciler {
 	services := make([]registry.Service, 0, len(reg.Services))
 	for _, s := range reg.Services {
 		services = append(services, s)
@@ -1378,12 +1400,18 @@ func newReconciler(conf *config.Config, reg *registry.Registry, clash *dataplane
 		return false
 	}
 	rc := &reconcile.Reconciler{
-		Services:   services,
-		Devices:    conf.Devices,
-		Opts:       opts,
-		Subs:       conf.Subscriptions,
-		Loader:     loader,
-		Pools:      conf.Pools,
+		Services: services,
+		Devices:  conf.Devices,
+		Opts:     opts,
+		Subs:     conf.Subscriptions,
+		Loader:   loader,
+		Pools:    conf.Pools,
+		// Passive per-exit carry, re-keyed to node ids at the source so the
+		// reconciler never learns what an outbound is called. It is DEMAND, not
+		// capacity — so it may narrow a pool, and must never become a balancer
+		// weight or a demotion floor (LOT-52: "carried little because nobody asked"
+		// is not "carried little because the exit is throttled").
+
 		ConfigPath: cfgPath,
 		BackupDir:  backupDir,
 		DryRun:     dryRun,
