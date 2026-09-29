@@ -2,6 +2,7 @@ package config
 
 import (
 	"testing"
+	"time"
 
 	"github.com/strace-me/lotsman/pkg/configv2"
 	"github.com/strace-me/lotsman/pkg/pools"
@@ -87,5 +88,41 @@ func TestFromV2KeepsBuiltinPoolsUnderAnOverlay(t *testing.T) {
 	// injection does not synthesise a rival of the same name.
 	if _, clash := out.Pools.Pools["vpn_bulk"]; !clash {
 		t.Error("device policy pool vanished")
+	}
+}
+
+// UNSET IS NOT ZERO. An unset pool interval means "let the generator pick its
+// default" (5m, or 1m for a warmup pool); "0s" means "never stop probing". Writing
+// the zero through turned every unset interval into a pool that probes forever —
+// caught by generating the SAME config through v1 and through v2 and diffing the
+// two sing-box configs byte for byte, which is the only check that could see it.
+func TestFromV2LeavesAnUnsetIntervalUnset(t *testing.T) {
+	cfg, rules := v2Fixture()
+	// A warmup pool with no interval of its own: v1 emits the warmup default (1m).
+	cfg.Pools["vpn_bulk"] = configv2.Pool{Type: "url_test", Warmup: true}
+	out, _, err := FromV2(cfg, rules)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pool := out.Pools.Pools["vpn_bulk"]
+	if pool.Interval != "" {
+		t.Errorf("interval = %q, want empty so the generator applies its default", pool.Interval)
+	}
+	if pool.IdleTimeout != "" {
+		t.Errorf("idle_timeout = %q, want empty", pool.IdleTimeout)
+	}
+	if !pool.Warmup {
+		t.Error("warmup was lost, so the default would be the wrong one")
+	}
+
+	// An EXPLICIT interval must survive, because there it really is 0s or 1m on
+	// purpose and blanking it would discard the operator's setting.
+	cfg.Pools["vpn_bulk"] = configv2.Pool{Type: "url_test", Interval: configv2.Duration(90 * time.Second)}
+	out, _, err = FromV2(cfg, rules)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := out.Pools.Pools["vpn_bulk"].Interval; got != "1m30s" {
+		t.Errorf("explicit interval = %q, want 1m30s", got)
 	}
 }

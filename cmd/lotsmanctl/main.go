@@ -50,6 +50,8 @@ func main() {
 		status(os.Args[2:])
 	case "v2-check":
 		v2Check(os.Args[2:])
+	case "v2-migrate":
+		os.Exit(runV2Migrate(os.Args[2:]))
 	default:
 		usage()
 		os.Exit(2)
@@ -481,14 +483,31 @@ func generate(args []string) {
 	clashListen := fs.String("clash-listen", "127.0.0.1:9090", "clash-api external_controller")
 	tproxyPort := fs.Int("tproxy-port", 7893, "tproxy inbound port")
 	socksProbe := fs.String("socks-probe", "", "socks probe-in inbound host:port (empty = none)")
+	ruleSetDir := fs.String("rule-set-dir", "", "dir holding rule-set-{geosite,geoip}/*.srs (empty = the router's /etc/sing-box). Exists so a config can be checked WITHOUT writing to a root-owned /etc.")
+	configV2 := fs.String("config-v2", "", "v2 configuration.yaml; the same generation path, fed by the v2 projection instead of the v1 parser")
+	rulesV2 := fs.String("rules-v2", "", "v2 rule files dir (default: rules/ alongside the v2 config)")
+	storeV2 := fs.String("store-v2", "/etc/lotsman/desync/strategies", "v2 strategy bundle root, for resolving a rule's {instance, strategy}")
 	_ = fs.Parse(args)
 
-	if *configPath == "" {
-		fmt.Fprintln(os.Stderr, "generate: -config is required")
+	if *configPath == "" && *configV2 == "" {
+		fmt.Fprintln(os.Stderr, "generate: one of -config or -config-v2 is required")
+		os.Exit(2)
+	}
+	if *configPath != "" && *configV2 != "" {
+		fmt.Fprintln(os.Stderr, "generate: -config and -config-v2 are mutually exclusive; one document, one parser")
 		os.Exit(2)
 	}
 
-	cfg, err := config.Load(*configPath)
+	// One load, one generation path. v2 is NOT a branch that forks the generator —
+	// it is the same pipeline fed by a different parser, which is the only way
+	// comparing a v1-generated config against a v2-generated one means anything.
+	var cfg *config.Config
+	var err error
+	if *configV2 != "" {
+		cfg, err = loadV2Config(*configV2, *rulesV2, *storeV2)
+	} else {
+		cfg, err = config.Load(*configPath)
+	}
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "generate: config: %v\n", err)
 		os.Exit(1)
@@ -508,6 +527,9 @@ func generate(args []string) {
 	}
 
 	opts := singbox.DefaultOptions()
+	if *ruleSetDir != "" {
+		opts.RuleSetDir = *ruleSetDir
+	}
 	opts.ClashAPIListen = *clashListen
 	opts.TproxyPort = *tproxyPort
 	opts.SocksProbeListen = *socksProbe

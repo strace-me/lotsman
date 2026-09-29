@@ -134,6 +134,19 @@ func migrateService(service serviceYAML, cfg *configv2.Configuration, instance s
 			DomainLists: service.DomainLists,
 			CIDRs:       service.IPs,
 		},
+		// The behaviour knobs MOVE, rather than being reported as lost. Sticky
+		// stays a *bool on the way in because the distinction is the whole point:
+		// unset means "inherit the default" and false means "override a default
+		// of true", and a plain bool would silently turn every rule that said
+		// nothing into one that asks to flap by latency.
+		Behavior: configv2.Behavior{
+			Sticky:        service.Sticky,
+			Profile:       service.Profile,
+			SpreadClients: service.SpreadClients,
+			EscalateAfter: service.EscalateAfter,
+			RecoverAfter:  service.RecoverAfter,
+			TLSFragment:   service.TLSFragment,
+		},
 	}
 	if service.ProbeType != "" {
 		rule.Probe = &configv2.Probe{Type: service.ProbeType, Target: service.ProbeTarget}
@@ -174,11 +187,13 @@ func migrateService(service serviceYAML, cfg *configv2.Configuration, instance s
 	if len(service.ExcludeLists) > 0 || len(service.ExcludeDomains) > 0 {
 		warnings = append(warnings, fmt.Sprintf("rule %q: exclude lists/domains have no v2 rule field yet", id))
 	}
-	if service.Sticky != nil || len(service.SpreadClients) > 0 || service.TLSFragment {
-		warnings = append(warnings, fmt.Sprintf("rule %q: sticky/spread_clients/tls_fragment have no v2 rule field yet", id))
-	}
-	if service.Static || service.EscalateAfter > 0 || service.RecoverAfter > 0 {
-		warnings = append(warnings, fmt.Sprintf("rule %q: static/escalate_after/recover_after have no v2 rule field yet", id))
+	// `static` is the one that genuinely has no v2 home: v1 nailed a service to its
+	// configured chain[0] and the daemon never escalated or recovered it. That is a
+	// PROPERTY OF THE LADDER, and v2 states the ladder step by step instead, so the
+	// closest honest statement is a single-rung chain — which is what a static
+	// service's chain reduces to anyway. Everything else in this group now moves.
+	if service.Static {
+		warnings = append(warnings, fmt.Sprintf("rule %q: `static` has no v2 field; express it as a single-rung chain, which is what a static service reduces to", id))
 	}
 	return rule, warnings, nil
 }
@@ -186,6 +201,19 @@ func migrateService(service serviceYAML, cfg *configv2.Configuration, instance s
 func migrateChain(ruleID string, steps []chainStepYAML, instance string, desyncStrategy DesyncStrategyFor) ([]configv2.ChainStep, []string, error) {
 	var out []configv2.ChainStep
 	var warnings []string
+	// The tier LABEL is clamped to be non-decreasing along the chain.
+	//
+	// v1 let a service put its rungs in any order: discord runs VPN, then a
+	// PREFERRED desync rung, then VPN again. Nothing depended on that — the
+	// daemon escalates by POSITION, so `state` was a label an operator wrote and
+	// nothing read. v2 forbids a tier going backwards, and that rule is right for
+	// a document a human is about to edit, but applying it to a migration would
+	// reject the operator's own working file.
+	//
+	// So the order is preserved exactly — that is the behaviour — and only the
+	// label is clamped, with a warning. Dropping or reordering a rung would change
+	// what the service does; clamping a label cannot.
+	highest := -1
 	for _, step := range steps {
 		tier, ok := tierFor(step.State)
 		if !ok {
@@ -194,6 +222,14 @@ func migrateChain(ruleID string, steps []chainStepYAML, instance string, desyncS
 				continue
 			}
 			return nil, nil, fmt.Errorf("rule %q: unknown chain state %q", ruleID, step.State)
+		}
+		if rank := tierRank(tier); rank < highest {
+			warnings = append(warnings, fmt.Sprintf(
+				"rule %q: the %q rung sits after a %q rung; v2 forbids a tier going backwards, so the LABEL was clamped — the position is unchanged, and position is what the runtime follows",
+				ruleID, tier, configv2.ChainTiers[highest]))
+			tier = configv2.ChainTiers[highest]
+		} else {
+			highest = tierRank(tier)
 		}
 		switch step.Class {
 		case strategy.ClassDirect:
@@ -277,6 +313,17 @@ func soleDesyncInstance(cfg *configv2.Configuration) (string, error) {
 		return name, nil
 	}
 	return "", nil
+}
+
+// tierRank orders the tier labels. It reads configv2.ChainTiers rather than
+// restating them, so a new tier cannot be added to the schema and missed here.
+func tierRank(tier string) int {
+	for i, t := range configv2.ChainTiers {
+		if t == tier {
+			return i
+		}
+	}
+	return -1
 }
 
 func tierFor(state string) (string, bool) {

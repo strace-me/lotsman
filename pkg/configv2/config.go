@@ -2,6 +2,7 @@ package configv2
 
 import (
 	"fmt"
+	"strings"
 	"time"
 
 	"gopkg.in/yaml.v3"
@@ -66,8 +67,8 @@ type Pool struct {
 	// 0 = the default of one half.
 	MinCoverage float64  `yaml:"min_coverage"`
 	Warmup      bool     `yaml:"warmup"`
-	Interval    Duration `yaml:"interval"`
-	IdleTimeout Duration `yaml:"idle_timeout"`
+	Interval    Duration `yaml:"interval",omitempty`
+	IdleTimeout Duration `yaml:"idle_timeout",omitempty`
 }
 
 type Subscription struct {
@@ -101,8 +102,8 @@ type Instance struct {
 
 type Runtime struct {
 	Mode            string   `yaml:"mode"`
-	ProbeInterval   Duration `yaml:"probe_interval"`
-	RefreshInterval Duration `yaml:"refresh_interval"`
+	ProbeInterval   Duration `yaml:"probe_interval",omitempty`
+	RefreshInterval Duration `yaml:"refresh_interval",omitempty`
 	WAN             string   `yaml:"wan"`
 	StateDir        string   `yaml:"state_dir"`
 	RuntimeDir      string   `yaml:"runtime_dir"`
@@ -113,7 +114,7 @@ type DataSource struct {
 	Repo           string   `yaml:"repo"`
 	Geosite        string   `yaml:"geosite"`
 	Geoip          string   `yaml:"geoip"`
-	Refresh        Duration `yaml:"refresh"`
+	Refresh        Duration `yaml:"refresh",omitempty`
 	VerifyChecksum bool     `yaml:"verify_checksum"`
 }
 
@@ -139,6 +140,14 @@ func (d *Duration) UnmarshalYAML(node *yaml.Node) error {
 	if err := node.Decode(&raw); err != nil {
 		return err
 	}
+	// An explicitly empty value means "unset", not "invalid". A hand-written file
+	// with `interval:` and nothing after it is a reasonable thing to write, and
+	// rejecting it teaches the operator to distrust the parser rather than to fill
+	// the field in.
+	if strings.TrimSpace(raw) == "" {
+		*d = 0
+		return nil
+	}
 	parsed, err := time.ParseDuration(raw)
 	if err != nil {
 		return fmt.Errorf("invalid duration %q: %w", raw, err)
@@ -148,3 +157,17 @@ func (d *Duration) UnmarshalYAML(node *yaml.Node) error {
 }
 
 func (d Duration) Value() time.Duration { return time.Duration(d) }
+
+// MarshalYAML emits a duration the way a human writes one ("5m"), not as the
+// underlying nanosecond count.
+//
+// Without this the round trip is BROKEN rather than merely ugly: a document this
+// package writes is a document it cannot read back, because "21600000000000" has
+// no unit and ParseDuration rejects it. A migration that emits files nobody can
+// load is worse than one that emits nothing, since it looks like it worked.
+func (d Duration) MarshalYAML() (any, error) {
+	if d == 0 {
+		return "", nil
+	}
+	return time.Duration(d).String(), nil
+}

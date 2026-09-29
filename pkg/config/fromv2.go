@@ -24,7 +24,7 @@ var Gaps = []string{
 	"dns: v2 carries no split-DNS; the client's tun uses sing-box defaults (DESIGN §15 decided this is a deployment default, and it is NOT implemented as one yet)",
 	"fakeip: v2 has no legacy fakeip block; superseded by dns on the v1 side",
 	"multiplex: v2 has none; v1 defaults it off, so the practical gap is nil until someone turns it on",
-	"utls_fingerprint / singbox_version: v2 declares neither; every TCP TLS outbound goes with no pinned fingerprint and the generator runs at its baseline version",
+	"utls_fingerprint / singbox_version: v2 declares neither. This is a BEHAVIOUR CHANGE, not a missing knob: with no target version the generator runs at its baseline and STRIPS version-gated node features, so a v1 config carrying hy2 gecko obfs produces a v2 node without its obfs. The byte-comparison showed exactly that on the live config",
 	"strategies[]: v2 reads strategies from a BUNDLE store, not from a config list, so Config.Strategies stays empty and only the builtin catalog is in scope",
 	"hostlists[]: subsumed by v2 lists, so no Hostlist entries are produced",
 	"zapret.preset: read-only legacy adapter by decision; Config.ZapretPresets is empty",
@@ -73,14 +73,12 @@ func FromV2(cfg *configv2.Configuration, rules []configv2.Rule) (*Config, []stri
 	set := pools.Builtin()
 	injectBuiltinPools(set, reg, "", out.Devices)
 	for name, p := range cfg.Pools {
-		set.Pools[name] = pools.Pool{
+		pool := pools.Pool{
 			Name:        name,
 			Type:        p.Type,
 			Limit:       p.Limit,
 			MinCoverage: p.MinCoverage,
 			Warmup:      p.Warmup,
-			Interval:    p.Interval.Value().String(),
-			IdleTimeout: p.IdleTimeout.Value().String(),
 			Filter: pools.Filter{
 				Caps:             p.Caps,
 				TagsInclude:      p.TagsInclude,
@@ -89,6 +87,19 @@ func FromV2(cfg *configv2.Configuration, rules []configv2.Rule) (*Config, []stri
 				CountriesExclude: lowerAll(p.CountriesExclude),
 			},
 		}
+		// UNSET IS NOT ZERO. An empty interval means "let the generator pick its
+		// default" (5m, or 1m for a warmup pool); "0s" means "never stop
+		// probing". Writing the zero through turned every unset interval into a
+		// pool that probes forever, which the byte-comparison caught as a real
+		// difference against v1 — the same distinction `sticky` needs a pointer
+		// for.
+		if p.Interval.Value() > 0 {
+			pool.Interval = p.Interval.Value().String()
+		}
+		if p.IdleTimeout.Value() > 0 {
+			pool.IdleTimeout = p.IdleTimeout.Value().String()
+		}
+		set.Pools[name] = pool
 	}
 	out.Pools = set
 
