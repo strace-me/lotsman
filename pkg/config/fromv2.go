@@ -1,0 +1,121 @@
+package config
+
+import (
+	"fmt"
+	"sort"
+
+	"github.com/strace-me/lotsman/pkg/configv2"
+	"github.com/strace-me/lotsman/pkg/pools"
+	"github.com/strace-me/lotsman/pkg/registry"
+	"github.com/strace-me/lotsman/pkg/subscription"
+	"github.com/strace-me/lotsman/pkg/zapret"
+)
+
+// Gaps are the things a v2 document cannot say yet, listed by what stays ZERO in
+// the Config this produces.
+//
+// It is returned rather than hidden because the failure mode it prevents is
+// silent: a v2 file loads, the daemon starts, the rules route — and the operator
+// has no way to tell that the tun has no split-DNS, that TLS outbounds carry no
+// uTLS fingerprint, and that no declared strategy is in scope. Each of those is a
+// working system quietly running with a default nobody chose. "Скажи, что
+// измерение не коснулось" — the gap has to be said by the code that knows it.
+var Gaps = []string{
+	"dns: v2 carries no split-DNS; the client's tun uses sing-box defaults (DESIGN §15 decided this is a deployment default, and it is NOT implemented as one yet)",
+	"fakeip: v2 has no legacy fakeip block; superseded by dns on the v1 side",
+	"multiplex: v2 has none; v1 defaults it off, so the practical gap is nil until someone turns it on",
+	"utls_fingerprint / singbox_version: v2 declares neither; every TCP TLS outbound goes with no pinned fingerprint and the generator runs at its baseline version",
+	"strategies[]: v2 reads strategies from a BUNDLE store, not from a config list, so Config.Strategies stays empty and only the builtin catalog is in scope",
+	"hostlists[]: subsumed by v2 lists, so no Hostlist entries are produced",
+	"zapret.preset: read-only legacy adapter by decision; Config.ZapretPresets is empty",
+	"subscription_via_pool: no longer a config knob; the fetch path is direct unless a pool is present",
+	"pool limit / min_coverage / countries_*: v2's Pool block does not declare them yet, so speedtest_top cannot be configured and no exit can be filtered by country",
+}
+
+// FromV2 projects a v2 document onto the Config the runtime already consumes.
+//
+// This is the whole cutover. Everything downstream — Brain, Applier, the
+// executors, the nft renderer, singbox.Generate — reads Config/registry.Service,
+// so making v2 a live parser is a matter of producing the same shape from a
+// different document, not of a second runtime. It lives HERE rather than in
+// pkg/configv2 because pkg/config already imports configv2 for MigrateToV2, and
+// the reverse import would close a cycle.
+func FromV2(cfg *configv2.Configuration, rules []configv2.Rule) (*Config, []string, error) {
+	if cfg == nil {
+		return nil, nil, fmt.Errorf("no v2 configuration")
+	}
+	reg, err := configv2.BuildRegistry(cfg, rules, nil, nil)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	out := &Config{Registry: reg}
+	out.Devices = make([]registry.Device, 0, len(cfg.Devices))
+	for _, d := range cfg.Devices {
+		out.Devices = append(out.Devices, registry.Device{
+			Name: d.Name, Sources: append([]string{}, d.Sources...), Policy: d.Policy,
+		})
+	}
+
+	out.Subscriptions = make([]subscription.Declaration, 0, len(cfg.Subscriptions))
+	for _, s := range cfg.Subscriptions {
+		out.Subscriptions = append(out.Subscriptions, subscription.Declaration{
+			Name: s.Name, URL: s.URL, Format: subscription.Format(s.Format),
+			Tags: append([]string{}, s.Tags...), Enabled: s.Enabled, Expires: s.Expires,
+		})
+	}
+
+	// Pools are seeded from the builtins and then OVERLAID by the document, so a
+	// v2 file that declares only `bulk` still gets the standard latency and
+	// emergency pools. Without the overlay a partial file would silently delete
+	// the emergency rung every rule falls back to — and the symptom of a deleted
+	// emergency pool is a rule whose last resort is gone, discovered during an
+	// outage rather than at load.
+	set := pools.Builtin()
+	injectBuiltinPools(set, reg, "", out.Devices)
+	for name, p := range cfg.Pools {
+		set.Pools[name] = pools.Pool{
+			Name:        name,
+			Type:        p.Type,
+			Warmup:      p.Warmup,
+			Interval:    p.Interval.Value().String(),
+			IdleTimeout: p.IdleTimeout.Value().String(),
+			Filter: pools.Filter{
+				Caps:        p.Caps,
+				TagsInclude: p.TagsInclude,
+				TagsExclude: p.TagsExclude,
+			},
+		}
+	}
+	out.Pools = set
+
+	// The nfqws instances v2 declares are the managed unit, same as v1's.
+	names := make([]string, 0, len(cfg.Desync.Instances))
+	for name := range cfg.Desync.Instances {
+		names = append(names, name)
+	}
+	sort.Strings(names) // map order must not reach a generated config
+	for _, name := range names {
+		inst := cfg.Desync.Instances[name]
+		// zapret.Instance is the MANAGED unit — a process, a queue, a port set —
+		// and it carries no engine field: the engine is chosen by the adapter that
+		// launches it, not by the instance record. v2's engine declaration has no
+		// home here yet, so it is reported as a gap rather than dropped.
+		_ = inst
+		out.Zapret = append(out.Zapret, zapret.Instance{Name: name})
+	}
+
+	// A disabled rule is dropped from the registry entirely, so nothing probes,
+	// routes or desyncs it. The name is carried separately only so a UI can list
+	// it and offer to switch it back on.
+	for _, rule := range rules {
+		if !rule.Enabled {
+			out.DisabledServices = append(out.DisabledServices, rule.ID)
+		}
+	}
+	sort.Strings(out.DisabledServices)
+
+	gaps := make([]string, 0, len(Gaps))
+	gaps = append(gaps, Gaps...)
+	return out, gaps, nil
+}
