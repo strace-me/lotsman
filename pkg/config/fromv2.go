@@ -29,7 +29,6 @@ var Gaps = []string{
 	"hostlists[]: subsumed by v2 lists, so no Hostlist entries are produced",
 	"zapret.preset: read-only legacy adapter by decision; Config.ZapretPresets is empty",
 	"subscription_via_pool: no longer a config knob; the fetch path is direct unless a pool is present",
-	"pool limit / min_coverage / countries_*: v2's Pool block does not declare them yet, so speedtest_top cannot be configured and no exit can be filtered by country",
 }
 
 // FromV2 projects a v2 document onto the Config the runtime already consumes.
@@ -77,13 +76,17 @@ func FromV2(cfg *configv2.Configuration, rules []configv2.Rule) (*Config, []stri
 		set.Pools[name] = pools.Pool{
 			Name:        name,
 			Type:        p.Type,
+			Limit:       p.Limit,
+			MinCoverage: p.MinCoverage,
 			Warmup:      p.Warmup,
 			Interval:    p.Interval.Value().String(),
 			IdleTimeout: p.IdleTimeout.Value().String(),
 			Filter: pools.Filter{
-				Caps:        p.Caps,
-				TagsInclude: p.TagsInclude,
-				TagsExclude: p.TagsExclude,
+				Caps:             p.Caps,
+				TagsInclude:      p.TagsInclude,
+				TagsExclude:      p.TagsExclude,
+				CountriesInclude: lowerAll(p.CountriesInclude),
+				CountriesExclude: lowerAll(p.CountriesExclude),
 			},
 		}
 	}

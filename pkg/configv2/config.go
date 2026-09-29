@@ -46,6 +46,25 @@ type Pool struct {
 	Caps        []string `yaml:"caps"`
 	TagsInclude []string `yaml:"tags_include"`
 	TagsExclude []string `yaml:"tags_exclude"`
+	// CountriesInclude/Exclude filter by exit country, ISO-3166 alpha-2,
+	// lower-cased on load. The exclude is the crude half of the monoculture
+	// workaround: a second pool that volume rules ride instead of the shared one,
+	// keeping them off RU exits and off a saturated exit (LOT-69). A node whose
+	// country is unknown is never excluded — "smart location" nodes pass.
+	CountriesInclude []string `yaml:"countries_include"`
+	CountriesExclude []string `yaml:"countries_exclude"`
+	// Limit is speedtest_top's member cap: how many of the fastest nodes to keep.
+	// Ignored by url_test, which is a selector and not a ranking. 0 or >= the
+	// candidate count means no narrowing.
+	Limit int `yaml:"limit"`
+	// MinCoverage is the fraction of candidates that must carry a measurement
+	// before a speedtest_top pool narrows at all. Below it the pool keeps its
+	// whole filter and says so. It exists because the measurement is INBOUND —
+	// `observe` counts bytes per exit, so exits nobody is using are invisible — and
+	// an unguarded ranking in LOT-69's own state keeps the single busy exit and
+	// collapses the pool to one member, which reads as a successful narrowing.
+	// 0 = the default of one half.
+	MinCoverage float64  `yaml:"min_coverage"`
 	Warmup      bool     `yaml:"warmup"`
 	Interval    Duration `yaml:"interval"`
 	IdleTimeout Duration `yaml:"idle_timeout"`

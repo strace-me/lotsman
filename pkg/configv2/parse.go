@@ -2,6 +2,7 @@ package configv2
 
 import (
 	"fmt"
+	"github.com/strace-me/lotsman/pkg/pools"
 	"os"
 	"time"
 
@@ -65,6 +66,31 @@ func (c *Configuration) Validate() error {
 		}
 		if instance.Table != "" && !nftTablePattern.MatchString(instance.Table) {
 			return fmt.Errorf("desync instance %q has invalid nft table %q", name, instance.Table)
+		}
+	}
+	for name, p := range c.Pools {
+		if p.MinCoverage < 0 || p.MinCoverage > 1 {
+			return fmt.Errorf("pool %q has min_coverage %v, want a fraction in [0,1]", name, p.MinCoverage)
+		}
+		if p.Limit < 0 {
+			return fmt.Errorf("pool %q has a negative limit", name)
+		}
+		// limit and min_coverage are a RANKING's knobs. On a url_test pool they
+		// would be read as "the cap was applied" while sing-box keeps choosing by
+		// latency — a setting that looks live and does nothing, which is the
+		// failure this project has an axiom about. Say it at load instead.
+		if p.Type != pools.TypeSpeedtestTop {
+			if p.Limit != 0 {
+				return fmt.Errorf("pool %q is type %q and takes no limit: sing-box chooses by latency inside any url_test group, so the cap would be inert", name, p.Type)
+			}
+			if p.MinCoverage != 0 {
+				return fmt.Errorf("pool %q is type %q, which is never ranked, so min_coverage is inert", name, p.Type)
+			}
+		}
+		for _, cc := range append(append([]string{}, p.CountriesInclude...), p.CountriesExclude...) {
+			if !iso2.MatchString(cc) {
+				return fmt.Errorf("pool %q names country %q, want ISO-3166 alpha-2 (e.g. de)", name, cc)
+			}
 		}
 	}
 	if err := ValidateDevices(c); err != nil {

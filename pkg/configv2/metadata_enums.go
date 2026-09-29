@@ -27,6 +27,11 @@ var (
 // where the failure is "desync silently absent".
 var nftTablePattern = regexp.MustCompile(`^(inet|ip|ip6|bridge|netdev|mangle) [A-Za-z0-9_.-]+$`)
 
+// iso2 is an ISO-3166 alpha-2 country code, lower-cased. A pool filter that says
+// "de" must not be able to say "germany" or "DE" and quietly match nothing: the
+// exclude would look applied while removing nothing.
+var iso2 = regexp.MustCompile(`^[a-z]{2}$`)
+
 type ChainActionMeta struct {
 	Name        string   `json:"name"`
 	Description string   `json:"description"`
