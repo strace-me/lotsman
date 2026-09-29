@@ -137,3 +137,25 @@ func TestDevicesAcceptARealConsoleAndRefuseADanglingPool(t *testing.T) {
 		t.Error("a device with no sources was accepted")
 	}
 }
+
+// A partial v2 file that names a BUILT-IN pool must load. FromV2 overlays the
+// document on top of pools.Builtin() rather than replacing it, so vpn_url_test
+// and emergency_pool resolve at run time — and a rule naming one is exactly what
+// a partial file should be able to say. Validating against the document alone made
+// a working rule fail to load.
+func TestBuiltinPoolsCountAsDeclared(t *testing.T) {
+	cfg := &Configuration{Pools: map[string]Pool{"vpn_bulk": {Type: "url_test"}}}
+	rule := &Rule{ID: "youtube", Match: Match{Domains: []string{"googlevideo.com"}}, Chain: []ChainStep{
+		{Tier: "preferred", Action: Action{VPN: &VPNAction{Pool: "vpn_bulk"}}},
+		{Tier: "fallback", Action: Action{VPN: &VPNAction{Pool: "vpn_url_test_udp"}}},
+		{Tier: "emergency", Action: Action{VPN: &VPNAction{Pool: "emergency_pool"}}},
+	}}
+	if err := rule.ValidateReferences(cfg, map[string][]string{}); err != nil {
+		t.Fatalf("a rule naming built-in pools was rejected: %v", err)
+	}
+	// A genuinely unknown pool must still fail, or the check is now vacuous.
+	rule.Chain[1].Action.VPN = &VPNAction{Pool: "typo_pool"}
+	if err := rule.ValidateReferences(cfg, map[string][]string{}); err == nil {
+		t.Error("a rule naming an unknown pool was accepted")
+	}
+}

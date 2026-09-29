@@ -7,8 +7,10 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 	"time"
 
+	"github.com/strace-me/lotsman/pkg/config"
 	"github.com/strace-me/lotsman/pkg/configv2"
 	"github.com/strace-me/lotsman/pkg/lists"
 	"github.com/strace-me/lotsman/pkg/rulesets"
@@ -101,6 +103,31 @@ func runV2Preflight(f v2Flags) int {
 	fmt.Printf("coherence: %d gap(s)\n", len(gaps))
 	for _, gap := range gaps {
 		fmt.Printf("  %s: %s (%s)\n", gap.Service, gap.Kind, gap.Detail)
+	}
+
+	// Project onto the runtime Config and REPORT what the projection cannot carry.
+	//
+	// "The document is valid" and "the daemon will do the same thing with it" are
+	// different claims, and only the second one matters at run time. A v2 file
+	// loses the split-DNS block, the uTLS fingerprint, the target sing-box version
+	// and the declared strategies; every one of those is a working system that
+	// would then run at a default nobody chose, with the status page green. The
+	// projection is the only place that knows, so it says so here rather than in
+	// a comment nobody re-reads.
+	projected, runtimeGaps, projErr := config.FromV2(cfg, rules)
+	if projErr != nil {
+		problems = append(problems, fmt.Sprintf("v2 → runtime projection failed: %v", projErr))
+	} else {
+		fmt.Printf("\nruntime projection: %d service(s), %d device(s), %d subscription(s), %d pool(s)\n",
+			len(projected.Registry.Services), len(projected.Devices),
+			len(projected.Subscriptions), len(projected.Pools.Pools))
+		if len(projected.DisabledServices) > 0 {
+			fmt.Printf("  disabled (not routable): %s\n", strings.Join(projected.DisabledServices, ", "))
+		}
+		fmt.Printf("\nNOT carried into the runtime by v2 — these run at defaults:\n")
+		for _, gap := range runtimeGaps {
+			fmt.Printf("  - %s\n", gap)
+		}
 	}
 
 	if len(problems) > 0 {

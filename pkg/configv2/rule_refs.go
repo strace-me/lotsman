@@ -4,6 +4,14 @@ import (
 	"fmt"
 )
 
+// builtinPools are always in scope, because FromV2 overlays the document on top of
+// pools.Builtin() rather than replacing it. Listing them here is the validator's
+// half of that promise; changing one set without the other is how a rule ends up
+// valid at run time and rejected at load.
+var builtinPools = map[string]bool{
+	"vpn_url_test": true, "vpn_url_test_udp": true, "emergency_pool": true,
+}
+
 // ValidateReferences checks a rule against the loaded configuration: every
 // named list, pool, desync instance and strategy it references must exist.
 // strategies maps a desync instance name to the strategy ids its store holds.
@@ -38,7 +46,13 @@ func (r *Rule) ValidateReferences(cfg *Configuration, strategies map[string][]st
 			}
 		}
 		if vpn := step.Action.VPN; vpn != nil {
-			if _, ok := cfg.Pools[vpn.Pool]; !ok {
+			// The BUILTIN pools count as declared even though the document does not
+			// list them: the runtime projection overlays the document ON TOP of
+			// pools.Builtin(), so a rule naming vpn_url_test or emergency_pool
+			// resolves fine at run time. Checking only the document made a working
+			// rule fail to load, and naming a built-in pool is exactly what a
+			// PARTIAL v2 file should be able to say.
+			if _, ok := cfg.Pools[vpn.Pool]; !ok && !builtinPools[vpn.Pool] {
 				return fmt.Errorf("rule %q references unknown pool %q", r.ID, vpn.Pool)
 			}
 		}
