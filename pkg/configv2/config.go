@@ -67,8 +67,8 @@ type Pool struct {
 	// 0 = the default of one half.
 	MinCoverage float64  `yaml:"min_coverage"`
 	Warmup      bool     `yaml:"warmup"`
-	Interval    Duration `yaml:"interval",omitempty`
-	IdleTimeout Duration `yaml:"idle_timeout",omitempty`
+	Interval    Duration `yaml:"interval,omitempty"`
+	IdleTimeout Duration `yaml:"idle_timeout,omitempty"`
 }
 
 type Subscription struct {
@@ -102,8 +102,8 @@ type Instance struct {
 
 type Runtime struct {
 	Mode            string   `yaml:"mode"`
-	ProbeInterval   Duration `yaml:"probe_interval",omitempty`
-	RefreshInterval Duration `yaml:"refresh_interval",omitempty`
+	ProbeInterval   Duration `yaml:"probe_interval,omitempty"`
+	RefreshInterval Duration `yaml:"refresh_interval,omitempty"`
 	WAN             string   `yaml:"wan"`
 	StateDir        string   `yaml:"state_dir"`
 	RuntimeDir      string   `yaml:"runtime_dir"`
@@ -114,7 +114,7 @@ type DataSource struct {
 	Repo           string   `yaml:"repo"`
 	Geosite        string   `yaml:"geosite"`
 	Geoip          string   `yaml:"geoip"`
-	Refresh        Duration `yaml:"refresh",omitempty`
+	Refresh        Duration `yaml:"refresh,omitempty"`
 	VerifyChecksum bool     `yaml:"verify_checksum"`
 }
 

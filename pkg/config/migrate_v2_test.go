@@ -128,7 +128,17 @@ services:
 	// The two VPN rungs are DIFFERENT pools: the UDP-native one first, then the
 	// TCP one. Collapsing them into one tier loses the ordering, and merging them
 	// into one pool loses the transport distinction.
-	want := []string{"fallback", "preferred", "fallback", "emergency"}
+	//
+	// The LABEL is clamped and the POSITION is not. This v1 chain is
+	// VPN, PREFERRED, VPN, EMERGENCY — a PREFERRED rung sitting after a VPN one,
+	// which v1 allowed because the daemon escalates by POSITION and never read
+	// `state`. v2 forbids a tier going backwards, so emitting the label verbatim
+	// would produce a document its own validator rejects — observed on the real
+	// config, where the migration's output failed to load.
+	//
+	// Clamping the label changes nothing the runtime can observe, and the
+	// migration says so in a warning rather than doing it quietly.
+	want := []string{"fallback", "fallback", "fallback", "emergency"}
 	if len(chain) != len(want) {
 		t.Fatalf("chain = %#v", chain)
 	}
@@ -142,6 +152,25 @@ services:
 	if chain[0].Action.VPN.Pool != "vpn_url_test_udp" || chain[2].Action.VPN.Pool != "vpn_url_test" {
 		t.Errorf("the two VPN pools collapsed: %#v", chain)
 	}
+	// The desync rung survives as a desync rung: clamping its LABEL must not turn
+	// it into a VPN step, which would change what the service actually does.
+	if chain[1].Action.Desync == nil {
+		t.Errorf("the desync rung became something else: %#v", chain[1])
+	}
+	// And the clamp is reported, because a silent rewrite of the operator's own
+	// labels is exactly the thing they need to be told about.
+	if !mentionsBackwards(migration.Warnings) {
+		t.Errorf("a clamped tier was not reported: %v", migration.Warnings)
+	}
+}
+
+func mentionsBackwards(warnings []string) bool {
+	for _, w := range warnings {
+		if strings.Contains(w, "forbids a tier going backwards") {
+			return true
+		}
+	}
+	return false
 }
 
 func TestMigrateMakesAnUnpinnedZapretRungAuto(t *testing.T) {
