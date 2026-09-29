@@ -211,3 +211,62 @@ func containsWarning(warnings []string, substr string) bool {
 	}
 	return false
 }
+
+// The one difference the byte-comparison of the live config leaves is ORDER
+// inside a single rule's rule_set list: v2 states domain lists and ip lists in
+// two fields, so domain lists are always emitted first, while v1 could interleave
+// them. That cannot change what the rule does — every entry in the list maps to
+// the SAME outbound, so whichever rule-set matches first routes identically.
+//
+// The acceptance criterion is therefore SET equality, not sequence equality, and
+// asserting it is what stops "it looked the same" from standing in for a check.
+func TestMigratedRuleSetsAreTheSameSetNotTheSameOrder(t *testing.T) {
+	doc, err := ParseDocument([]byte(`
+zapret:
+  instances: [{ name: nfqws1-main }]
+services:
+  - name: web-blocked
+    rule_sets: [geosite-ru-blocked, geoip-ru-blocked, geosite-cloudflare, geoip-cloudflare, geoip-telegram, geoip-fastly]
+    chain:
+      - { state: VPN, class: vpn, strategy_id: vpn_url_test }
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	migration, err := MigrateToV2(doc, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := map[string]bool{
+		"geosite-ru-blocked": true, "geoip-ru-blocked": true,
+		"geosite-cloudflare": true, "geoip-cloudflare": true,
+		"geoip-telegram": true, "geoip-fastly": true,
+	}
+	got := map[string]bool{}
+	for _, name := range migration.Rules[0].Match.DomainLists {
+		if def, ok := migration.Configuration.Lists.Domains[name]; ok {
+			got["geosite-"+def.Category] = true
+		}
+	}
+	for _, name := range migration.Rules[0].Match.IPLists {
+		if def, ok := migration.Configuration.Lists.IPs[name]; ok {
+			got["geoip-"+def.Category] = true
+		}
+	}
+	if len(got) != len(want) {
+		t.Fatalf("resolved %d rule-sets, want %d: %v", len(got), len(want), got)
+	}
+	for tag := range want {
+		if !got[tag] {
+			t.Errorf("rule-set %q was lost", tag)
+		}
+	}
+	// And the two namespaces must be kept apart: a domain list and an ip list
+	// sharing a name is a rule that answers one with the other's file.
+	if _, ok := migration.Configuration.Lists.Domains["ru-blocked"]; !ok {
+		t.Error("the domain list is missing")
+	}
+	if _, ok := migration.Configuration.Lists.IPs["ru-blocked"]; !ok {
+		t.Error("the ip list is missing — it collapsed into the domain one")
+	}
+}

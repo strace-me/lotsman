@@ -16,7 +16,19 @@ const (
 )
 
 type Configuration struct {
-	Version       int                   `yaml:"version"`
+	Version int `yaml:"version"`
+	// TargetVersion is the sing-box release this document is GENERATED FOR. It
+	// gates version-specific node features: a hy2 node carrying gecko obfs needs
+	// 1.14, and generating without a target runs at the 1.12.17 baseline, which
+	// SILENTLY DROPS the obfs.
+	//
+	// This field is here despite singbox_version being classed as a deployment
+	// default, because that classification turned out to be wrong in a way that
+	// costs data: the byte-for-byte comparison of a v1-generated and a v2-generated
+	// config of the live r5s file found exactly one difference, and it was a node
+	// that had lost its obfs. A knob that changes what existing nodes ARE is not a
+	// default, it is a declaration.
+	TargetVersion string                `yaml:"target_version,omitempty"`
 	Proxy         Proxy                 `yaml:"proxy"`
 	Desync        Desync                `yaml:"desync"`
 	Runtime       Runtime               `yaml:"runtime"`

@@ -24,7 +24,7 @@ var Gaps = []string{
 	"dns: v2 carries no split-DNS; the client's tun uses sing-box defaults (DESIGN §15 decided this is a deployment default, and it is NOT implemented as one yet)",
 	"fakeip: v2 has no legacy fakeip block; superseded by dns on the v1 side",
 	"multiplex: v2 has none; v1 defaults it off, so the practical gap is nil until someone turns it on",
-	"utls_fingerprint / singbox_version: v2 declares neither. This is a BEHAVIOUR CHANGE, not a missing knob: with no target version the generator runs at its baseline and STRIPS version-gated node features, so a v1 config carrying hy2 gecko obfs produces a v2 node without its obfs. The byte-comparison showed exactly that on the live config",
+	"utls_fingerprint: v2 declares none, so every TCP TLS outbound goes with no pinned uTLS fingerprint. A default, not a data loss",
 	"strategies[]: v2 reads strategies from a BUNDLE store, not from a config list, so Config.Strategies stays empty and only the builtin catalog is in scope",
 	"hostlists[]: subsumed by v2 lists, so no Hostlist entries are produced",
 	"zapret.preset: read-only legacy adapter by decision; Config.ZapretPresets is empty",
@@ -49,6 +49,10 @@ func FromV2(cfg *configv2.Configuration, rules []configv2.Rule) (*Config, []stri
 	}
 
 	out := &Config{Registry: reg}
+	// The target version must reach the generator, or it runs at its 1.12.17
+	// baseline and strips version-gated node features — which is not a missing
+	// knob, it is a node quietly losing its obfs.
+	out.SingboxVersion = cfg.TargetVersion
 	out.Devices = make([]registry.Device, 0, len(cfg.Devices))
 	for _, d := range cfg.Devices {
 		out.Devices = append(out.Devices, registry.Device{

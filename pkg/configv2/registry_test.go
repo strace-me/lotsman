@@ -34,29 +34,54 @@ func TestBuildRegistrySkipsDisabledRules(t *testing.T) {
 	}
 }
 
-func TestBuildRegistryNamesListsSoTheyCannotCollide(t *testing.T) {
-	// A list name and a sing-box rule-set tag share one string field. Without a
-	// namespace the two would be indistinguishable, and a collision would look
-	// exactly like a real match.
+func TestListsResolveToRuleSetTagsTheGeneratorCanPlace(t *testing.T) {
+	// The generator maps a rule-set tag to a PATH BY ITS PREFIX
+	// (geosite-* -> rule-set-geosite/, geoip-* -> rule-set-geoip/) and skips
+	// anything it does not recognise. A namespaced name like "list:domain/x"
+	// therefore produces a routing rule pointing at a rule-set nothing ever
+	// defines: the config passes `sing-box check`, because sing-box resolves
+	// rule-sets lazily on first match, and matches NOTHING at run time.
+	//
+	// Comparing a v1-generated config against a v2-generated one byte for byte is
+	// what caught this. No unit test would have.
+	cfg := &Configuration{Lists: Lists{
+		Domains: map[string]List{"shared": {Dataset: "geosite", Category: "shared"}},
+		IPs:     map[string]List{"shared": {Dataset: "geoip", Category: "shared"}},
+	}}
 	rule := sampleRule("a", 0, ChainStep{Tier: "preferred", Action: Action{VPN: &VPNAction{Pool: "p"}}})
-	rule.Match = Match{DomainLists: []string{"shared"}, IPLists: []string{"voices"}}
-	reg, err := BuildRegistry(nil, []Rule{rule}, nil, nil)
+	rule.Match = Match{DomainLists: []string{"shared"}, IPLists: []string{"shared"}}
+
+	reg, err := BuildRegistry(cfg, []Rule{rule}, nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	got := reg.Services["a"]
-	want := []string{"list:domain/shared", "list:ip/voices"}
-	if len(got.RuleSets) != len(want) {
-		t.Fatalf("RuleSets = %#v", got.RuleSets)
+	// The SAME list name in both namespaces must land on two DIFFERENT files, or
+	// the ip rule would be silently answered by the domain one.
+	want := []string{"geosite-shared", "geoip-shared"}
+	got := reg.Services["a"].RuleSets
+	if len(got) != len(want) {
+		t.Fatalf("RuleSets = %#v, want %#v", got, want)
 	}
 	for i := range want {
-		if got.RuleSets[i] != want[i] {
-			t.Fatalf("RuleSets = %#v, want %#v", got.RuleSets, want)
+		if got[i] != want[i] {
+			t.Fatalf("RuleSets = %#v, want %#v", got, want)
 		}
-		kind, name, ok := ParseListTag(got.RuleSets[i])
-		if !ok || name == "" || kind == "" {
-			t.Errorf("tag %q does not round-trip: kind=%q name=%q ok=%v", got.RuleSets[i], kind, name, ok)
-		}
+	}
+}
+
+// A domain list used where an IP list is required is a rule that can never fire,
+// not a partial match, so it is a load error rather than a silent mis-route.
+func TestListOfTheWrongKindIsRefused(t *testing.T) {
+	cfg := &Configuration{Lists: Lists{Domains: map[string]List{"only-domain": {Dataset: "geosite"}}}}
+	rule := sampleRule("a", 0, ChainStep{Tier: "preferred", Action: Action{VPN: &VPNAction{Pool: "p"}}})
+	rule.Match = Match{IPLists: []string{"only-domain"}}
+	if _, err := BuildRegistry(cfg, []Rule{rule}, nil, nil); err == nil {
+		t.Fatal("a domain list was accepted in an ip_list position")
+	}
+	// And an undeclared list is an error, not an empty match.
+	rule.Match = Match{DomainLists: []string{"typo"}}
+	if _, err := BuildRegistry(cfg, []Rule{rule}, nil, nil); err == nil {
+		t.Fatal("an undeclared list was accepted")
 	}
 }
 

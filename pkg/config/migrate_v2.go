@@ -36,7 +36,14 @@ func Slug(name string) string {
 }
 
 func MigrateToV2(doc *Document, desyncStrategy DesyncStrategyFor) (*V2Migration, error) {
-	m := &V2Migration{Configuration: &configv2.Configuration{Version: 2}}
+	m := &V2Migration{Configuration: &configv2.Configuration{Version: 2, TargetVersion: doc.SingboxVersion}}
+	if doc.SingboxVersion == "" {
+		// Worth a warning rather than a shrug: with no target the generator runs at
+		// its 1.12.17 baseline, and a node carrying a version-gated feature (hy2
+		// gecko obfs, for one) is emitted WITHOUT it. That is a silent behaviour
+		// change on a working config.
+		m.Warnings = append(m.Warnings, "no singbox_version: the generated config targets the generator baseline, so version-gated node features (e.g. hy2 gecko obfs) will be stripped")
+	}
 
 	for _, instance := range doc.Zapret.Instances {
 		if m.Configuration.Desync.Instances == nil {
@@ -155,12 +162,20 @@ func migrateService(service serviceYAML, cfg *configv2.Configuration, instance s
 		rule.Volume = &configv2.Volume{Targets: targets, MinBytes: int64(service.VolumeBytes)}
 	}
 	if service.IPsFile != "" {
-		listName := id + "-ips"
-		if cfg.Lists.IPs == nil {
-			cfg.Lists.IPs = map[string]configv2.List{}
+		// v1 READS this file at parse time and merges the CIDRs straight into the
+		// rule, so they become part of the service's own match. Migrating it to a
+		// named IP list instead turned the same intent into a rule-set: a different
+		// mechanism, which the byte-comparison showed as an EXTRA rule-set on a rule
+		// v1 emitted with only its geosite list — and as a config that fails
+		// `sing-box check` on a .srs nobody ships.
+		cidrs, err := loadIPsFile(id, service.IPsFile)
+		if err != nil {
+			return nil, nil, err
 		}
-		cfg.Lists.IPs[listName] = configv2.List{Files: []string{service.IPsFile}}
-		rule.Match.IPLists = append(rule.Match.IPLists, listName)
+		rule.Match.CIDRs = append(rule.Match.CIDRs, cidrs...)
+		warnings = append(warnings, fmt.Sprintf(
+			"rule %q: ips_file %q is now INLINED as CIDRs, which is what v1 did at parse time; the file is no longer referenced by name",
+			id, service.IPsFile))
 	}
 	for _, tag := range service.RuleSets {
 		listName, ok := ruleSetToList(tag)
@@ -168,8 +183,28 @@ func migrateService(service serviceYAML, cfg *configv2.Configuration, instance s
 			warnings = append(warnings, fmt.Sprintf("rule %q: rule_set %q is not a geosite/geoip category and was dropped", id, tag))
 			continue
 		}
+		// A geoip rule-set is an IP list and a geosite one is a domain list. Filing
+		// both under one name collapsed them: with both geosite-ru-blocked and
+		// geoip-ru-blocked in play, the second definition was skipped as "already
+		// seen" and the same name landed in DomainLists twice — so the config claimed
+		// a domain list where an IP list belonged, and the byte-comparison against v1
+		// is what made it visible.
+		list := configv2.List{Source: "runetfreedom", Dataset: datasetFor(tag), Category: categoryFor(tag)}
+		if datasetFor(tag) == "geoip" {
+			if cfg.Lists.IPs == nil {
+				cfg.Lists.IPs = map[string]configv2.List{}
+			}
+			if _, seen := cfg.Lists.IPs[listName]; !seen {
+				cfg.Lists.IPs[listName] = list
+			}
+			rule.Match.IPLists = append(rule.Match.IPLists, listName)
+			continue
+		}
+		if cfg.Lists.Domains == nil {
+			cfg.Lists.Domains = map[string]configv2.List{}
+		}
 		if _, seen := cfg.Lists.Domains[listName]; !seen {
-			cfg.Lists.Domains[listName] = configv2.List{Source: "runetfreedom", Dataset: datasetFor(tag), Category: categoryFor(tag)}
+			cfg.Lists.Domains[listName] = list
 		}
 		rule.Match.DomainLists = append(rule.Match.DomainLists, listName)
 	}

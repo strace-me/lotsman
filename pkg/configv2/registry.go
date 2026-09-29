@@ -2,6 +2,7 @@ package configv2
 
 import (
 	"fmt"
+	"strings"
 
 	"github.com/strace-me/lotsman/pkg/registry"
 	"github.com/strace-me/lotsman/pkg/strategy"
@@ -21,43 +22,6 @@ import (
 // per rule; worse, a name collision between a list and a sing-box rule-set would
 // then be indistinguishable from a real match.
 const listTagPrefix = "list:"
-
-// ListTag is the RuleSet tag standing for one named v2 list.
-func ListTag(kind, name string) string {
-	if kind == "ips" {
-		return listTagPrefix + "ip/" + name
-	}
-	return listTagPrefix + "domain/" + name
-}
-
-// ParseListTag splits a tag produced by ListTag, reporting whether it was one.
-func ParseListTag(tag string) (kind, name string, ok bool) {
-	rest, ok := cutPrefix(tag, listTagPrefix)
-	if !ok {
-		return "", "", false
-	}
-	kind, name, found := cut(rest, "/")
-	if !found {
-		return "", "", false
-	}
-	return kind, name, true
-}
-
-func cutPrefix(s, prefix string) (string, bool) {
-	if len(s) < len(prefix) || s[:len(prefix)] != prefix {
-		return "", false
-	}
-	return s[len(prefix):], true
-}
-
-func cut(s, sep string) (string, string, bool) {
-	for i := 0; i+len(sep) <= len(s); i++ {
-		if s[i:i+len(sep)] == sep {
-			return s[:i], s[i+len(sep):], true
-		}
-	}
-	return s, "", false
-}
 
 // BuildRegistry converts v2 rules into registry services.
 func BuildRegistry(cfg *Configuration, rules []Rule, domains, ips map[string]listValues) (*registry.Registry, error) {
@@ -84,16 +48,38 @@ func buildService(cfg *Configuration, rule Rule, domains, ips map[string]listVal
 	service := &registry.Service{
 		Name:     rule.ID,
 		Priority: rule.Priority,
-		RuleSets: append([]string{}, rule.Match.DomainLists...),
 		Domains:  append([]string{}, rule.Match.Domains...),
 		IPs:      append([]string{}, rule.Match.CIDRs...),
 	}
-	for i, tag := range service.RuleSets {
-		service.RuleSets[i] = ListTag("domains", tag)
+	// A named list resolves to a sing-box rule-set TAG, and the tag is what the
+	// generator keys on: `geosite-x` means rule-set-geosite/x.srs, `geoip-x` means
+	// rule-set-geoip/x.srs.
+	//
+	// Namespacing the list name instead ("list:domain/x") was the first
+	// implementation here and it is wrong. The generator maps a tag to a PATH BY ITS
+	// PREFIX and deliberately skips anything unrecognised, so a namespaced name
+	// yields a routing rule pointing at a rule-set nothing defines: the config
+	// passes `sing-box check` (which resolves rule-sets lazily, on first match) and
+	// matches nothing at run time, so every listed rule falls through silently.
+	// Comparing a v1-generated config against a v2-generated one byte for byte is
+	// what made that visible — no test would have.
+	//
+	// Resolving through the list's DATASET is also what keeps names apart: a domain
+	// list "ru-blocked" and an ip list "ru-blocked" become geosite-ru-blocked and
+	// geoip-ru-blocked — two different files, not one name used twice.
+	for _, name := range rule.Match.DomainLists {
+		tag, err := resolveList(cfg, name, "geosite")
+		if err != nil {
+			return nil, fmt.Errorf("rule %q: %w", rule.ID, err)
+		}
+		service.RuleSets = append(service.RuleSets, tag)
 	}
-	for i, tag := range rule.Match.IPLists {
-		service.RuleSets = append(service.RuleSets, ListTag("ips", tag))
-		_ = i
+	for _, name := range rule.Match.IPLists {
+		tag, err := resolveList(cfg, name, "geoip")
+		if err != nil {
+			return nil, fmt.Errorf("rule %q: %w", rule.ID, err)
+		}
+		service.RuleSets = append(service.RuleSets, tag)
 	}
 	if rule.Probe != nil {
 		service.ProbeType = rule.Probe.Type
@@ -199,4 +185,38 @@ func tierState(tier string, first bool) string {
 	default:
 		return registry.StateVPN
 	}
+}
+
+// resolveList turns a v2 list NAME into the sing-box rule-set tag the generator
+// understands, checking the declared dataset against the rule's own namespace.
+func resolveList(cfg *Configuration, name, wantPrefix string) (string, error) {
+	if cfg == nil {
+		return "", fmt.Errorf("list %q cannot be resolved without a configuration", name)
+	}
+	var list List
+	if wantPrefix == "geoip" {
+		found, ok := cfg.Lists.IPs[name]
+		if !ok {
+			return "", fmt.Errorf("ip list %q is not declared", name)
+		}
+		list = found
+	} else {
+		found, ok := cfg.Lists.Domains[name]
+		if !ok {
+			return "", fmt.Errorf("domain list %q is not declared", name)
+		}
+		list = found
+	}
+	// A domain rule-set in the ip namespace, or the reverse, means the rule names
+	// the wrong kind of list. Silently accepting it would route by the wrong
+	// vocabulary — an IP list matching domains is not a partial match, it is a rule
+	// that can never fire.
+	if list.Dataset != "" && !strings.EqualFold(list.Dataset, wantPrefix) {
+		return "", fmt.Errorf("list %q is a %s list but is used where a %s list is required", name, list.Dataset, wantPrefix)
+	}
+	category := list.Category
+	if category == "" {
+		category = name
+	}
+	return wantPrefix + "-" + category, nil
 }
