@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"net/http"
 	"strconv"
 	"time"
 )
@@ -273,4 +274,15 @@ func (s *socks5Dialer) DialContext(ctx context.Context, network, addr string) (n
 
 	conn.SetDeadline(time.Time{}) // hand a clean conn to the caller
 	return conn, nil
+}
+
+// SocksClient returns an HTTP client whose TCP traffic goes through a no-auth
+// SOCKS5 proxy. It is the exported half of the unexported dialer the prober uses,
+// so a caller that must pull a real body along a specific path (the throughput
+// scan) does not have to hand-roll a dialer and get the CONNECT framing wrong.
+func SocksClient(proxyAddr string, timeout time.Duration) *http.Client {
+	return &http.Client{
+		Transport: &http.Transport{DialContext: (&socks5Dialer{proxy: proxyAddr, timeout: timeout}).DialContext},
+		Timeout:   timeout,
+	}
 }
