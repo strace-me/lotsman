@@ -60,6 +60,7 @@ func (c *Configuration) Validate() error {
 	if c.Runtime.Mode != "" && !contains(ProxyModes, c.Runtime.Mode) {
 		return fmt.Errorf("unsupported runtime mode %q", c.Runtime.Mode)
 	}
+	tableOwner := map[string]string{}
 	for name, instance := range c.Desync.Instances {
 		if !contains(DesyncEngines, instance.Engine) {
 			return fmt.Errorf("desync instance %q has unknown engine %q", name, instance.Engine)
@@ -67,6 +68,20 @@ func (c *Configuration) Validate() error {
 		if instance.Table != "" && !nftTablePattern.MatchString(instance.Table) {
 			return fmt.Errorf("desync instance %q has invalid nft table %q", name, instance.Table)
 		}
+		// Compare the EFFECTIVE table: the per-instance default is applied while the
+		// document loads, so a struct handed straight to Validate still carries "" and
+		// two such instances would otherwise both hash to the empty key and be
+		// reported as colliding when their real tables are distinct.
+		table := instance.Table
+		if table == "" {
+			table = "inet nfqueue-" + name
+		}
+		if prev, taken := tableOwner[table]; taken {
+			return fmt.Errorf("desync instances %q and %q share nft table %q: an instance installs by "+
+				"DELETING and replacing its table, so one would wipe the other's rules — and the "+
+				"victim instance would keep answering as if it were installed", prev, name, table)
+		}
+		tableOwner[table] = name
 	}
 	for name, p := range c.Pools {
 		if p.MinCoverage < 0 || p.MinCoverage > 1 {

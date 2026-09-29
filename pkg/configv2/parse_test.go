@@ -74,3 +74,26 @@ func TestParseRejectsUnknownDataSource(t *testing.T) {
 		t.Fatal("list referencing an unknown data source was accepted")
 	}
 }
+
+// Each instance installs by DELETING and replacing its nft table, so two instances
+// sharing one table means one wipes the other's rules — and the victim keeps
+// answering as if it were installed, which is the "desync silently absent while
+// every status read reads healthy" class this project keeps paying for.
+func TestTwoInstancesCannotShareAnNftTable(t *testing.T) {
+	cfg := &Configuration{Desync: Desync{Instances: map[string]Instance{
+		"a": {Engine: "nfqws1", Enabled: true, Table: "inet zapret"},
+		"b": {Engine: "nfqws2", Enabled: true, Table: "inet zapret"},
+	}}}
+	if err := cfg.Validate(); err == nil {
+		t.Fatal("two instances sharing one nft table were accepted")
+	}
+	// Distinct tables are fine, and so is leaving the per-instance default to apply.
+	cfg.Desync.Instances["b"] = Instance{Engine: "nfqws2", Enabled: true, Table: "inet zapret2"}
+	if err := cfg.Validate(); err != nil {
+		t.Errorf("distinct tables were refused: %v", err)
+	}
+	cfg.Desync.Instances["b"] = Instance{Engine: "nfqws2", Enabled: true}
+	if err := cfg.Validate(); err != nil {
+		t.Errorf("per-instance defaults collided: %v", err)
+	}
+}
