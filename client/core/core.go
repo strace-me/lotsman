@@ -82,7 +82,16 @@ type Options struct {
 	// completes the handshake and then stalls — so the canary pulls real volume
 	// before crediting a recipe. 0 disables the stage.
 	CanaryGoodputKBps  float64
-	CanaryGoodputBytes int64               // bytes to pull per measurement; 0 = 64KiB
+	CanaryGoodputBytes int64 // bytes to pull per measurement; 0 = 64KiB
+	// ThroughputScan enables the out-of-band per-exit throughput measurement that
+	// a speedtest_top pool narrows by. Off by default: it PULLS REAL BYTES on the
+	// uplink it measures, and it aims the shared probe selector while it does, so
+	// it is budgeted and off unless asked for. The daemon has the same flag, and it
+	// exists in both roots because a capability wired in only one of them is the
+	// drift this project already paid for (LOT-65).
+	ThroughputScan     bool
+	ThroughputBudget   int                 // exits measured per pass; 0 = 4
+	ThroughputInterval time.Duration       // period of a pass; 0 = 30m
 	RuleSetDir         string              // dir holding rule-set-{geosite,geoip}/*.srs ("" = generator default, i.e. the router's /etc/sing-box)
 	Tun                *singbox.TunOptions // client ingress (nil = a sensible default tun)
 	// TunIPv6 gives the default tun an IPv6 address as well, so auto_route installs
@@ -827,6 +836,17 @@ func (c *Core) buildLoop() error {
 		}
 		c.pathHealth = det
 		runners = append(runners, namedRunner{"path-health", func(rctx context.Context) { c.pathHealthLoop(rctx, det) }})
+
+		// The throughput scan exists in the daemon too, under the same name and with
+		// the same default (off). A capability wired in only one root is the drift
+		// this project already paid for: the client ran a subset of the daemon for
+		// months, each root tested only what it had, both were green, and the only
+		// detector was a service misbehaving on the owner's device (LOT-65).
+		if scan, err := c.buildThroughputScan(); err != nil {
+			c.log.Warn("throughput scan not started", "err", err)
+		} else if scan != nil {
+			runners = append(runners, namedRunner{"throughput-scan", scan})
+		}
 		if c.opts.PathHealthAct {
 			c.brain.SetPathOracle(det)
 			c.log.Info("path-health ACT: the brain jumps straight to the best working tier", "interval", pathHealthInterval.String())

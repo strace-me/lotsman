@@ -119,6 +119,12 @@ func main() {
 		recommended   = flag.Bool("recommended", false, "with -init: write the curated recommended config (services + rules, no creds); -sub optional")
 		printConfig   = flag.Bool("print-config", false, "generate the sing-box config from -config, print it, and exit (no sing-box needed)")
 	)
+	throughputScan := flag.Bool("throughput-scan", false,
+		"measure each exit's sustained throughput out of band so a speedtest_top pool can narrow by measured speed. OFF by default: it pulls real bytes on the uplink it measures and aims the shared probe selector while it does.")
+	throughputBudget := flag.Int("throughput-budget", 4,
+		"how many exits one throughput pass may measure")
+	throughputInterval := flag.Duration("throughput-interval", 30*time.Minute,
+		"period of the throughput scan; each pass is budgeted, so this is how long covering the whole fleet takes")
 	canaryGoodput := flag.Float64("canary-goodput-kbps", 64, "a zapret recipe must sustain at least this KiB/s to be credited; reachability alone scores a frozen path as a win. 0 disables the check.")
 	// See the daemon: neither binary could say what it was without being asked to
 	// start first, which is the wrong time for the question.
@@ -193,38 +199,41 @@ func main() {
 
 	box := externalbox.New(*singboxBin, *singboxCfg, log)
 	c := core.New(conf, box, core.Options{
-		ClashListen:       *clashListen,
-		Interval:          *interval,
-		KBFile:            *kbFile,
-		KBDir:             *kbDir,
-		StateFile:         *stateFile,
-		NodeRank:          *nodeRank,
-		PathHealth:        *pathHealth,
-		PathHealthAct:     *pathHealthAct,
-		EngineHealth:      *engineHealth,
-		Smart:             *smart,
-		AuditLog:          *auditLog,
-		FailLog:           *failLog,
-		CanaryGoodputKBps: *canaryGoodput,
-		ProbeProxy:        *probeProxy,
-		RuleSetDir:        *ruleSetDir,
-		NfqwsBin:          *nfqwsBin,
-		ZapretFiles:       *zapretFiles,
-		DesyncEngine:      *desyncEngine,
-		Nfqws2Lua:         *nfqws2Lua,
-		HostlistDir:       *hostlistDir,
-		SingboxBin:        *singboxBin,
-		SingboxConfig:     *singboxCfg,
-		RefreshEvery:      *refreshEvery,
-		RoamInterval:      *roamInterval,
-		QNum:              *qnum,
-		WAN:               *wan,
-		ProxyListen:       *proxyListen,
-		MetricsAddr:       *metricsAddr,
-		BaselineFile:      *baselineFile,
-		DesyncForce:       *desyncForce,
-		HostDNS:           *hostDNS,
-		TunIPv6:           *tunIPv6,
+		ClashListen:        *clashListen,
+		Interval:           *interval,
+		KBFile:             *kbFile,
+		KBDir:              *kbDir,
+		StateFile:          *stateFile,
+		NodeRank:           *nodeRank,
+		PathHealth:         *pathHealth,
+		PathHealthAct:      *pathHealthAct,
+		EngineHealth:       *engineHealth,
+		Smart:              *smart,
+		AuditLog:           *auditLog,
+		FailLog:            *failLog,
+		CanaryGoodputKBps:  *canaryGoodput,
+		ThroughputScan:     *throughputScan,
+		ThroughputBudget:   *throughputBudget,
+		ThroughputInterval: *throughputInterval,
+		ProbeProxy:         *probeProxy,
+		RuleSetDir:         *ruleSetDir,
+		NfqwsBin:           *nfqwsBin,
+		ZapretFiles:        *zapretFiles,
+		DesyncEngine:       *desyncEngine,
+		Nfqws2Lua:          *nfqws2Lua,
+		HostlistDir:        *hostlistDir,
+		SingboxBin:         *singboxBin,
+		SingboxConfig:      *singboxCfg,
+		RefreshEvery:       *refreshEvery,
+		RoamInterval:       *roamInterval,
+		QNum:               *qnum,
+		WAN:                *wan,
+		ProxyListen:        *proxyListen,
+		MetricsAddr:        *metricsAddr,
+		BaselineFile:       *baselineFile,
+		DesyncForce:        *desyncForce,
+		HostDNS:            *hostDNS,
+		TunIPv6:            *tunIPv6,
 		DesyncExclude: func() []string {
 			if *desyncExclude == "" {
 				return nil
