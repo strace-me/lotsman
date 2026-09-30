@@ -113,7 +113,7 @@ func TestChainRejectsUnknownTier(t *testing.T) {
 }
 
 func TestChainRejectsTwoActionsInOneStep(t *testing.T) {
-	if _, err := ParseRule([]byte("id: a\nchain:\n  - {tier: preferred, direct: true, bypass: true}\n")); err == nil {
+	if _, err := ParseRule([]byte("id: a\nchain:\n  - {tier: preferred, direct: true, vpn: {pool: p}}\n")); err == nil {
 		t.Fatal("a step carrying two actions was accepted")
 	}
 }

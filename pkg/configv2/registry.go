@@ -27,10 +27,13 @@ const listTagPrefix = "list:"
 func BuildRegistry(cfg *Configuration, rules []Rule, domains, ips map[string]listValues) (*registry.Registry, error) {
 	reg := &registry.Registry{Services: map[string]registry.Service{}}
 	for _, rule := range rules {
-		if !rule.Enabled {
-			// v1 drops a disabled service out of buildRegistry entirely, so that no
-			// consumer needs a guard for it. Matching that is what keeps a disabled
-			// rule from being probed because one consumer forgot to check.
+		// Neither a disabled nor a bypassed rule reaches the runtime. They are
+		// different facts and are carried separately for that reason — `enabled` is a
+		// switch the operator turned off, `bypass` is a standing statement that these
+		// domains are not Lotsman's business — but the effect on the registry is the
+		// same, and it is the same effect v1 has for a disabled service: no consumer
+		// needs a guard, so nothing can forget one.
+		if !rule.Enabled || rule.Bypass {
 			continue
 		}
 		service, err := buildService(cfg, rule, domains, ips)
@@ -151,11 +154,7 @@ func buildChain(rule Rule, cfg *Configuration) ([]registry.ChainStep, error) {
 			out.StrategyClass = strategy.ClassDirect
 			out.StrategyID = "direct"
 			out.State = tierState(step.Tier, false)
-		case step.Action.Bypass:
-			// v1 has no bypass rung: the nearest thing is a service switched off.
-			// Carrying it as "direct" would assert something false — that traffic is
-			// routed there on purpose — so it is refused rather than mistranslated.
-			return nil, fmt.Errorf("rule %q: bypass at step %d has no v1 equivalent; it is a config concept, not a route", rule.ID, i)
+
 		default:
 			return nil, fmt.Errorf("rule %q: step %d has no action", rule.ID, i)
 		}

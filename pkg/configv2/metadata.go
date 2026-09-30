@@ -20,19 +20,24 @@ type StrategyInfo struct {
 // validation hints. It is derived from the same enum tables the loader
 // validates against, so the two cannot drift.
 type Metadata struct {
-	Paths         map[string]string   `json:"paths"`
-	ProxyEngines  []string            `json:"proxy_engines"`
-	ProxyModes    []string            `json:"proxy_modes"`
-	DesyncEngines []string            `json:"desync_engines"`
-	ProbeTypes    []string            `json:"probe_types"`
-	ChainTiers    []string            `json:"chain_tiers"`
-	ChainActions  []ChainActionMeta   `json:"chain_actions"`
-	Providers     []string            `json:"providers"`
-	DomainLists   []string            `json:"domain_lists"`
-	IPLists       []string            `json:"ip_lists"`
-	Pools         []string            `json:"pools"`
-	Desync        map[string]Instance `json:"desync_instances"`
-	Strategies    []StrategyInfo      `json:"strategies"`
+	Paths         map[string]string `json:"paths"`
+	ProxyEngines  []string          `json:"proxy_engines"`
+	ProxyModes    []string          `json:"proxy_modes"`
+	DesyncEngines []string          `json:"desync_engines"`
+	ProbeTypes    []string          `json:"probe_types"`
+	ChainTiers    []string          `json:"chain_tiers"`
+	ChainActions  []ChainActionMeta `json:"chain_actions"`
+	// RuleFlags are RULE-level switches, served separately from the chain actions so
+	// a UI can render them in the section form and the actions in the ladder list.
+	// Mixing them is what §4 undid: a rung could be `bypass`, which reads as
+	// "escalate to bypassing" and is not a path at all.
+	RuleFlags   []FlagMeta          `json:"rule_flags"`
+	Providers   []string            `json:"providers"`
+	DomainLists []string            `json:"domain_lists"`
+	IPLists     []string            `json:"ip_lists"`
+	Pools       []string            `json:"pools"`
+	Desync      map[string]Instance `json:"desync_instances"`
+	Strategies  []StrategyInfo      `json:"strategies"`
 }
 
 func BuildMetadata(cfg *Configuration, rules []Rule, pools []string, strategies []StrategyInfo) Metadata {
@@ -73,6 +78,7 @@ func BuildMetadata(cfg *Configuration, rules []Rule, pools []string, strategies 
 		ProbeTypes:    ProbeTypes,
 		ChainTiers:    ChainTiers,
 		ChainActions:  ChainActions,
+		RuleFlags:     RuleFlags,
 		Providers:     sortedKeys(cfg.DataSources),
 		DomainLists:   sortedKeys(cfg.Lists.Domains),
 		IPLists:       sortedKeys(cfg.Lists.IPs),

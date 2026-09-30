@@ -116,13 +116,41 @@ func TestBuildRegistryMapsTiersOntoStates(t *testing.T) {
 	}
 }
 
-func TestBuildRegistryRefusesBypass(t *testing.T) {
-	// v1 has no bypass rung. The nearest thing is a switched-off service, and
-	// carrying it as "direct" would assert something false: that traffic is routed
-	// there on purpose. Better to refuse than to mistranslate.
-	rule := sampleRule("a", 0, ChainStep{Tier: "preferred", Action: Action{Bypass: true}})
-	if _, err := BuildRegistry(nil, []Rule{rule}, nil, nil); err == nil {
-		t.Fatal("a bypass rung was silently translated")
+// §4: `bypass` is a RULE flag, not a rung. A rung is a path the ladder tries;
+// "bypass" is the absence of a rule, and filed as an action it sat in the same
+// one-of list as desync/vpn, so a rung could be read as "escalate to bypassing"
+// and the UI had to render a non-path among the paths.
+func TestBypassIsARuleAndNotARung(t *testing.T) {
+	// A bypassed rule is not routed. The effect on the registry is the same as a
+	// disabled one, and it is the same effect v1 has for a disabled service: absent
+	// entirely, so no consumer can forget a guard.
+	rule := sampleRule("a", 0, ChainStep{Tier: "preferred", Action: Action{Direct: true}})
+	rule.Bypass = true
+	reg, err := BuildRegistry(nil, []Rule{rule}, nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := reg.Services["a"]; ok {
+		t.Error("a bypassed rule reached the runtime")
+	}
+	// Un-bypassing the same rule brings it back, so the flag is the thing doing it
+	// and not an accidental exclusion.
+	rule.Bypass = false
+	reg, err = BuildRegistry(nil, []Rule{rule}, nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := reg.Services["a"]; !ok {
+		t.Error("the rule did not come back after clearing bypass")
+	}
+
+	// A chain step can no longer express bypass at all: the field is gone, so the
+	// YAML key is unknown to the decoder and a document using it is a load error
+	// rather than a silently-ignored key.
+	data := []byte("id: a\nenabled: true\nmatch: {domains: [x.example]}\n" +
+		"chain:\n  - tier: preferred\n    bypass: true\n")
+	if _, err := ParseRule(data); err == nil {
+		t.Error("a `bypass` rung was accepted; the key should no longer exist")
 	}
 }
 

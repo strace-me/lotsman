@@ -32,6 +32,11 @@ var nftTablePattern = regexp.MustCompile(`^(inet|ip|ip6|bridge|netdev|mangle) [A
 // exclude would look applied while removing nothing.
 var iso2 = regexp.MustCompile(`^[a-z]{2}$`)
 
+type FlagMeta struct {
+	Name        string `json:"name"`
+	Description string `json:"description"`
+}
+
 type ChainActionMeta struct {
 	Name        string   `json:"name"`
 	Description string   `json:"description"`
@@ -42,7 +47,15 @@ var ChainActions = []ChainActionMeta{
 	{Name: "desync", Description: "desync engine + strategy bundle", Fields: []string{"instance", "strategy"}},
 	{Name: "vpn", Description: "proxy pool from sing-box", Fields: []string{"pool"}},
 	{Name: "direct", Description: "no proxy, no desync", Fields: nil},
-	{Name: "bypass", Description: "exclude from this rule entirely", Fields: nil},
+}
+
+// RuleFlags are the RULE-level switches, kept apart from the chain actions on
+// purpose (§4). A UI renders these in the section form and the actions in the
+// ladder list, because they are different levels: an action is a path the ladder
+// can try, a flag is a statement about the rule itself. Filing them together is
+// what let a rung be "bypass" — an escalation to the absence of a rule.
+var RuleFlags = []FlagMeta{
+	{Name: "bypass", Description: "this rule does not touch the traffic it matches: no route, no desync, no probing. Not the same as enabled:false, which is a switch the operator turned off"},
 }
 
 func contains(values []string, want string) bool {

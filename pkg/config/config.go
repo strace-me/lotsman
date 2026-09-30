@@ -52,6 +52,12 @@ type Config struct {
 	// from Registry entirely — nothing probes, routes or desyncs them — and are
 	// carried here only so a UI can list them and offer to switch them back on.
 	DisabledServices []string
+	// BypassedServices names the rules that declared `bypass: true`. They are absent
+	// from Registry for a different reason than DisabledServices — one is a switch
+	// the operator turned off, the other is a standing statement that these domains
+	// are not Lotsman's business — and a UI offering to switch one back on must not
+	// offer it for the other. v1 has no equivalent: it had nowhere to say it.
+	BypassedServices []string
 }
 
 // ZapretPreset is an upstream desync bundle run EXACTLY as its author wrote it:

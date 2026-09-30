@@ -16,6 +16,20 @@ type Rule struct {
 	Volume   *Volume     `yaml:"volume"`
 	Behavior Behavior    `yaml:"behavior"`
 	Chain    []ChainStep `yaml:"chain"`
+	// Bypass says this rule does not TOUCH the traffic it matches: no route, no
+	// desync, no probing, nothing. The traffic is left to the system default.
+	//
+	// It is a RULE flag and deliberately not a chain action, which is the whole of
+	// §4. `direct` is a rung: the ladder tries paths until one works, and "no
+	// proxy, no desync" is one of the paths worth trying. `bypass` is not a path —
+	// it is the absence of a rule. Filed as an action it sat beside `desync` and
+	// `vpn` in the same one-of list, so a rung could read as "escalate to bypassing",
+	// and the UI had to render a non-path among the paths.
+	//
+	// It is NOT the same as `enabled: false`. Disabled is a switch the operator
+	// turned off; bypass is a standing statement that these domains are not
+	// Lotsman's business. They are carried separately for exactly that reason.
+	Bypass bool `yaml:"bypass,omitempty"`
 }
 
 // Behavior is how this rule is STEERED, as opposed to what traffic it catches.
@@ -91,11 +105,12 @@ type ChainStep struct {
 	Action Action `yaml:",inline"`
 }
 
+// Action is one rung of a chain. Exactly one field is set, and every field here is
+// a PATH the ladder can try — which is the test `bypass` failed and moved out.
 type Action struct {
 	Desync *DesyncAction `yaml:"desync"`
 	VPN    *VPNAction    `yaml:"vpn"`
 	Direct bool          `yaml:"direct"`
-	Bypass bool          `yaml:"bypass"`
 }
 
 type DesyncAction struct {

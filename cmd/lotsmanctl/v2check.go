@@ -128,8 +128,6 @@ func chainSummary(rule configv2.Rule) string {
 			parts = append(parts, step.Tier+":vpn:"+step.Action.VPN.Pool)
 		case step.Action.Direct:
 			parts = append(parts, step.Tier+":direct")
-		case step.Action.Bypass:
-			parts = append(parts, step.Tier+":bypass")
 		}
 	}
 	return strings.Join(parts, " -> ")

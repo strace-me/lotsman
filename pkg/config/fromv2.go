@@ -138,11 +138,23 @@ func FromV2(cfg *configv2.Configuration, rules []configv2.Rule) (*Config, []stri
 	// A disabled rule is dropped from the registry entirely, so nothing probes,
 	// routes or desyncs it. The name is carried separately only so a UI can list
 	// it and offer to switch it back on.
+	// Bypassed rules are carried SEPARATELY from disabled ones, though both are
+	// absent from the runtime. The distinction is the point of §4: `enabled: false`
+	// is a switch the operator turned off, `bypass: true` is a standing statement
+	// that these domains are not Lotsman's business, and a UI that offers to switch
+	// one back on must not offer it for the other.
+	var bypassed []string
 	for _, rule := range rules {
+		if rule.Bypass {
+			bypassed = append(bypassed, rule.ID)
+			continue
+		}
 		if !rule.Enabled {
 			out.DisabledServices = append(out.DisabledServices, rule.ID)
 		}
 	}
+	sort.Strings(bypassed)
+	out.BypassedServices = bypassed
 	sort.Strings(out.DisabledServices)
 
 	gaps := make([]string, 0, len(Gaps))

@@ -86,11 +86,10 @@ func (a Action) validate(ruleID string) error {
 	if a.Direct {
 		actions++
 	}
-	if a.Bypass {
-		actions++
-	}
 	if actions != 1 {
-		return fmt.Errorf("rule %q has a chain step with %d actions, want exactly 1", ruleID, actions)
+		return fmt.Errorf("rule %q has a chain step with %d actions, want exactly 1 — "+
+			"a step is a PATH, and `bypass` is the absence of a rule: it is a rule-level "+
+			"flag now, not something a ladder can escalate to", ruleID, actions)
 	}
 	return nil
 }
