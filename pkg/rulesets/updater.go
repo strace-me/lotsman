@@ -58,13 +58,27 @@ func (u *Updater) Update(ctx context.Context) error {
 	if u.pin == "" {
 		u.pin = u.Pin
 	}
-	latest, err := u.Releaser.Latest(ctx, u.Repo)
-	if err != nil {
-		return fmt.Errorf("rulesets: resolve latest: %w", err)
-	}
 	// Which release to evaluate this cycle.
+	//
+	// A pin with AutoBump off is meant to be fully offline-deterministic, and the
+	// API call below used to be made anyway — unconditionally, before this decision.
+	// So pinning bought nothing the moment GitHub rate-limited us: the updater
+	// failed on `releases/latest` for a release it already knew the tag of and
+	// never needed. That is not hypothetical; it is what the live client did
+	// (403, unauthenticated limit 60/h) and it is why "just pin it" was not advice
+	// that would have worked.
+	//
+	// latest is only fetched when it can actually change the outcome, and stays
+	// empty otherwise — NextPin already treats "" as "no move", which is exactly
+	// the right answer for a pinned, non-bumping cycle.
 	candidate := u.pin
+	latest := ""
 	if candidate == "" || u.AutoBump {
+		resolved, err := u.Releaser.Latest(ctx, u.Repo)
+		if err != nil {
+			return fmt.Errorf("rulesets: resolve latest: %w", err)
+		}
+		latest = resolved
 		candidate = latest
 	}
 	if candidate == "" {
