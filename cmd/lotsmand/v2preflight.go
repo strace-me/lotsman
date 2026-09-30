@@ -4,6 +4,7 @@ import (
 	"context"
 	"flag"
 	"fmt"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"sort"
@@ -27,6 +28,11 @@ type v2Flags struct {
 	store    *string
 	rulesets *string
 	plain    *string
+	// run makes the daemon START on a v2 document instead of reporting on one. It is
+	// a separate flag from -config-v2 on purpose: that one means "validate and EXIT",
+	// and silently changing the meaning of a flag that already exists is how a
+	// documented safety property disappears.
+	run *string
 }
 
 func registerV2Flags(fs *flag.FlagSet) v2Flags {
@@ -38,6 +44,8 @@ func registerV2Flags(fs *flag.FlagSet) v2Flags {
 			"compiled .srs root; enables provider-backed lists"),
 		plain: fs.String("plain-v2", "",
 			"plain rule-set file; enables provider-backed lists without a converter"),
+		run: fs.String("run-v2", "",
+			"START the daemon on a v2 configuration.yaml (or its directory). Mutually exclusive with -config; -config-v2 only validates and exits"),
 	}
 }
 
@@ -228,4 +236,34 @@ func loadV2List(def lists.Definition, providers lists.Providers, compiler lists.
 		fmt.Printf("  list %-16s data is from %s\n", def.Name, snapshot.UpdatedAt.Format(time.RFC3339))
 	}
 	return configv2.ListShape{Empty: len(snapshot.Values) == 0}
+}
+
+// loadV2ConfigForDaemon loads a v2 document for the RUNNING daemon and says what
+// the projection could not carry.
+//
+// The gaps are logged rather than swallowed because they are behavioural, not
+// cosmetic: the projection leaves split-DNS, the uTLS fingerprint and the declared
+// strategies at zero, and a daemon that starts and routes with all three defaulted
+// looks exactly like one that was configured. Each line is a claim the operator
+// never made.
+func loadV2ConfigForDaemon(f v2Flags) (*config.Config, error) {
+	load, err := config.LoadV2(*f.run, *f.rules, *f.store)
+	if err != nil {
+		return nil, err
+	}
+	// The logger is the daemon's own TEXT handler on stdout, matching main's: a
+	// helper that quietly opened a second handler would double every line it logs.
+	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelInfo}))
+	if load.StoreMissing != nil {
+		logger.Warn("v2: no strategy bundle store, so pinned strategies cannot be resolved yet",
+			"store", *f.store, "err", load.StoreMissing)
+	}
+	projected, gaps, err := config.FromV2(load.Config, load.Rules)
+	if err != nil {
+		return nil, err
+	}
+	for _, gap := range gaps {
+		logger.Warn("v2: not carried into the runtime, running at a default instead", "gap", gap)
+	}
+	return projected, nil
 }

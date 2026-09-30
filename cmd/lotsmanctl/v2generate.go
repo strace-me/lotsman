@@ -3,12 +3,8 @@ package main
 import (
 	"fmt"
 	"os"
-	"path/filepath"
 
 	"github.com/strace-me/lotsman/pkg/config"
-	"github.com/strace-me/lotsman/pkg/configv2"
-	"github.com/strace-me/lotsman/pkg/strategystore"
-	"github.com/strace-me/lotsman/pkg/zapret"
 )
 
 // loadV2Config reads a v2 document and projects it onto the runtime Config.
@@ -22,56 +18,27 @@ import (
 // the target sing-box version and declared strategies at zero, and a config that
 // generates "fine" with all four silently defaulted must say so.
 func loadV2Config(configPath, rulesDir, storeRoot string) (*config.Config, error) {
-	// Accept the DIRECTORY, because that is what an operator has: a v2 deployment
-	// is configuration.yaml + rules/ as a unit. Being handed the file directly is
-	// still fine, and a path that is neither is an error worth naming.
-	if info, err := os.Stat(configPath); err == nil && info.IsDir() {
-		configPath = filepath.Join(configPath, "configuration.yaml")
-		rulesDir = filepath.Join(filepath.Dir(configPath), "rules")
-	}
-	cfg, err := configv2.Load(configPath)
+	// ONE loader for both roots. A second reader here would mean a config that
+	// validates in the CLI and is rejected by the daemon — the one class of bug a
+	// preflight exists to catch.
+	load, err := config.LoadV2(configPath, rulesDir, storeRoot)
 	if err != nil {
 		return nil, err
 	}
-	if rulesDir == "" {
-		rulesDir = filepath.Join(filepath.Dir(configPath), "rules")
+	if load.StoreMissing != nil {
+		fmt.Fprintf(os.Stderr, "v2 note: %v (a pinned strategy cannot be verified until it exists)\n", load.StoreMissing)
 	}
-	rules, err := configv2.LoadRules(rulesDir)
-	if err != nil {
-		return nil, fmt.Errorf("rules: %w", err)
-	}
-	// Strategy bundles resolve the {instance, strategy} references a rule makes.
-	// A missing store is not fatal here: it makes every pinned strategy an unknown
-	// reference, which is a real error worth reporting, but the rule set is still
-	// worth printing so the operator can see the failure in context.
-	var strategyErr error
-	// The SAME resolver the v2 preflight uses, not a second reader of the store.
-	// The store is keyed by ENGINE (strategies/<engine>/<id>), and a bundle belongs
-	// to every instance running that engine.
-	adapters := map[string]strategystore.EngineAdapter{
-		zapret.NfqwsEngine{}.Engine():  zapret.NfqwsEngine{},
-		zapret.Nfqws2Engine{}.Engine(): zapret.Nfqws2Engine{},
-	}
-	bundles := map[string][]string{}
-	if _, err := os.Stat(storeRoot); err == nil {
-		bundles = bundleStrategies(storeRoot, adapters, cfg, func(string, ...any) {})
-	} else {
-		strategyErr = fmt.Errorf("strategy store %s: %v", storeRoot, err)
-	}
-	if err := configv2.ValidateReferencesAll(cfg, rules, bundles); err != nil {
-		return nil, err
-	}
-	projected, gaps, err := config.FromV2(cfg, rules)
+	projected, gaps, err := config.FromV2(load.Config, load.Rules)
 	if err != nil {
 		return nil, err
 	}
+	// The gaps are printed, never swallowed: the projection leaves DNS, uTLS and the
+	// declared strategies at zero, and a config that generates "fine" with all
+	// three defaulted must say so.
 	for _, gap := range gaps {
-		fmt.Fprintf(os.Stderr, "v2 gap: %s\\n", gap)
+		fmt.Fprintf(os.Stderr, "v2 gap: %s\n", gap)
 	}
-	if strategyErr != nil {
-		fmt.Fprintf(os.Stderr, "v2 note: %v (pinned strategies may be unverifiable)\\n", strategyErr)
-	}
-	fmt.Fprintf(os.Stderr, "v2: %d rule(s) loaded, %d enabled, %d disabled\\n",
-		len(rules), len(rules)-len(projected.DisabledServices), len(projected.DisabledServices))
+	on, off := config.EnabledRules(load.Rules)
+	fmt.Fprintf(os.Stderr, "v2: %d rule(s), %d enabled, %d disabled\n", len(load.Rules), len(on), len(off))
 	return projected, nil
 }

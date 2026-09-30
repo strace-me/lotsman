@@ -189,12 +189,33 @@ func main() {
 	bus := events.NewBus()
 	knowledge := kb.New()
 
+	if *v2.run != "" && *configPath != "" {
+		log.Error("config: -config and -run-v2 are mutually exclusive; one document, one parser",
+			"v1", *configPath, "v2", *v2.run)
+		os.Exit(2)
+	}
+
 	// Registry comes from config when given, else the builtin youtube service.
 	// With a config we also exercise the subscription->pool pipeline at startup
 	// and log membership counts (the nodes do not yet feed sing-box generation).
 	reg := registry.Builtin()
 	var conf *config.Config
-	if *configPath != "" {
+	if *v2.run != "" {
+		// The v2 document is PROJECTED onto the same Config the v1 parser produces,
+		// so everything below this line — Brain, Applier, the executors, the nft
+		// renderer, singbox.Generate — is untouched and unaware of which parser ran.
+		// That is the whole cutover: swapping the parser, not porting the data plane.
+		loaded, err := loadV2ConfigForDaemon(v2)
+		if err != nil {
+			log.Error("v2 config load failed", "path", *v2.run, "err", err)
+			os.Exit(1)
+		}
+		conf = loaded
+		reg = conf.Registry
+		log.Info("running on a v2 configuration", "path", *v2.run,
+			"services", len(reg.Services), "devices", len(conf.Devices),
+			"pools", len(conf.Pools.Pools), "target_singbox", conf.SingboxVersion)
+	} else if *configPath != "" {
 		loaded, err := config.Load(*configPath)
 		if err != nil {
 			log.Error("config load failed", "path", *configPath, "err", err)

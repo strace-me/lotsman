@@ -49,7 +49,20 @@ func MigrateToV2(doc *Document, desyncStrategy DesyncStrategyFor) (*V2Migration,
 		if m.Configuration.Desync.Instances == nil {
 			m.Configuration.Desync.Instances = map[string]configv2.Instance{}
 		}
-		m.Configuration.Desync.Instances[Slug(instance.Name)] = configv2.Instance{Engine: "nfqws1", Enabled: true}
+		// The ENGINE is not carried: v1 has one engine for every instance, and v2
+		// names the engine on the instance. Defaulting to nfqws1 preserves what a v1
+		// file actually ran, rather than guessing upward to the newer engine — which
+		// would be an upgrade disguised as a migration.
+		//
+		// The CAPTURE set is carried because dropping it is not a default: an instance
+		// with no ports installs an nft rule that matches nothing, so the desync is
+		// silently absent while every status read stays healthy.
+		m.Configuration.Desync.Instances[Slug(instance.Name)] = configv2.Instance{
+			Engine:    "nfqws1",
+			Enabled:   true,
+			Capture:   configv2.Capture{TCP: portList(instance.Capture.TCP), UDP: portList(instance.Capture.UDP)},
+			Connbytes: instance.Connbytes,
+		}
 	}
 
 	m.Configuration.Pools = map[string]configv2.Pool{}

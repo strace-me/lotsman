@@ -571,13 +571,24 @@ func loadPreset(file, declaredName string, single bool) (*ZapretPreset, error) {
 // explicit qnum is still honoured (a deployment may have a reason this code
 // cannot see), but omitting it is the normal way to say it, and the first
 // instance keeps the base so an existing single-instance config is unaffected.
+// baseQNum is the router's historical production queue. An instance that names no
+// queue takes the next number from here, so the first one keeps the base and an
+// existing single-instance config is unaffected.
+const baseQNum = 200
+
+// DeriveQNum is the ONE derivation of a production queue number from a position.
+// It is shared with the v2 projection because a second copy would be a second
+// answer to "which queue is this instance", and the two disagreeing is how two
+// instances end up sharing an NFQUEUE — which the allocator is the only thing that
+// catches, and only at start.
+func DeriveQNum(index int) int { return baseQNum + index }
+
 func buildZapret(z zapretYAML) ([]zapret.Instance, error) {
-	const baseQNum = 200 // the router's historical production queue
 	out := make([]zapret.Instance, 0, len(z.Instances))
 	for i, in := range z.Instances {
 		qnum := in.QNum
 		if qnum == 0 {
-			qnum = baseQNum + i
+			qnum = DeriveQNum(i)
 		}
 		out = append(out, zapret.Instance{
 			Name:      in.Name,

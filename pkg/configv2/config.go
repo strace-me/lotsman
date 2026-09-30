@@ -110,6 +110,28 @@ type Instance struct {
 	// `inet nfqueue-<instance>`; set it explicitly when a deployment already owns
 	// a table name.
 	Table string `yaml:"table"`
+	// Capture is the port set this instance diverts to its queue, the nfqws
+	// equivalent of "which traffic this process sees". It is NOT optional in
+	// practice: an instance with no capture installs an nft rule that matches
+	// nothing, so the desync engine is silently absent while every status read
+	// still reports healthy. The live cutover found that the schema had no such
+	// field, so the projection produced exactly that — a desync that captured
+	// nothing and reported fine.
+	//
+	// Queue number is deliberately NOT a field: it is derived from the instance's
+	// POSITION, so the first one keeps the deployment's base and adding an instance
+	// cannot collide with a manually chosen number.
+	Capture Capture `yaml:"capture"`
+	// Connbytes limits the first N packets per connection; 0 = the whole stream.
+	Connbytes int `yaml:"connbytes,omitempty"`
+}
+
+// Capture is a port set, stringified. A YAML item may be an int (443) or a range
+// string ("50000-50100"), so the v2 form is []string and the same normalisation as
+// v1 applies.
+type Capture struct {
+	TCP []string `yaml:"tcp,omitempty"`
+	UDP []string `yaml:"udp,omitempty"`
 }
 
 type Runtime struct {

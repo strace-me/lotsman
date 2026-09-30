@@ -113,14 +113,26 @@ func FromV2(cfg *configv2.Configuration, rules []configv2.Rule) (*Config, []stri
 		names = append(names, name)
 	}
 	sort.Strings(names) // map order must not reach a generated config
-	for _, name := range names {
+	// Position is the alphabetical order, deliberately: it decides the queue
+	// numbers, and a queue that CHANGES because a map iterated differently would
+	// move an installed instance's traffic to another queue without anyone asking.
+	for i, name := range names {
 		inst := cfg.Desync.Instances[name]
 		// zapret.Instance is the MANAGED unit — a process, a queue, a port set —
 		// and it carries no engine field: the engine is chosen by the adapter that
 		// launches it, not by the instance record. v2's engine declaration has no
 		// home here yet, so it is reported as a gap rather than dropped.
-		_ = inst
-		out.Zapret = append(out.Zapret, zapret.Instance{Name: name})
+		//
+		// The queue number is DERIVED from the instance's position, using the same
+		// helper the v1 parser uses. Leaving it at 0 was caught by the live cutover:
+		// the allocator refuses a production queue of 0, so the daemon refused to
+		// start at all rather than running with an unusable queue.
+		out.Zapret = append(out.Zapret, zapret.Instance{
+			Name:      name,
+			QNum:      DeriveQNum(i),
+			Capture:   zapret.Capture{TCP: inst.Capture.TCP, UDP: inst.Capture.UDP},
+			Connbytes: inst.Connbytes,
+		})
 	}
 
 	// A disabled rule is dropped from the registry entirely, so nothing probes,
