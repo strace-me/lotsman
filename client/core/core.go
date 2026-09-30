@@ -2231,7 +2231,8 @@ func (c *Core) ensureRuleSets(ctx context.Context) error {
 	if src.Repo == "" {
 		src.Repo = rulesets.DefaultRepo
 	}
-	return rulesets.EnsureFrom(ctx, src, c.opts.RuleSetDir, tags, c.log)
+	return rulesets.EnsureFromCounter(ctx, src, c.opts.RuleSetDir, tags,
+		rulesets.SingboxCounter{Bin: c.opts.SingboxBin}, c.log)
 }
 
 // waitControlReady blocks until the box answers on its loopback Clash-API, so the
