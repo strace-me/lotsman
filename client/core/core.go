@@ -98,6 +98,12 @@ type Options struct {
 	// rule-set with fewer rules than this fraction of what we have is refused and ours
 	// kept. 0 takes the package default.
 	RuleSetMinRatio float64
+	// RuleSetRefresh is how often the updater re-reads the bundle when the document
+	// does not say. 0 takes six hours. It is what makes the client's copy of a
+	// rule-set CURRENT rather than fetched once and stale forever.
+	RuleSetRefresh time.Duration
+	// RuleSetSnapshotDir holds the rollback points. "" puts them under RuleSetDir.
+	RuleSetSnapshotDir string
 	// V2Config is the SOURCE DOCUMENT when the config was v2, kept for what the
 	// runtime Config deliberately does not carry — data_sources, which says where
 	// rule-set content comes from rather than what the data plane should do.
@@ -876,6 +882,12 @@ func (c *Core) buildLoop() error {
 		}
 	}
 
+	// The rule-set updater runs BEFORE the first reconcile, not on a timer from zero:
+	// a config naming a rule-set the disk lacks makes `sing-box check` fail, and the
+	// reconciler then correctly refuses and falls back to a full re-exec — dropping the
+	// tunnel. Fetching first is what makes the in-place path actually in-place.
+	c.startRuleSetRefresh(runCtx, nil)
+
 	if c.opts.RefreshEvery > 0 && c.opts.SingboxConfig != "" {
 		rc := c.newReconciler()
 		runners = append(runners, namedRunner{"refresh", func(rctx context.Context) { c.refreshLoop(rctx, rc, c.opts.RefreshEvery) }})
@@ -972,6 +984,9 @@ func (c *Core) Reload(newConf *config.Config) error {
 
 	// Reconcile the box: regenerate from newConf and restart sing-box only on a real
 	// diff. A non-routing edit produces the same config → no restart → connection kept.
+	// Same ordering as startup: a Reload can introduce a rule-set the disk has never
+	// seen, and reconciling first would drop the tunnel to recover from it.
+	c.RefreshRuleSets(context.WithoutCancel(root))
 	switch err := c.reconcileBox(context.WithoutCancel(root), c.newReconciler()); {
 	case err == nil:
 		// Applied. newConf carries whatever the background refresh wrote, so the running
@@ -2085,9 +2100,10 @@ func (c *Core) recordFleet(nodes []subscription.Node) {
 }
 
 func (c *Core) generate(ctx context.Context) ([]byte, error) {
-	if err := c.ensureRuleSets(ctx); err != nil {
-		return nil, err
-	}
+	// Deliberately no network here. The rule-set updater owns that now, on the
+	// document's period; generation reads whatever is on disk. Calling the fetcher from
+	// the generate path meant a config render doubled as a download, which is how a
+	// "read this config" step ended up costing 27 MB and a TLS handshake.
 	nodes, mgr := c.loadNodes(ctx)
 	// Capture the quota/expiry the fetch just parsed from the Subscription-Userinfo
 	// header before mgr is discarded, so /status can report it (the mgr itself is
@@ -2195,49 +2211,6 @@ func isTunName(name string) bool {
 		}
 	}
 	return false
-}
-
-// ensureRuleSets provisions the .srs files this config's services reference. The
-// router gets them from its own updater into /etc/sing-box; a client has none, so
-// it fetches the same upstream bundle and extracts only the tags in use. Warm
-// cache = no-op, so this is cheap on every start.
-func (c *Core) ensureRuleSets(ctx context.Context) error {
-	if c.opts.RuleSetDir == "" {
-		return nil // using the generator default (router layout); nothing to provision
-	}
-	seen := map[string]bool{}
-	var tags []string
-	for _, svc := range c.reg.Services {
-		for _, t := range svc.RuleSets {
-			if !seen[t] {
-				seen[t] = true
-				tags = append(tags, t)
-			}
-		}
-	}
-	if len(tags) == 0 {
-		return nil
-	}
-	// The source comes from the DOCUMENT when it declares one, so the client's copy of
-	// the rule-sets cannot drift from the router's: same repo, same pin, same bytes.
-	// It used to be a hardcoded constant on this side and a flag on the other, which
-	// is two answers to "where do the rule-sets come from".
-	src := rulesets.Source{Repo: c.opts.RuleSetRepo, Pin: c.opts.RuleSetPin}
-	// The document is read from the options rather than held on the Core: it has no
-	// other consumer, and a field on the long-lived struct is a thing that can go
-	// stale across a Reload.
-	for _, s := range config.RuleSetSources(c.opts.V2Config) {
-		if s.Fetch && s.Repo != "" {
-			src.Repo, src.Pin = s.Repo, s.Pin
-			break
-		}
-	}
-	if src.Repo == "" {
-		src.Repo = rulesets.DefaultRepo
-	}
-	src.MinRatio = c.opts.RuleSetMinRatio
-	return rulesets.EnsureFromCounter(ctx, src, c.opts.RuleSetDir, tags,
-		rulesets.SingboxCounter{Bin: c.opts.SingboxBin}, c.log)
 }
 
 // waitControlReady blocks until the box answers on its loopback Clash-API, so the

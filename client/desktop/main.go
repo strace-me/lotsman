@@ -20,8 +20,8 @@ import (
 
 	"github.com/strace-me/lotsman/client/core"
 	"github.com/strace-me/lotsman/client/platform/externalbox"
-	"github.com/strace-me/lotsman/client/scaffold"
 	"github.com/strace-me/lotsman/client/platform/rulesets"
+	"github.com/strace-me/lotsman/client/scaffold"
 	"github.com/strace-me/lotsman/pkg/config"
 	"github.com/strace-me/lotsman/pkg/configv2"
 )
@@ -82,7 +82,11 @@ func main() {
 			"run on a v2 configuration.yaml (or its directory) instead of -config; the same loader the router daemon uses")
 		ruleSetRepo = flag.String("ruleset-repo", rulesets.DefaultRepo,
 			"fallback rule-set bundle repo for a v1 document, which declares no data sources; a v2 document's data_sources win over this")
-		ruleSetPin = flag.String("ruleset-pin", "", "fallback rule-set release tag (empty = track latest)")
+		ruleSetPin     = flag.String("ruleset-pin", "", "fallback rule-set release tag (empty = track latest)")
+		ruleSetRefresh = flag.Duration("ruleset-refresh", 0,
+			"how often to re-read the rule-set bundle (0 = the document's data_sources.refresh, else 6h). This is what keeps the client's copy CURRENT rather than fetched once and stale")
+		ruleSetMinRatio = flag.Float64("ruleset-min-ratio", 0.5,
+			"refuse a fetched rule-set with fewer rules than this fraction of what we have, and keep ours (the router's updater applies the same floor)")
 		storeV2     = flag.String("store-v2", "/etc/lotsman/desync/strategies", "v2 strategy bundle root, for resolving a rule's {instance, strategy}")
 		singboxBin  = flag.String("singbox-bin", "sing-box", "sing-box binary")
 		singboxCfg  = flag.String("singbox-config", "singbox.json", "where to write the live sing-box config")
@@ -244,6 +248,8 @@ func main() {
 		V2Config:           v2Document,
 		RuleSetRepo:        *ruleSetRepo,
 		RuleSetPin:         *ruleSetPin,
+		RuleSetRefresh:     *ruleSetRefresh,
+		RuleSetMinRatio:    *ruleSetMinRatio,
 		ThroughputScan:     *throughputScan,
 		ThroughputBudget:   *throughputBudget,
 		ThroughputInterval: *throughputInterval,

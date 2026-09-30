@@ -81,9 +81,14 @@ func (r boxRunner) checkInProcess(ctx context.Context, args []string) error {
 // Provisioning is a no-op against a warm cache, so doing it before every
 // reconcile costs nothing and removes the ordering as something to remember.
 func (c *Core) reconcileBox(ctx context.Context, rc *reconcile.Reconciler) error {
-	if err := c.ensureRuleSets(ctx); err != nil {
-		return err
-	}
+	// No fetch here any more: the rule-set updater owns that, and it runs on the
+	// document's period and before the first reconcile. A gap-fill in the reconcile path
+	// meant a "compare the running config" step could turn into a 27 MB download, and
+	// the two answers could disagree about what the current release is.
+	//
+	// A config that introduces a rule-set the disk has never seen is handled by
+	// RefreshRuleSets, which the Reload path calls BEFORE reconciling — same ordering
+	// guarantee, one place that does the fetching.
 	return rc.Reconcile(ctx)
 }
 
