@@ -186,42 +186,20 @@ func main() {
 		*controlSock = filepath.Join(base, "lotsman", "control.sock")
 	}
 
-	// -config and -run-v2 are mutually exclusive: one document, one parser. Both roots
-	// read a v2 document through the SAME loader (config.LoadV2), so the CLI, the
-	// router daemon and this client cannot disagree about what a configuration is —
-	// the failure a preflight exists to catch.
-	loadV2 := func() (*config.Config, error) {
-		v2, err := config.LoadV2(*runV2, "", *storeV2)
-		if err != nil {
-			return nil, err
+	// The document decides its own schema from its `version` field: one -config, and
+	// the file cannot be handed to a binary that reads it as the other schema. Both
+	// roots go through the same loader (config.LoadAny), so the CLI, the router daemon
+	// and this client cannot disagree about what a configuration is.
+	load := func() (*config.Config, error) {
+		path := *configPath
+		if path == "" {
+			path = *runV2
 		}
-		if v2.StoreMissing != nil {
-			log.Warn("v2: no strategy bundle store, so pinned strategies cannot be resolved yet", "err", v2.StoreMissing)
-		}
-		projected, gaps, err := config.FromV2(v2.Config, v2.Rules)
-		if err != nil {
-			return nil, err
-		}
-		// Named, not swallowed: the projection leaves split-DNS, the uTLS fingerprint
-		// and the declared strategies at zero, and a client that starts and routes with
-		// all three defaulted looks exactly like one that was configured.
+		cfg, gaps, err := config.LoadAny(path, "", *storeV2)
 		for _, gap := range gaps {
 			log.Warn("v2: not carried into the runtime, running at a default instead", "gap", gap)
 		}
-		log.Info("running on a v2 configuration", "path", *runV2,
-			"services", len(projected.Registry.Services), "pools", len(projected.Pools.Pools),
-			"bypassed", len(projected.BypassedServices), "target_singbox", projected.SingboxVersion)
-		return projected, nil
-	}
-	loadV1 := func() (*config.Config, error) { return config.Load(*configPath) }
-	load := loadV1
-	switch {
-	case *runV2 != "" && *configPath != "":
-		log.Error("config: -config and -run-v2 are mutually exclusive; one document, one parser",
-			"v1", *configPath, "v2", *runV2)
-		os.Exit(2)
-	case *runV2 != "":
-		load = loadV2
+		return cfg, err
 	}
 
 	conf, err := load()

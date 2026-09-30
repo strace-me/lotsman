@@ -4,7 +4,6 @@ import (
 	"context"
 	"flag"
 	"fmt"
-	"log/slog"
 	"os"
 	"path/filepath"
 	"sort"
@@ -77,12 +76,25 @@ func runV2Preflight(f v2Flags) int {
 		problems = append(problems, fmt.Sprintf(format, args...))
 	}
 
-	cfg, err := configv2.Load(*f.config)
+	// Accept the DIRECTORY as well as the file, because a v2 deployment is
+	// configuration.yaml + rules/ as a unit. This is the same resolution -config
+	// does, so the preflight can be pointed at what the daemon is pointed at.
+	configPath, rulesDir := *f.config, *f.rules
+	if info, serr := os.Stat(configPath); serr == nil && info.IsDir() {
+		if rulesDir == "" {
+			rulesDir = filepath.Join(configPath, "rules")
+		}
+		configPath = filepath.Join(configPath, "configuration.yaml")
+	}
+	cfg, err := configv2.Load(configPath)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "lotsmand -config-v2: %v\n", err)
 		return 1
 	}
-	fmt.Printf("configuration %s: version %d\n", *f.config, cfg.Version)
+	if rulesDir == "" {
+		rulesDir = filepath.Join(filepath.Dir(configPath), "rules")
+	}
+	fmt.Printf("configuration %s: version %d\n", configPath, cfg.Version)
 
 	rules, err := configv2.LoadRules(rulesDir)
 	if err != nil {
@@ -236,34 +248,4 @@ func loadV2List(def lists.Definition, providers lists.Providers, compiler lists.
 		fmt.Printf("  list %-16s data is from %s\n", def.Name, snapshot.UpdatedAt.Format(time.RFC3339))
 	}
 	return configv2.ListShape{Empty: len(snapshot.Values) == 0}
-}
-
-// loadV2ConfigForDaemon loads a v2 document for the RUNNING daemon and says what
-// the projection could not carry.
-//
-// The gaps are logged rather than swallowed because they are behavioural, not
-// cosmetic: the projection leaves split-DNS, the uTLS fingerprint and the declared
-// strategies at zero, and a daemon that starts and routes with all three defaulted
-// looks exactly like one that was configured. Each line is a claim the operator
-// never made.
-func loadV2ConfigForDaemon(f v2Flags) (*config.Config, error) {
-	load, err := config.LoadV2(*f.run, *f.rules, *f.store)
-	if err != nil {
-		return nil, err
-	}
-	// The logger is the daemon's own TEXT handler on stdout, matching main's: a
-	// helper that quietly opened a second handler would double every line it logs.
-	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelInfo}))
-	if load.StoreMissing != nil {
-		logger.Warn("v2: no strategy bundle store, so pinned strategies cannot be resolved yet",
-			"store", *f.store, "err", load.StoreMissing)
-	}
-	projected, gaps, err := config.FromV2(load.Config, load.Rules)
-	if err != nil {
-		return nil, err
-	}
-	for _, gap := range gaps {
-		logger.Warn("v2: not carried into the runtime, running at a default instead", "gap", gap)
-	}
-	return projected, nil
 }

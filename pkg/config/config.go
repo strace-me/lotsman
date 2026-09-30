@@ -133,6 +133,17 @@ type Hostlist struct {
 // sub-types stay unexported: a UI round-trips the whole Document as JSON, so it
 // never needs to name them.)
 type Document struct {
+	// Version is the SCHEMA of this document: 1 here, 2 in a v2 document. It is what
+	// `-config` dispatches on, so one path reaches both schemas.
+	//
+	// It exists because two schemas with two entry points is the shape that produced
+	// every "which file is authoritative" question: -config for one, -run-v2 for the
+	// other, both valid, neither obviously right. Absent means 1, which is the safe
+	// direction — a file that says nothing is the old one.
+	//
+	// Not to be confused with `singbox_version`, which is the sing-box RELEASE the
+	// config is generated for.
+	Version         int                        `yaml:"version,omitempty"`
 	Services        []serviceYAML              `yaml:"services"`
 	Categories      map[string]categoryYAML    `yaml:"categories"`
 	Subscriptions   []subscription.Declaration `yaml:"subscriptions"`

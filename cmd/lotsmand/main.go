@@ -189,38 +189,39 @@ func main() {
 	bus := events.NewBus()
 	knowledge := kb.New()
 
-	if *v2.run != "" && *configPath != "" {
-		log.Error("config: -config and -run-v2 are mutually exclusive; one document, one parser",
-			"v1", *configPath, "v2", *v2.run)
-		os.Exit(2)
-	}
-
 	// Registry comes from config when given, else the builtin youtube service.
 	// With a config we also exercise the subscription->pool pipeline at startup
 	// and log membership counts (the nodes do not yet feed sing-box generation).
 	reg := registry.Builtin()
 	var conf *config.Config
-	if *v2.run != "" {
+	// The document decides its own schema from its `version` field, so there is one
+	// -config and no "which file is authoritative" question. -run-v2 stays as the
+	// explicit spelling of the same thing, and names the same loader.
+	configFile := *configPath
+	if configFile == "" {
+		configFile = *v2.run
+	}
+	if configFile != "" {
 		// The v2 document is PROJECTED onto the same Config the v1 parser produces,
 		// so everything below this line — Brain, Applier, the executors, the nft
 		// renderer, singbox.Generate — is untouched and unaware of which parser ran.
 		// That is the whole cutover: swapping the parser, not porting the data plane.
-		loaded, err := loadV2ConfigForDaemon(v2)
+		loaded, gaps, err := config.LoadAny(configFile, *v2.rules, *v2.store)
 		if err != nil {
-			log.Error("v2 config load failed", "path", *v2.run, "err", err)
+			log.Error("config load failed", "path", configFile, "err", err)
 			os.Exit(1)
 		}
 		conf = loaded
 		reg = conf.Registry
-		log.Info("running on a v2 configuration", "path", *v2.run,
+		// Named, not swallowed: the projection leaves split-DNS, the uTLS fingerprint
+		// and the declared strategies at zero, and a daemon that starts and routes
+		// with all three defaulted looks exactly like one that was configured.
+		for _, gap := range gaps {
+			log.Warn("v2: not carried into the runtime, running at a default instead", "gap", gap)
+		}
+		log.Info("configuration loaded", "path", configFile,
 			"services", len(reg.Services), "devices", len(conf.Devices),
 			"pools", len(conf.Pools.Pools), "target_singbox", conf.SingboxVersion)
-	} else if *configPath != "" {
-		loaded, err := config.Load(*configPath)
-		if err != nil {
-			log.Error("config load failed", "path", *configPath, "err", err)
-			os.Exit(1)
-		}
 		conf = loaded
 		reg = conf.Registry
 		services := make([]registry.Service, 0, len(reg.Services))
