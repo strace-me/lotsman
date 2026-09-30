@@ -23,6 +23,7 @@ import (
 	// Aliased: this package and the daemon's updater are both "rulesets", and the
 	// shared pieces — Snapshot, SingboxCounter — are the daemon's, so that a client and
 	// a router cannot drift on what a snapshot looks like or how a rule-set is counted.
+	"github.com/strace-me/lotsman/pkg/atomicfile"
 	rulesets "github.com/strace-me/lotsman/pkg/rulesets"
 )
 
@@ -98,6 +99,10 @@ type Source struct {
 	Repo string
 	Pin  string
 	URL  string // explicit asset URL; wins over Repo/Pin
+	// MinRatio is the shrink floor, the same one the router applies: a fetched
+	// rule-set with fewer rules than this fraction of what we have is refused and
+	// ours kept. 0 takes the package default.
+	MinRatio float64
 }
 
 // EnsureFrom is Ensure with the source named, so a v2 document is authoritative on
@@ -114,7 +119,7 @@ func EnsureFromCounter(ctx context.Context, src Source, dir string, tags []strin
 	if url == "" {
 		url = BundleURLAt(src.Repo, src.Pin)
 	}
-	return ensureFromURL(ctx, url, dir, tags, counter, log)
+	return ensureFromURL(ctx, url, dir, tags, counter, log, src.MinRatio)
 }
 
 func Ensure(ctx context.Context, dir string, tags []string, log *slog.Logger) error {
@@ -148,13 +153,17 @@ var errNoCounter = errors.New("rulesets: no sing-box binary to verify rule-sets 
 
 // ensureDefault is what callers that have no sing-box binary use.
 func ensureDefault(ctx context.Context, dir string, tags []string, log *slog.Logger) error {
-	return ensureFromURL(ctx, BundleURL(""), dir, tags, UnreadableCounter{}, log)
+	return ensureFromURL(ctx, BundleURL(""), dir, tags, UnreadableCounter{}, log, 0)
 }
 
-func ensureFromURL(ctx context.Context, bundleURL, dir string, tags []string, counter Counter, log *slog.Logger) error {
-	want := map[string]string{} // bundle-relative path -> destination
-	repairTag := map[string]string{}
-	var repair []string
+func ensureFromURL(ctx context.Context, bundleURL, dir string, tags []string, counter Counter, log *slog.Logger, minRatio float64) error {
+	// Which tags are wanted, and which of them are present but unreadable. A file
+	// that EXISTS is not a file that is USABLE: an extract cut short by a reboot
+	// leaves a truncated .srs that sing-box loads and either rejects at check or,
+	// worse, matches nothing — and because the name was present, "already
+	// provisioned" skipped it on every boot after.
+	var wanted []string
+	repair := map[string]string{} // destination -> tag, for the ones being replaced
 	for _, tag := range tags {
 		rel, ok := RelPath(tag)
 		if !ok {
@@ -162,38 +171,84 @@ func ensureFromURL(ctx context.Context, bundleURL, dir string, tags []string, co
 		}
 		dst := filepath.Join(dir, filepath.FromSlash(rel))
 		if _, err := os.Stat(dst); err != nil {
-			want[rel] = dst
+			wanted = append(wanted, tag)
 			continue
 		}
-		// The file EXISTS, which is not the same as it being usable. An extract cut
-		// short by a reboot leaves a truncated .srs that sing-box then loads and either
-		// rejects at check or, worse, matches nothing — and because the name is present,
-		// "already provisioned" skipped it on every boot after. A present-but-unreadable
-		// rule-set is a REPAIR, not a skip.
 		if _, err := counter.Count(dst); err != nil {
-			repair = append(repair, dst)
-			// The TAG, not the file name: relPathFor turns a tag into a path, and
-			// handing it "geosite-youtube.srs" produced a restore looking for
-			// "geosite-youtube.srs.srs" — a rollback that fails at the exact moment
-			// it is needed.
-			repairTag[dst] = tag
-			want[rel] = dst
+			repair[dst] = tag
+			wanted = append(wanted, tag)
 		}
 	}
-	if len(want) == 0 {
+	if len(wanted) == 0 {
 		return nil
 	}
-	// Snapshot what is about to be overwritten. The client had no rollback point and
-	// the daemon's is what survives a bad release; a laptop gets a truncated file
-	// exactly as often as a router does, usually by being closed mid-download.
-	// Only when something is actually about to be OVERWRITTEN. A first provision has
-	// nothing to lose, and an empty snapshot directory is a lie about a rollback point
+	sort.Strings(wanted)
+	log.Info("provisioning sing-box rule-sets", "wanted", len(wanted), "dir", dir, "repairing", len(repair))
+
+	raw, err := download(ctx, bundleURL)
+	if err != nil {
+		return err
+	}
+	defer os.Remove(raw)
+
+	// Extract to a STAGING area first, so the candidate can be counted and planned
+	// before anything live is touched. This is the daemon's ordering, and it is the
+	// ordering that makes a shrink guard possible at all: a guard needs both sides,
+	// and the live side must not have moved before the candidate is known good.
+	stageDir, err := os.MkdirTemp("", "lotsman-rulesets-stage-*")
+	if err != nil {
+		return fmt.Errorf("rulesets: staging dir: %w", err)
+	}
+	defer os.RemoveAll(stageDir)
+
+	stageOf := map[string]string{} // tag -> staged path
+	if err := extractAll(raw, wanted, stageDir, stageOf); err != nil {
+		return err
+	}
+
+	candidate := map[string]int{}
+	for tag, path := range stageOf {
+		if c, err := counter.Count(path); err != nil {
+			return fmt.Errorf("rulesets: the fetched %s is unreadable: %w", tag, err)
+		} else {
+			candidate[tag] = c
+		}
+	}
+	live := map[string]int{}
+	for _, tag := range wanted {
+		rel, ok := RelPath(tag)
+		if !ok {
+			continue
+		}
+		if c, err := counter.Count(filepath.Join(dir, filepath.FromSlash(rel))); err == nil {
+			live[tag] = c
+		}
+	}
+
+	// The shrink guard, shared with the router. A release that LOST a rule-set the
+	// config depends on, or that shrank one past the floor, is refused rather than
+	// installed — the failure being that the box comes up with a rule that quietly
+	// matches nothing, which is the one symptom nothing else reports.
+	plan := rulesets.PlanSwap(wanted, candidate, live, minRatio, true)
+	for tag, info := range plan.KeepOld {
+		log.Warn("rule-sets: keeping the existing file (the fetched release shrank it or dropped it)",
+			"tag", tag, "have", info.Prev, "fetched", info.Next)
+	}
+	if plan.Unusable {
+		return fmt.Errorf("rulesets: the fetched release is unusable: it lacks %v (have %v)", plan.Missing, live)
+	}
+
+	// Snapshot what is about to be overwritten, and only that: a first provision has
+	// nothing to lose, and an empty snapshot directory advertises a rollback point
 	// that does not exist.
 	var snap string
 	if len(repair) > 0 {
-		var err error
-		snap, err = rulesets.Snapshot(dir, repair, filepath.Join(dir, "snapshots"),
-			relPathFor, time.Now().UTC())
+		var tags []string
+		for _, tag := range repair {
+			tags = append(tags, tag)
+		}
+		sort.Strings(tags)
+		snap, err = rulesets.Snapshot(dir, tags, filepath.Join(dir, "snapshots"), relPathFor, time.Now().UTC())
 		if err != nil {
 			return fmt.Errorf("rulesets: snapshot before repair: %w", err)
 		}
@@ -201,82 +256,131 @@ func ensureFromURL(ctx context.Context, bundleURL, dir string, tags []string, co
 	}
 	rollback := func(cause error) error {
 		if snap == "" {
-			// Say WHICH case it is. "restored" on a first provision would report a
-			// rollback that never happened, and a reader would assume their old
-			// rule-sets are back when nothing was ever overwritten.
 			if len(repair) == 0 {
 				return fmt.Errorf("rulesets: provision: %w (nothing to restore: this was a first provision)", cause)
 			}
 			return fmt.Errorf("rulesets: %d rule-set(s) are unreadable and there is no snapshot: %w", len(repair), cause)
 		}
-		if rerr := restore(snap, repairTag); rerr != nil {
+		if rerr := restore(snap, repair); rerr != nil {
 			return fmt.Errorf("rulesets: %w (and the restore from %s failed: %v)", cause, snap, rerr)
 		}
 		return fmt.Errorf("rulesets: %w (restored %d file(s) from %s)", cause, len(repair), snap)
 	}
-	log.Info("provisioning sing-box rule-sets", "missing", len(want), "dir", dir, "repairing", len(repair))
 
-	tmp, err := os.CreateTemp("", "lotsman-rulesets-*.zip")
-	if err != nil {
-		return rollback(fmt.Errorf("temp file: %w", err))
-	}
-	defer os.Remove(tmp.Name())
-	defer tmp.Close()
-
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, bundleURL, nil)
-	if err != nil {
-		return rollback(fmt.Errorf("request: %w", err))
-	}
-	resp, err := bundleClient.Do(req)
-	if err != nil {
-		return rollback(fmt.Errorf("download: %w", err))
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		return rollback(fmt.Errorf("download: %s", resp.Status))
-	}
-	n, err := io.Copy(tmp, resp.Body)
-	if err != nil {
-		return rollback(fmt.Errorf("download body: %w", err))
-	}
-
-	zr, err := zip.NewReader(tmp, n)
-	if err != nil {
-		return rollback(fmt.Errorf("open bundle: %w", err))
-	}
-	// Extract to a staging file and rename, so a failure part-way through cannot leave
-	// a half-written rule-set where a working one used to be. The daemon gets this from
-	// the reconciler; the client writes straight to the destination, which is how a
-	// killed process becomes a silent permanent outage on the next boot.
-	for _, f := range zr.File {
-		dst, ok := want[f.Name]
+	installed := 0
+	for tag, staged := range stageOf {
+		rel, ok := RelPath(tag)
 		if !ok {
 			continue
 		}
-		if err := stageThenRename(f, dst); err != nil {
+		if _, held := plan.KeepOld[tag]; held {
+			continue // the guard said keep what we have
+		}
+		dst := filepath.Join(dir, filepath.FromSlash(rel))
+		if err := install(staged, dst); err != nil {
 			return rollback(err)
 		}
-		delete(want, f.Name)
+		installed++
 	}
-	if len(want) > 0 {
-		missing := make([]string, 0, len(want))
-		for rel := range want {
+	// Count what landed, so a file that arrived EMPTY is refused here rather than
+	// discovered later as a rule that stopped matching.
+	for tag := range stageOf {
+		if _, held := plan.KeepOld[tag]; held {
+			continue
+		}
+		rel, _ := RelPath(tag)
+		c, err := counter.Count(filepath.Join(dir, filepath.FromSlash(rel)))
+		if err != nil {
+			return rollback(fmt.Errorf("rulesets: installed %s is unreadable: %w", tag, err))
+		}
+		if c == 0 {
+			return rollback(fmt.Errorf("rulesets: installed %s contains no rules", tag))
+		}
+	}
+	log.Info("rule-sets provisioned", "dir", dir, "installed", installed, "repaired", len(repair))
+	return nil
+}
+
+// download fetches the bundle to a temp file and returns its path.
+func download(ctx context.Context, bundleURL string) (string, error) {
+	f, err := os.CreateTemp("", "lotsman-rulesets-*.zip")
+	if err != nil {
+		return "", fmt.Errorf("rulesets: temp file: %w", err)
+	}
+	defer f.Close()
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, bundleURL, nil)
+	if err != nil {
+		os.Remove(f.Name())
+		return "", fmt.Errorf("rulesets: request: %w", err)
+	}
+	resp, err := bundleClient.Do(req)
+	if err != nil {
+		os.Remove(f.Name())
+		return "", fmt.Errorf("rulesets: download: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		os.Remove(f.Name())
+		return "", fmt.Errorf("rulesets: download: %s", resp.Status)
+	}
+	if _, err := io.Copy(f, resp.Body); err != nil {
+		os.Remove(f.Name())
+		return "", fmt.Errorf("rulesets: download body: %w", err)
+	}
+	return f.Name(), nil
+}
+
+// extractAll unpacks the wanted entries into stageDir and records where each landed.
+func extractAll(zipPath string, wanted []string, stageDir string, stageOf map[string]string) error {
+	need := map[string]string{} // bundle-relative name -> tag
+	byTag := map[string]bool{}
+	for _, tag := range wanted {
+		rel, ok := RelPath(tag)
+		if !ok {
+			continue
+		}
+		byTag[tag] = true
+		need[rel] = tag
+	}
+	zr, err := zip.OpenReader(zipPath)
+	if err != nil {
+		return fmt.Errorf("rulesets: open bundle: %w", err)
+	}
+	defer zr.Close()
+	for _, f := range zr.File {
+		tag, ok := need[f.Name]
+		if !ok {
+			continue
+		}
+		dst := filepath.Join(stageDir, filepath.Base(f.Name))
+		if err := extract(f, dst); err != nil {
+			return err
+		}
+		stageOf[tag] = dst
+		delete(need, f.Name)
+	}
+	if len(need) > 0 {
+		var missing []string
+		for rel := range need {
 			missing = append(missing, rel)
 		}
 		sort.Strings(missing)
-		return rollback(fmt.Errorf("bundle lacks %v", missing))
+		return fmt.Errorf("rulesets: the bundle lacks %v", missing)
 	}
-	// Count what landed, so a bundle that arrived EMPTY is refused here rather than
-	// discovered as a rule that stops matching.
-	for _, dst := range repair {
-		if c, err := counter.Count(dst); err != nil {
-			return rollback(fmt.Errorf("repaired %s is still unreadable: %w", dst, err))
-		} else if c == 0 {
-			return rollback(fmt.Errorf("repaired %s contains no rules", dst))
-		}
-	}
-	log.Info("rule-sets provisioned", "dir", dir, "repaired", len(repair))
 	return nil
+}
+
+// install moves a staged file into place through a temp in the DESTINATION's
+// directory, so the destination only ever holds a complete file.
+func install(staged, dst string) error {
+	if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
+		return fmt.Errorf("rulesets: mkdir %s: %w", filepath.Dir(dst), err)
+	}
+	data, err := os.ReadFile(staged)
+	if err != nil {
+		return fmt.Errorf("rulesets: read staged %s: %w", staged, err)
+	}
+	return atomicfile.Write(dst, data, 0o644)
 }
 
 // relPathFor is the daemon's name for "where does this tag live under the live dir",

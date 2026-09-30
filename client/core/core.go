@@ -94,6 +94,10 @@ type Options struct {
 	// declares no data sources. A v2 document's data_sources win over both.
 	RuleSetRepo string
 	RuleSetPin  string
+	// RuleSetMinRatio is the shrink floor, shared with the router's updater: a fetched
+	// rule-set with fewer rules than this fraction of what we have is refused and ours
+	// kept. 0 takes the package default.
+	RuleSetMinRatio float64
 	// V2Config is the SOURCE DOCUMENT when the config was v2, kept for what the
 	// runtime Config deliberately does not carry — data_sources, which says where
 	// rule-set content comes from rather than what the data plane should do.
@@ -2231,6 +2235,7 @@ func (c *Core) ensureRuleSets(ctx context.Context) error {
 	if src.Repo == "" {
 		src.Repo = rulesets.DefaultRepo
 	}
+	src.MinRatio = c.opts.RuleSetMinRatio
 	return rulesets.EnsureFromCounter(ctx, src, c.opts.RuleSetDir, tags,
 		rulesets.SingboxCounter{Bin: c.opts.SingboxBin}, c.log)
 }

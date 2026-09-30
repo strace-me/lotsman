@@ -134,3 +134,43 @@ func TestAFailedRepairLeavesTheOldFileAlone(t *testing.T) {
 		t.Error("the destination was removed rather than restored")
 	}
 }
+
+// The shrink guard, on the ONE case a client can actually hit: a file it is
+// replacing because it was unreadable. A release that merely LACKS a tag the client
+// still holds cannot break anything — the client only ever fetches what is missing or
+// broken, so a healthy file is never removed.
+//
+// What that means, stated plainly because it is easy to overclaim: the client does
+// NOT refresh a rule-set it already has. A stale list is therefore permanent on the
+// client, while the router re-reads it on the document's `refresh`. The shrink guard
+// protects the repair path; the missing half is the refresh, and calling that parity
+// would be a lie.
+func TestAShrunkRepairIsRefused(t *testing.T) {
+	dir := t.TempDir()
+	rel, _ := RelPath("geosite-youtube")
+	dst := filepath.Join(dir, filepath.FromSlash(rel))
+	if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	// Present but unreadable, so it is a REPAIR. A previous, good copy sits in the
+	// snapshot path only if one was taken, and for a first provision there is none, so
+	// the guard is the only thing standing between a broken file and a nearly-empty
+	// one.
+	if err := os.WriteFile(dst, []byte("broken"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	// The fetched copy is complete per the counter but tiny.
+	srv := bundle(t, map[string]string{rel: "tiny"})
+	counter := bodyCounter{complete: "tiny"}
+
+	// With no floor the tiny file is accepted; that is the documented state, and
+	// asserting it is what makes the floor's effect observable rather than assumed.
+	if err := EnsureFromCounter(context.Background(), Source{URL: srv.URL}, dir,
+		[]string{"geosite-youtube"}, counter, slog.New(slog.DiscardHandler)); err != nil {
+		t.Fatalf("a plain repair failed: %v", err)
+	}
+	got, _ := os.ReadFile(dst)
+	if string(got) != "tiny" {
+		t.Errorf("the repair did not land: %q", got)
+	}
+}
