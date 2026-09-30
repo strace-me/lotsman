@@ -75,7 +75,10 @@ const startFailureGrace = 30 * time.Second
 
 func main() {
 	var (
-		configPath  = flag.String("config", "", "path to the lotsman client config (required)")
+		configPath = flag.String("config", "", "path to the lotsman client config (required unless -run-v2)")
+		runV2      = flag.String("run-v2", "",
+			"run on a v2 configuration.yaml (or its directory) instead of -config; the same loader the router daemon uses")
+		storeV2     = flag.String("store-v2", "/etc/lotsman/desync/strategies", "v2 strategy bundle root, for resolving a rule's {instance, strategy}")
 		singboxBin  = flag.String("singbox-bin", "sing-box", "sing-box binary")
 		singboxCfg  = flag.String("singbox-config", "singbox.json", "where to write the live sing-box config")
 		clashListen = flag.String("clash", "127.0.0.1:9090", "loopback Clash-API host:port")
@@ -156,8 +159,8 @@ func main() {
 		*baselineFile = *singboxCfg + ".baseline"
 	}
 
-	if *configPath == "" {
-		log.Error("missing required -config")
+	if *configPath == "" && *runV2 == "" {
+		log.Error("missing required -config (or -run-v2 for a v2 document)")
 		os.Exit(2)
 	}
 	// Default the rule-set cache to a per-user location so a first run provisions
@@ -183,7 +186,45 @@ func main() {
 		*controlSock = filepath.Join(base, "lotsman", "control.sock")
 	}
 
-	conf, err := config.Load(*configPath)
+	// -config and -run-v2 are mutually exclusive: one document, one parser. Both roots
+	// read a v2 document through the SAME loader (config.LoadV2), so the CLI, the
+	// router daemon and this client cannot disagree about what a configuration is —
+	// the failure a preflight exists to catch.
+	loadV2 := func() (*config.Config, error) {
+		v2, err := config.LoadV2(*runV2, "", *storeV2)
+		if err != nil {
+			return nil, err
+		}
+		if v2.StoreMissing != nil {
+			log.Warn("v2: no strategy bundle store, so pinned strategies cannot be resolved yet", "err", v2.StoreMissing)
+		}
+		projected, gaps, err := config.FromV2(v2.Config, v2.Rules)
+		if err != nil {
+			return nil, err
+		}
+		// Named, not swallowed: the projection leaves split-DNS, the uTLS fingerprint
+		// and the declared strategies at zero, and a client that starts and routes with
+		// all three defaulted looks exactly like one that was configured.
+		for _, gap := range gaps {
+			log.Warn("v2: not carried into the runtime, running at a default instead", "gap", gap)
+		}
+		log.Info("running on a v2 configuration", "path", *runV2,
+			"services", len(projected.Registry.Services), "pools", len(projected.Pools.Pools),
+			"bypassed", len(projected.BypassedServices), "target_singbox", projected.SingboxVersion)
+		return projected, nil
+	}
+	loadV1 := func() (*config.Config, error) { return config.Load(*configPath) }
+	load := loadV1
+	switch {
+	case *runV2 != "" && *configPath != "":
+		log.Error("config: -config and -run-v2 are mutually exclusive; one document, one parser",
+			"v1", *configPath, "v2", *runV2)
+		os.Exit(2)
+	case *runV2 != "":
+		load = loadV2
+	}
+
+	conf, err := load()
 	if err != nil {
 		log.Error("config load failed", "path", *configPath, "err", err)
 		os.Exit(1)
@@ -193,7 +234,7 @@ func main() {
 	// Fetch the missing ones and re-parse once, before anything consumes the config —
 	// doing it later (e.g. inside Start) cannot change a domain set that is already fixed.
 	if core.EnsureDomainLists(context.Background(), conf, hostlistFetchTimeout, log) {
-		if conf, err = config.Load(*configPath); err != nil {
+		if conf, err = load(); err != nil {
 			log.Error("config reload after fetching domain lists failed", "path", *configPath, "err", err)
 			os.Exit(1)
 		}
