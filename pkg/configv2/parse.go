@@ -2,9 +2,12 @@ package configv2
 
 import (
 	"fmt"
-	"github.com/strace-me/lotsman/pkg/pools"
 	"os"
+	"sort"
+	"strings"
 	"time"
+
+	"github.com/strace-me/lotsman/pkg/pools"
 
 	"gopkg.in/yaml.v3"
 )
@@ -50,7 +53,112 @@ func (c *Configuration) ApplyDefaults() {
 	}
 }
 
+// reservedNames are the identifiers the runtime generates or owns. The VALUE is the
+// reason, because a refusal the operator cannot act on is a refusal they will work
+// around by guessing.
+var reservedNames = map[string]string{
+	"sel-probe": "it is the probe selector, aimed at one exit for a canary or a throughput " +
+		"measurement. A service of the same name would have its traffic moved whenever a scan runs.",
+	"sel-" + "-": "selectors are generated as sel-<service>, so a service named this way collides " +
+		"with the naming scheme itself",
+	"nfqueue-": "the per-instance nft table defaults to inet nfqueue-<instance>",
+	"direct":   "it is the sing-box outbound every direct rung points at",
+	"final":    "it is sing-box's own terminal route rule",
+	"block":    "it is a reserved device policy word, not a pool",
+}
+
+// reservedPrefixes are names the runtime GENERATES, so the collision is with a
+// pattern rather than a fixed word. Exact-match rejection would only catch a service
+// literally called "sel-", which is not the collision anyone is going to hit.
+var reservedPrefixes = []struct{ Prefix, Reason string }{
+	{"sel-", "the routing selector is generated as sel-<service>, so this name would collide with " +
+		"the generated tag of a DIFFERENT service and both would point at one exit"},
+	{"rem-", "remediation routes are generated as rem-rq-<service> and rem-fb-<service>"},
+	{"nfqueue-", "the per-instance nft table defaults to inet nfqueue-<instance>"},
+	{"~", "a suffixed tag marks a detoured variant of a node; an operator name containing it " +
+		"would collide with those"},
+}
+
+func reservedPrefixReason(name string) (string, bool) {
+	for _, r := range reservedPrefixes {
+		if strings.HasPrefix(name, r.Prefix) {
+			return r.Reason, true
+		}
+	}
+	return "", false
+}
+
+func poolNames(m map[string]Pool) []string {
+	out := make([]string, 0, len(m))
+	for k := range m {
+		out = append(out, k)
+	}
+	sort.Strings(out)
+	return out
+}
+
+func desyncInstanceNames(m map[string]Instance) []string {
+	out := make([]string, 0, len(m))
+	for k := range m {
+		out = append(out, k)
+	}
+	sort.Strings(out)
+	return out
+}
+
+// describeMaterialised names the materialised forms a list used alongside srs_url,
+// so the error says which field to delete rather than just "pick one".
+func describeMaterialised(l List) string {
+	var parts []string
+	if l.Source != "" {
+		parts = append(parts, "source")
+	}
+	if len(l.Files) > 0 {
+		parts = append(parts, "files")
+	}
+	if len(l.URLs) > 0 {
+		parts = append(parts, "urls")
+	}
+	if len(l.Domains) > 0 {
+		parts = append(parts, "domains")
+	}
+	if len(l.CIDRs) > 0 {
+		parts = append(parts, "cidrs")
+	}
+	return strings.Join(parts, "+")
+}
+
+// requiredMigrations must be present in a document's applied_migrations before it
+// will load. The daemon sets it from the schema it expects; a document produced by
+// an older build names fewer, and the load says exactly which one is missing.
+var requiredMigrations []string
+
+// SetRequiredMigrations declares the migration ids this build needs. It is a
+// variable rather than a constant so a test can set it and put it back, and rather
+// than a parameter so every existing call site keeps compiling — the alternative is
+// threading a requirement list through four packages to express one string.
+func SetRequiredMigrations(ids ...string) { requiredMigrations = ids }
+
+// RequiredMigrations reports what this build needs, for the preflight to print.
+func RequiredMigrations() []string { return requiredMigrations }
+
 func (c *Configuration) Validate() error {
+	applied := map[string]bool{}
+	seen := map[string]bool{}
+	for _, id := range c.AppliedMigrations {
+		if seen[id] {
+			return fmt.Errorf("applied_migrations lists %q twice", id)
+		}
+		seen[id] = true
+		applied[id] = true
+	}
+	for _, id := range requiredMigrations {
+		if !applied[id] {
+			return fmt.Errorf("this build needs migration %q and the document does not record it "+
+				"in applied_migrations: migrate before starting, or the config will load and behave "+
+				"like an older schema (have %v)", id, c.AppliedMigrations)
+		}
+	}
 	if c.Proxy.Engine != "" && !contains(ProxyEngines, c.Proxy.Engine) {
 		return fmt.Errorf("unsupported proxy engine %q", c.Proxy.Engine)
 	}
@@ -60,6 +168,31 @@ func (c *Configuration) Validate() error {
 	if c.Runtime.Mode != "" && !contains(ProxyModes, c.Runtime.Mode) {
 		return fmt.Errorf("unsupported runtime mode %q", c.Runtime.Mode)
 	}
+	// Names the runtime owns. An operator who takes one does not get a service or a
+	// pool of their own — they get a collision with something internal, and the
+	// failure arrives later, somewhere else, as a rule that routes nowhere. Each
+	// entry carries the reason it is reserved, because an error that says only
+	// "reserved" makes the reader guess which of the four hundred names in the
+	// generated config they are allowed to touch.
+	for _, name := range desyncInstanceNames(c.Desync.Instances) {
+		if reason, taken := reservedNames[name]; taken {
+			return fmt.Errorf("desync instance %q is a RESERVED name: %s. Pick another — the "+
+				"runtime generates tags and tables from this name, so a collision renames something "+
+				"you did not write", name, reason)
+		}
+		if reason, taken := reservedPrefixReason(name); taken {
+			return fmt.Errorf("desync instance %q starts with a RESERVED prefix: %s", name, reason)
+		}
+	}
+	for _, name := range poolNames(c.Pools) {
+		if reason, taken := reservedNames[name]; taken {
+			return fmt.Errorf("pool %q is a RESERVED name: %s", name, reason)
+		}
+		if reason, taken := reservedPrefixReason(name); taken {
+			return fmt.Errorf("pool %q starts with a RESERVED prefix: %s", name, reason)
+		}
+	}
+
 	tableOwner := map[string]string{}
 	for name, instance := range c.Desync.Instances {
 		if !contains(DesyncEngines, instance.Engine) {
@@ -127,6 +260,23 @@ func (c *Configuration) Validate() error {
 		{"ips", c.Lists.IPs},
 	} {
 		for name, list := range group.lists {
+			// A list is EITHER handed to sing-box as a remote rule-set or resolved by
+			// us — never both. Allowing both would produce a config with two
+			// definitions of the same membership and nothing to say which one routes.
+			if list.SRSURL != "" {
+				if list.Source != "" || len(list.Files) > 0 || len(list.URLs) > 0 ||
+					len(list.Domains) > 0 || len(list.CIDRs) > 0 {
+					return fmt.Errorf("%s list %q declares srs_url AND %s: pick one — "+
+						"a remote rule-set is sing-box's to fetch, a local one is ours to resolve, "+
+						"and both together means two definitions of the same membership",
+						group.kind, name, describeMaterialised(list))
+				}
+				if !strings.HasPrefix(list.SRSURL, "https://") {
+					return fmt.Errorf("%s list %q has srs_url %q, want an https URL: sing-box "+
+						"fetches this itself with no integrity check we could add", group.kind, name, list.SRSURL)
+				}
+				continue
+			}
 			if list.Source == "" && len(list.Files) == 0 && len(list.URLs) == 0 && len(list.Domains) == 0 && len(list.CIDRs) == 0 {
 				return fmt.Errorf("%s list %q has no sources", group.kind, name)
 			}

@@ -57,6 +57,25 @@ func FromV2(cfg *configv2.Configuration, rules []configv2.Rule) (*Config, []stri
 	// the generator quietly produced a config with no composition in it, which looks
 	// exactly like "the feature does nothing".
 	out.Detours = map[string]string{}
+	// Lists the operator handed to sing-box whole, re-keyed to the rule-set TAG so
+	// the generator can emit a `remote` definition instead of looking for a local
+	// .srs it will never find.
+	remote := map[string]string{}
+	collect := func(kind string, defs map[string]configv2.List) {
+		for name, def := range defs {
+			if def.SRSURL == "" {
+				continue
+			}
+			if tag, err := cfg.ResolveListTag(name, kind); err == nil {
+				remote[tag] = def.SRSURL
+			}
+		}
+	}
+	collect("geosite", cfg.Lists.Domains)
+	collect("geoip", cfg.Lists.IPs)
+	if len(remote) > 0 {
+		out.RemoteRuleSets = remote
+	}
 	for _, rule := range rules {
 		for _, step := range rule.Chain {
 			if vpn := step.Action.VPN; vpn != nil && vpn.Detour != "" {

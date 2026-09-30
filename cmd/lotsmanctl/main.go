@@ -537,6 +537,9 @@ func generate(args []string) {
 	if len(cfg.Detours) > 0 {
 		opts.Detours = cfg.Detours
 	}
+	if len(cfg.RemoteRuleSets) > 0 {
+		opts.RemoteRuleSets = cfg.RemoteRuleSets
+	}
 	opts.UTLSFingerprint = cfg.UTLSFingerprint
 	if cfg.SingboxVersion != "" {
 		opts.TargetVersion = cfg.SingboxVersion

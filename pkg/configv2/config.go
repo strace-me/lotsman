@@ -28,15 +28,24 @@ type Configuration struct {
 	// config of the live r5s file found exactly one difference, and it was a node
 	// that had lost its obfs. A knob that changes what existing nodes ARE is not a
 	// default, it is a declaration.
-	TargetVersion string                `yaml:"target_version,omitempty"`
-	Proxy         Proxy                 `yaml:"proxy"`
-	Desync        Desync                `yaml:"desync"`
-	Runtime       Runtime               `yaml:"runtime"`
-	DataSources   map[string]DataSource `yaml:"data_sources"`
-	Lists         Lists                 `yaml:"lists"`
-	Pools         map[string]Pool       `yaml:"pools"`
-	Devices       []Device              `yaml:"devices"`
-	Subscriptions []Subscription        `yaml:"subscriptions"`
+	TargetVersion string `yaml:"target_version,omitempty"`
+	// AppliedMigrations records which migrations have already run against this
+	// document, by id and in order.
+	//
+	// It exists so a MIGRATION can be a condition of a RELEASE rather than a thing an
+	// operator is expected to remember: a document that is missing a required
+	// migration fails at load with the id of what to run, instead of starting and
+	// quietly behaving like an older schema. The order is kept because a migration
+	// that depends on an earlier one is a real dependency, and a set would lose it.
+	AppliedMigrations []string              `yaml:"applied_migrations,omitempty"`
+	Proxy             Proxy                 `yaml:"proxy"`
+	Desync            Desync                `yaml:"desync"`
+	Runtime           Runtime               `yaml:"runtime"`
+	DataSources       map[string]DataSource `yaml:"data_sources"`
+	Lists             Lists                 `yaml:"lists"`
+	Pools             map[string]Pool       `yaml:"pools"`
+	Devices           []Device              `yaml:"devices"`
+	Subscriptions     []Subscription        `yaml:"subscriptions"`
 }
 
 // Device is a per-LAN-client egress override: every source IP or CIDR listed
@@ -158,6 +167,18 @@ type Lists struct {
 }
 
 type List struct {
+	// SRSURL is a compiled sing-box rule-set that sing-box fetches ITSELF, by URL.
+	//
+	// It is the "pass it through" form: we neither download it nor compile it, and
+	// the generated config carries a `remote` rule-set instead of a `local` one. That
+	// matters when the rule-set is maintained upstream and its checksum churns faster
+	// than a release cadence — re-downloading it to find out it changed is a cost
+	// with no answer attached.
+	//
+	// Mutually exclusive with the materialised forms: a list is EITHER handed to
+	// sing-box as a remote or resolved by us, never both, because the two would
+	// disagree about membership with nothing to say which wins.
+	SRSURL   string   `yaml:"srs_url,omitempty"`
 	Source   string   `yaml:"source"`
 	Dataset  string   `yaml:"dataset"`
 	Category string   `yaml:"category"`

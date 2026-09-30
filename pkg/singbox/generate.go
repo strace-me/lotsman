@@ -163,6 +163,11 @@ type Options struct {
 	// nil/empty = no composition, and the generated config is byte-identical to what
 	// it always was.
 	Detours map[string]string
+	// RemoteRuleSets is tag -> URL for lists the operator handed to sing-box whole
+	// via `srs_url`. Those become `remote` rule-sets: we neither download nor
+	// compile them, and sing-box fetches them itself. Anything absent falls back to
+	// a `local` definition under RuleSetDir, which is what every other list is.
+	RemoteRuleSets map[string]string
 
 	// RemHotReload (LOT-34) emits PERMANENT reject-QUIC + ip-fallback rules that
 	// match LOCAL rule_sets (rem-rq-<svc> / rem-fb-<svc>) whose membership the armed
@@ -293,7 +298,7 @@ func RuleSetRelPath(tag string) (string, bool) {
 // .srs files exist, which sb-update-rules maintains). The prefix only selects
 // the subdir; the filename keeps the FULL tag, matching the real R5S layout
 // (e.g. "geosite-discord" -> <dir>/rule-set-geosite/geosite-discord.srs).
-func ruleSetDefs(tags []string, dir string) []any {
+func ruleSetDefs(tags []string, dir string, remote map[string]string) []any {
 	defs := make([]any, 0, len(tags))
 	for _, tag := range tags {
 		var sub string
@@ -304,6 +309,18 @@ func ruleSetDefs(tags []string, dir string) []any {
 			sub = "rule-set-geoip"
 		default:
 			continue // unknown prefix: skip rather than emit a broken path
+		}
+		if url, ok := remote[tag]; ok {
+			// The tag still has to LOOK like geosite-x/geoip-x, because the routing
+			// model reads the prefix to know which vocabulary the list is in — a domain
+			// list and an ip list with the same name are different files.
+			defs = append(defs, map[string]any{
+				"type":   "remote",
+				"tag":    tag,
+				"format": "binary",
+				"url":    url,
+			})
+			continue
 		}
 		defs = append(defs, map[string]any{
 			"type":   "local",
@@ -1060,7 +1077,7 @@ func Generate(services []registry.Service, devices []registry.Device, nodes []su
 	// darwin/windows, so a client leaves DefaultMark at 0 and the key is omitted.
 	// The router keeps 255, so its output is byte-identical.
 	route := map[string]any{
-		"rule_set":              append(ruleSetDefs(ruleSetTags, opts.RuleSetDir), remLocalDefs(opts)...),
+		"rule_set":              append(ruleSetDefs(ruleSetTags, opts.RuleSetDir, opts.RemoteRuleSets), remLocalDefs(opts)...),
 		"rules":                 routeRules,
 		"final":                 "direct",
 		"auto_detect_interface": true,

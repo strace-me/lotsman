@@ -57,6 +57,11 @@ type Config struct {
 	// a detour is "use this pool, but reach it through that one", and it nests. An
 	// empty map generates byte-identically, so it costs a v1 deployment nothing.
 	Detours map[string]string
+	// RemoteRuleSets is tag -> URL for lists declared with `srs_url`: sing-box
+	// fetches them itself, so we neither download nor compile them. v1 has no
+	// equivalent, and an empty map generates byte-identically, so this costs a v1
+	// deployment nothing.
+	RemoteRuleSets map[string]string
 	// BypassedServices names the rules that declared `bypass: true`. They are absent
 	// from Registry for a different reason than DisabledServices — one is a switch
 	// the operator turned off, the other is a standing statement that these domains

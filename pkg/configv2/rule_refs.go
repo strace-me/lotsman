@@ -82,6 +82,17 @@ func requirePool(cfg *Configuration, ruleID, role, name string) error {
 	return fmt.Errorf("rule %q %s names unknown pool %q", ruleID, role, name)
 }
 
+// ResolveListTag turns a v2 list NAME into the sing-box rule-set tag. It is the one
+// exported answer to that question, and both the generator's path lookup and the
+// projection's remote-rule-set map go through it: a tag is a PATH (by prefix) and a
+// URL (when the list is remote), so a second mapping would be a second answer to
+// "which rule-set is this list".
+//
+// kind is "geosite" or "geoip", matching the namespace the name came from.
+func (c *Configuration) ResolveListTag(name, kind string) (string, error) {
+	return resolveList(c, name, kind)
+}
+
 // ValidateDetours refuses a detour cycle across the whole document.
 //
 // Each rule only ever names one detour, so the graph is a set of arcs pool→pool and
