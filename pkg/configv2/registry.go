@@ -189,6 +189,18 @@ func tierState(tier string, first bool) string {
 
 // resolveList turns a v2 list NAME into the sing-box rule-set tag the generator
 // understands, checking the declared dataset against the rule's own namespace.
+// ResolveListTag returns the rule-set tag a list name resolves to, with the same
+// dataset-aware naming the runtime uses.
+//
+// It exists so that callers outside the bridge — the v2 preflight, which has to know
+// which files to materialize before it can check anything — ask the runtime's question
+// instead of reimplementing it. A second copy of this resolution is a second answer:
+// when the two disagreed, the preflight checked for rule-sets the daemon would never
+// look for and reported every list as broken while the config was fine.
+func ResolveListTag(cfg *Configuration, name, wantPrefix string) (string, error) {
+	return resolveList(cfg, name, wantPrefix)
+}
+
 func resolveList(cfg *Configuration, name, wantPrefix string) (string, error) {
 	if cfg == nil {
 		return "", fmt.Errorf("list %q cannot be resolved without a configuration", name)

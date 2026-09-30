@@ -4,6 +4,7 @@ import (
 	"context"
 	"flag"
 	"fmt"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"sort"
@@ -14,6 +15,7 @@ import (
 	"github.com/strace-me/lotsman/pkg/configv2"
 	"github.com/strace-me/lotsman/pkg/lists"
 	"github.com/strace-me/lotsman/pkg/rulesets"
+	"github.com/strace-me/lotsman/pkg/singbox"
 	"github.com/strace-me/lotsman/pkg/strategystore"
 	"github.com/strace-me/lotsman/pkg/zapret"
 )
@@ -200,6 +202,19 @@ func bundleStrategiesFor(root string, adapters map[string]strategystore.EngineAd
 	return out
 }
 
+// v2Providers builds list providers for the preflight.
+//
+// An explicit -rulesets-v2/-plain-v2 wins, because the operator told us where the
+// compiled files are and guessing would be rude. Failing that, a source that names a
+// repo is FETCHED into a scratch directory and read from there.
+//
+// That fetch is the gap this closes. The preflight is the answer to "is this config
+// sane?", and a list it cannot resolve is a list it cannot judge — so before, the
+// only way to check a config whose lists lived in data_sources was to run the daemon
+// first and let it download them. Checking a config by running the thing it checks is
+// backwards: the download could fail, and so could the config, and you could not tell
+// which. Now the preflight resolves them itself, into a temp dir it deletes, so it
+// still touches nothing of yours.
 func v2Providers(cfg *configv2.Configuration, rulesetDir, plainPath string, note func(string, ...any)) lists.Providers {
 	decompiler := rulesets.SingboxDecompiler{}
 	names := make([]string, 0, len(cfg.DataSources))
@@ -217,8 +232,19 @@ func v2Providers(cfg *configv2.Configuration, rulesetDir, plainPath string, note
 		case rulesetDir != "":
 			entry.LiveDir = rulesetDir
 		default:
-			note("data source %q: pass -rulesets-v2 or -plain-v2, or its lists cannot be resolved", name)
-			continue
+			src := cfg.DataSources[name]
+			// Bounded, because this is a CHECK and a check that can hang is not a
+			// check. Without it a slow or unreachable host turns "is my config sane?"
+			// into a command with no timeout, which is the one property an operator
+			// running it over SSH on a router actually needs.
+			ctx, cancel := context.WithTimeout(context.Background(), fetchTimeout)
+			dir, err := materializeSource(ctx, name, src, requiredTags(cfg), note)
+			cancel()
+			if err != nil {
+				note("data source %q: %v", name, err)
+				continue
+			}
+			entry.LiveDir = dir
 		}
 		sources = append(sources, entry)
 	}
@@ -228,6 +254,94 @@ func v2Providers(cfg *configv2.Configuration, rulesetDir, plainPath string, note
 		return lists.Providers{}
 	}
 	return registry.Providers()
+}
+
+// entryCounter counts rules by parsing the compiled .srs, so a preflight can run the
+// shrink guard on a machine that has no sing-box binary at all — which is exactly the
+// machine you want to check a config from. The daemon and client count by asking
+// sing-box, because there it is already running and its answer is the one that counts;
+// here, parsing the file is both available and the same number.
+type entryCounter struct{}
+
+func (entryCounter) Count(srsPath string) (int, error) {
+	domains, cidrs, err := rulesets.SingboxDecompiler{}.Entries(srsPath)
+	if err != nil {
+		return 0, err
+	}
+	return len(domains) + len(cidrs), nil
+}
+
+// fetchTimeout bounds the scratch fetch. Generous enough for a 27 MB bundle on a slow
+// link, short enough that a wedged download is a failed check rather than a hung shell.
+const fetchTimeout = 2 * time.Minute
+
+// materializeSource fetches one data source's bundle into a scratch dir. It is the
+// shared updater, not a second fetcher: the release selection, the extraction and the
+// validity check are the same code that will later put these files in service, so the
+// preflight cannot pass on a release the daemon would reject.
+func materializeSource(ctx context.Context, name string, src configv2.DataSource, required []string, note func(string, ...any)) (string, error) {
+	// A source with no repo is the plain form: it points at files somebody put on
+	// disk, and this is not the place to go looking for them.
+	if src.Repo == "" {
+		return "", fmt.Errorf("does not say where its lists come from; pass -rulesets-v2 or -plain-v2")
+	}
+	dir, err := os.MkdirTemp("", "lotsman-v2src-"+name+"-")
+	if err != nil {
+		return "", err
+	}
+	up := &rulesets.Updater{
+		Repo: src.Repo, Required: required, LiveDir: dir, Pin: src.Pin,
+		AutoBump: true, PathFor: singbox.RuleSetRelPath,
+		Releaser: rulesets.GitHubReleaser{},
+		Counter:  entryCounter{},
+		Log:      slog.New(slog.DiscardHandler),
+	}
+	if err := up.Update(ctx); err != nil {
+		os.RemoveAll(dir)
+		return "", err
+	}
+	note("data source %q: fetched %s%s into scratch space to check its lists", name, src.Repo,
+		pinSuffix(src.Pin))
+	// Cleaned up when the process exits; a preflight is a short-lived reader and
+	// leaving a copy of the bundle in /tmp is not ours to keep.
+	return dir, nil
+}
+
+func pinSuffix(pin string) string {
+	if pin == "" {
+		return " (latest)"
+	}
+	return " at " + pin
+}
+
+// requiredTags is the union of rule-set tags the document references. The updater
+// takes only what the config needs, so a preflight of a config using three lists does
+// not pull the whole bundle — which is the difference between a check and a wait.
+//
+// The tags come from configv2.ResolveListTag, the runtime's own resolution. An
+// earlier version reimplemented the naming here and got it wrong — it read the map key
+// as the list name and produced "geosite-geosite" — so the updater was handed tags no
+// bundle contains, installed nothing, and the preflight then reported all nine lists
+// as missing files. A second copy of a naming rule is a second answer, and here the
+// second answer was confidently wrong.
+func requiredTags(cfg *configv2.Configuration) []string {
+	seen := map[string]bool{}
+	var out []string
+	add := func(name, kind string) {
+		tag, err := configv2.ResolveListTag(cfg, name, kind)
+		if err != nil || seen[tag] {
+			return
+		}
+		seen[tag] = true
+		out = append(out, tag)
+	}
+	for name := range cfg.Lists.Domains {
+		add(name, "geosite")
+	}
+	for name := range cfg.Lists.IPs {
+		add(name, "geoip")
+	}
+	return out
 }
 
 func loadV2List(def lists.Definition, providers lists.Providers, compiler lists.Compiler, note func(string, ...any)) configv2.ListShape {
