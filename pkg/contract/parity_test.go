@@ -23,12 +23,8 @@ import (
 //
 // A guard weakened to pass is worse than no guard, so the exception is data, and
 // the test prints it.
-var knownGaps = map[string]string{
-	gapKey("client/desktop", "dry-run"): "the desktop client has NO observe-only mode: it writes to the " +
-		"live data plane (nft NFQUEUE rules, the tun, sing-box) with nothing equivalent to the " +
-		"daemon's -dry-run=true default. The project axiom is propose-only by default for anything " +
-		"that touches production, so the client currently violates it.",
-}
+var knownGaps = map[string]string{} // empty: the one gap this guard found (the client had no
+// -dry-run) is closed, and the guard is what made it visible.
 
 var sharedFlags = []string{
 	// The measurement loop and its persistence.

@@ -119,6 +119,8 @@ func main() {
 		recommended   = flag.Bool("recommended", false, "with -init: write the curated recommended config (services + rules, no creds); -sub optional")
 		printConfig   = flag.Bool("print-config", false, "generate the sing-box config from -config, print it, and exit (no sing-box needed)")
 	)
+	dryRun := flag.Bool("dry-run", false,
+		"report every decision and change NOTHING: no selector flip, no nft install, no nfqws swap, no restart. The daemon defaults to true; on the client it is opt-in, because the client is the surface you drive by hand")
 	throughputScan := flag.Bool("throughput-scan", false,
 		"measure each exit's sustained throughput out of band so a speedtest_top pool can narrow by measured speed. OFF by default: it pulls real bytes on the uplink it measures and aims the shared probe selector while it does.")
 	throughputBudget := flag.Int("throughput-budget", 4,
@@ -212,6 +214,7 @@ func main() {
 		AuditLog:           *auditLog,
 		FailLog:            *failLog,
 		CanaryGoodputKBps:  *canaryGoodput,
+		DryRun:             *dryRun,
 		ThroughputScan:     *throughputScan,
 		ThroughputBudget:   *throughputBudget,
 		ThroughputInterval: *throughputInterval,

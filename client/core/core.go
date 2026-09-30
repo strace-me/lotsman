@@ -89,6 +89,14 @@ type Options struct {
 	// it is budgeted and off unless asked for. The daemon has the same flag, and it
 	// exists in both roots because a capability wired in only one of them is the
 	// drift this project already paid for (LOT-65).
+	// DryRun makes the client OBSERVE: it reports every decision it would make and
+	// changes nothing — no selector flip, no nft install, no nfqws swap, no restart.
+	//
+	// The daemon has had this since the start and it defaults to true there. The
+	// client did not, which meant the safest way to start watching the system was the
+	// one that immediately started changing it. A flag parity guard caught this
+	// (pkg/contract): a knob that changes the data plane must exist in both roots.
+	DryRun             bool
 	ThroughputScan     bool
 	ThroughputBudget   int                 // exits measured per pass; 0 = 4
 	ThroughputInterval time.Duration       // period of a pass; 0 = 30m
@@ -665,7 +673,7 @@ func (c *Core) buildLoop() error {
 	// TSPU volume freeze crowns the node that answers in 40ms and then carries
 	// nothing. The laptop had been picking exits by the one measurement that cannot
 	// tell a working node from a frozen one.
-	vpnEx := executor.NewVPN(c.clash, false, c.log)
+	vpnEx := executor.NewVPN(c.clash, c.opts.DryRun, c.log)
 	if c.opts.NodeRank && len(c.conf.Subscriptions) > 0 {
 		c.ranker = noderank.New(c.clash, noderankSamples, false, c.log)
 		// Rank by what an exit CARRIES, not only by how fast it answers — the
@@ -700,7 +708,7 @@ func (c *Core) buildLoop() error {
 	}
 	execs := []executor.StrategyExecutor{
 		vpnEx,
-		executor.NewDirect(c.clash, false, c.log),
+		executor.NewDirect(c.clash, c.opts.DryRun, c.log),
 	}
 	if z := c.newZapretExec(runCtx); z != nil {
 		c.zapExec = z

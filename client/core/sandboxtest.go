@@ -249,6 +249,16 @@ func (c *Core) measureArm(ctx context.Context, svc registry.Service, sb *zapret.
 	if ip := c.resolveVolumeTarget(ctx, svc); ip != "" {
 		c.log.Info("sandbox lane target", "service", svc.Name, "candidate", label, "ip", ip)
 	}
+	if c.opts.DryRun {
+		// The lane installs its own nft table and starts a candidate nfqws, which is
+		// a real change to the data plane even though it is isolated. An observe-only
+		// run must not do it: the whole point of the flag is that nothing moves, and
+		// "it only touched the sandbox" is exactly what an operator would not expect
+		// to be the exception.
+		c.log.Info("dry-run: would test a candidate in the sandbox",
+			"service", svc.Name, "candidate", label, "args", len(argv))
+		return false, false, "dry-run: the sandbox lane was not run"
+	}
 	if err := sb.Apply(setup, argv); err != nil {
 		// nfqws validates its inputs after dropping privileges, so a refusal here is
 		// a real verdict ABOUT THIS RECIPE — it cannot run on this host — even though

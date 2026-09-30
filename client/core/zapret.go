@@ -50,8 +50,14 @@ type desyncPlatformEngine interface {
 }
 
 type zapretExec struct {
-	clash   *dataplane.ClashClient
-	engine  desyncEngine
+	clash  *dataplane.ClashClient
+	engine desyncEngine
+	// dryRun reports the decision and changes NOTHING: no engine swap, no nft
+	// install, no restart, no Stop. The client's VPN/Direct executors already take
+	// this flag; the desync engine was the one writer with no such gate, so an
+	// observe-only run still rewrote nft and restarted nfqws — the exact "I asked it
+	// to watch and it changed my traffic" surprise the flag exists to prevent.
+	dryRun  bool
 	recipes []strategycat.Recipe
 	pick    zaptune.Picker // ranks candidate recipes (KB-learned, catalog order as tiebreak)
 	files   string         // zapret payload dir, for resolving .bin references
@@ -232,7 +238,15 @@ func (z *zapretExec) applyNow(ctx context.Context, service, recipe string) error
 	// Route direct FIRST: the service may be sitting on a VPN pool from a previous
 	// chain step, and desyncing traffic that never leaves through the local stack
 	// does nothing. SetSelector is idempotent, so re-entering the rung is cheap.
-	if err := z.clash.SetSelector(ctx, registry.SelectorTag(service), "direct"); err != nil {
+	//
+	// This is a DATA-PLAN WRITE, so it is gated too. It is also the easiest one to
+	// miss: the flag was added for the engine swap, and the selector flip sits four
+	// lines above it in a different concern, which is exactly how a "dry-run" client
+	// ends up moving traffic while reporting that it did nothing.
+	if z.dryRun {
+		z.log.Info("dry-run: would point the service selector at direct",
+			"service", service, "selector", registry.SelectorTag(service))
+	} else if err := z.clash.SetSelector(ctx, registry.SelectorTag(service), "direct"); err != nil {
 		return err
 	}
 	plan, err := z.composeAndApplyLocked(ctx)
@@ -262,6 +276,10 @@ func (z *zapretExec) applyNow(ctx context.Context, service, recipe string) error
 func (z *zapretExec) applyPresetLocked(ctx context.Context, active []registry.Service) (*zaptune.Plan, error) {
 	preset := z.presetFor(active)
 	full := absolutizePayloads(preset.Args, z.files)
+	if z.dryRun {
+		z.log.Info("dry-run: would apply an upstream preset", "services", len(active), "args", len(full))
+		return nil, nil
+	}
 	restarted, err := z.engine.Apply(ctx, full)
 	if err != nil {
 		return nil, err
@@ -341,6 +359,10 @@ func (z *zapretExec) composeAndApplyLocked(ctx context.Context) (*zaptune.Plan, 
 		// interface only reports a service ENTERING a rung, so without this sweep the
 		// engine would run its final --new blocks indefinitely. Stop is idempotent, so
 		// a rung that is simply always empty costs a cheap no-op each tick.
+		if z.dryRun {
+			z.log.Info("dry-run: would stop the idle desync engine")
+			return nil, nil
+		}
 		if err := z.engine.Stop(ctx); err != nil {
 			return nil, fmt.Errorf("zapret: stop idle engine: %w", err)
 		}
@@ -407,6 +429,12 @@ func (z *zapretExec) composeAndApplyLocked(ctx context.Context) (*zaptune.Plan, 
 	// nfqws resolves a bare payload name against ITS working directory, which is
 	// ours rather than the zapret installation's.
 	full := absolutizePayloads(plan.Args, z.files)
+	if z.dryRun {
+		z.log.Info("dry-run: would apply a composed strategy",
+			"services", len(active), "args", len(plan.Args),
+			"covered", plan.Covered, "uncovered", len(plan.Uncovered))
+		return nil, nil
+	}
 	restarted, err := z.engine.Apply(ctx, full)
 	if err != nil {
 		return nil, err
