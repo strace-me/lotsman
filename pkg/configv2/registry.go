@@ -150,6 +150,7 @@ func buildChain(rule Rule, cfg *Configuration) ([]registry.ChainStep, error) {
 			out.StrategyClass = strategy.ClassVPN
 			out.StrategyID = step.Action.VPN.Pool
 			out.State = tierState(step.Tier, false)
+			out.Detour = step.Action.VPN.Detour
 		case step.Action.Direct:
 			out.StrategyClass = strategy.ClassDirect
 			out.StrategyID = "direct"

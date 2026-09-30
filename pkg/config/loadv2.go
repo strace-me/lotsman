@@ -72,6 +72,12 @@ func LoadV2(configPath, rulesDir, storeRoot string) (*V2Load, error) {
 	if err := configv2.ValidateReferencesAll(cfg, rules, out.Bundles); err != nil {
 		return nil, err
 	}
+	// A detour cycle is a WHOLE-DOCUMENT property: each rule names one detour, so
+	// the ring only closes across rules. Checking it per rule — where the reference
+	// validation lives — would pass a document that can never resolve a path.
+	if err := configv2.ValidateDetours(rules); err != nil {
+		return nil, err
+	}
 	return out, nil
 }
 

@@ -34,6 +34,16 @@ type ChainStep struct {
 	// the service-level ProbeType/ProbeTarget.
 	ProbeType   string
 	ProbeTarget string
+	// Detour, when set, is the pool this rung's egress is WRAPPED in: the traffic
+	// leaves through the named pool's node, which itself dials out through this
+	// step's pool's live node. It is composition, not fallback — `Chain` is "try
+	// until one works", this is "use this, but get there through that", and it
+	// nests arbitrarily deep.
+	//
+	// A cycle is refused at config load rather than resolved: sing-box accepts a
+	// detour loop and then nothing connects, so the symptom is a silent outage
+	// behind a green status read.
+	Detour string
 }
 
 // Service is a registered service and its denormalized chain. The route-match

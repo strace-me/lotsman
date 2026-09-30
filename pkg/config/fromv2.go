@@ -49,6 +49,21 @@ func FromV2(cfg *configv2.Configuration, rules []configv2.Rule) (*Config, []stri
 	}
 
 	out := &Config{Registry: reg}
+	// The detour graph is carried as pool -> pool. Cycles were already refused at
+	// load, so what arrives here is a forest; the generator only ever walks it to
+	// decide which nodes need a detoured variant.
+	//
+	// Initialised FIRST: allocating the map after filling it wiped every entry and
+	// the generator quietly produced a config with no composition in it, which looks
+	// exactly like "the feature does nothing".
+	out.Detours = map[string]string{}
+	for _, rule := range rules {
+		for _, step := range rule.Chain {
+			if vpn := step.Action.VPN; vpn != nil && vpn.Detour != "" {
+				out.Detours[vpn.Pool] = vpn.Detour
+			}
+		}
+	}
 	// The target version must reach the generator, or it runs at its 1.12.17
 	// baseline and strips version-gated node features — which is not a missing
 	// knob, it is a node quietly losing its obfs.

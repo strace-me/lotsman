@@ -151,6 +151,18 @@ type Options struct {
 	DNS               *DNSOptions            // split-DNS block (multi-server, DoT/DoH/DoQ, VPN-detoured); nil = fall back to FakeIP/none
 	Multiplex         *MultiplexOptions      // default outbound multiplex for TCP proxies (nil = off)
 	Remediations      map[string]Remediation // per-service self-heal remediation rules (nil/absent = no change; LOT-18). Keyed by service name.
+	// Detours composes egress: pool -> the pool its nodes dial out THROUGH. It is
+	// composition, not fallback — `Chain` is "try until one works", a detour is "use
+	// this pool, but reach it through that one", and it nests.
+	//
+	// It lands on the NODE outbounds, never on the url-test group: measured on
+	// sing-box 1.14.1, `detour` is accepted on a node outbound and may name a group
+	// (so the underlay is itself a urltest that picks its own live member), while on
+	// a urltest group it is rejected outright with "unknown field".
+	//
+	// nil/empty = no composition, and the generated config is byte-identical to what
+	// it always was.
+	Detours map[string]string
 
 	// RemHotReload (LOT-34) emits PERMANENT reject-QUIC + ip-fallback rules that
 	// match LOCAL rule_sets (rem-rq-<svc> / rem-fb-<svc>) whose membership the armed
@@ -583,7 +595,27 @@ func Generate(services []registry.Service, devices []registry.Device, nodes []su
 	outbounds := make([]outbound, 0, len(nodes)+len(services)+8)
 	var endpoints []outbound
 	tagOf := make(map[string]string, len(nodes)) // node ID -> outbound/endpoint tag
+	// tagDetoured records, per node, the extra outbound needed for each distinct
+	// underlay. A node reachable through TWO different detours cannot be one
+	// outbound with one `detour` field: the second pool would inherit the first
+	// pool's path and route its traffic somewhere nobody asked for, silently. So
+	// the extra underlay gets its own outbound, and each pool references the one
+	// that matches ITS detour.
+	tagDetoured := make(map[string]map[string]string) // node ID -> detour pool -> tag
+	// detoursInUse is the set of pools that appear as an underlay, so each one is
+	// emitted as a group even when no rule names it directly.
+	detoursInUse := map[string]bool{}
+	for pool, d := range opts.Detours {
+		if d != "" {
+			detoursInUse[d] = true
+			detoursInUse[pool] = true
+		}
+	}
 	for _, n := range nodes {
+		// The underlays a node is used with, in a stable order so the config does
+		// not churn between runs.
+		underlays := underlaysFor(n.ID, memberships, opts.Detours)
+		_ = underlays
 		if n.Protocol == subscription.ProtoWireGuard {
 			if !caps.Supports(FeatureWireGuard) {
 				res.SkippedKnobs = append(res.SkippedKnobs,
@@ -639,6 +671,30 @@ func Generate(services []registry.Service, devices []registry.Device, nodes []su
 		outbounds = append(outbounds, ob)
 		outbounds = append(outbounds, extras...)
 		tagOf[n.ID] = ob["tag"].(string)
+
+		// One extra outbound per additional underlay. The plain outbound above is the
+		// one every non-detoured pool keeps using, so a document with no detours
+		// generates byte-for-byte what it always did.
+		if len(underlays) > 0 {
+			tagDetoured[n.ID] = map[string]string{}
+		}
+		for i, underlay := range underlays {
+			if underlay == "" {
+				// The node is also in a pool with no detour: the primary outbound IS
+				// that one, so there is nothing extra to emit.
+				continue
+			}
+			cloned := cloneOutbound(ob)
+			tag := fmt.Sprintf("%s~%s", ob["tag"], sanitizeTag(underlay))
+			cloned["tag"] = tag
+			cloned["detour"] = underlay
+			// uTLS/multiplex were already injected into `ob`; the clone copies them,
+			// which is what we want — same fingerprint, same reuse policy, different
+			// path out.
+			_ = i
+			outbounds = append(outbounds, cloned)
+			tagDetoured[n.ID][underlay] = tag
+		}
 	}
 	if echStripped {
 		res.SkippedKnobs = append(res.SkippedKnobs,
@@ -662,7 +718,11 @@ func Generate(services []registry.Service, devices []registry.Device, nodes []su
 		members := memberships[name]
 		tags := make([]string, 0, len(members))
 		for _, m := range members {
-			if t, ok := tagOf[m.ID]; ok {
+			// A pool with a detour references the node's DETOURED outbound, so the
+			// group's members are the variants that actually leave through the
+			// underlay. Reading tagOf here would hand the pool the plain outbound and
+			// the composition would silently do nothing.
+			if t, ok := tagFor(m.ID, name, opts.Detours, tagOf, tagDetoured); ok {
 				tags = append(tags, t)
 			}
 		}
@@ -1144,4 +1204,62 @@ func ThroughputByNodeID(nodes []subscription.Node, byTag map[string]float64) map
 		out[n.ID] = kbps
 	}
 	return out
+}
+
+// underlaysFor returns the distinct underlays a node is used with, "" standing for
+// "also used without one". "" is kept as a member so the caller can tell a node that
+// needs no extra outbound from one that was never detoured at all.
+func underlaysFor(nodeID string, memberships map[string][]subscription.Node, detours map[string]string) []string {
+	seen := map[string]bool{}
+	var out []string
+	for pool, members := range memberships {
+		under := detours[pool]
+		found := false
+		for _, m := range members {
+			if m.ID == nodeID {
+				found = true
+				break
+			}
+		}
+		if !found || seen[under] {
+			continue
+		}
+		seen[under] = true
+		out = append(out, under)
+	}
+	sort.Strings(out)
+	return out
+}
+
+// cloneOutbound copies an outbound map so a detoured variant can carry its own tag
+// and detour without mutating the original. The copy is shallow, which is safe here
+// because the only nested values are the maps built fresh per node (tls, transport),
+// and those are replaced rather than edited.
+func cloneOutbound(ob outbound) outbound {
+	out := make(outbound, len(ob)+2)
+	for k, v := range ob {
+		out[k] = v
+	}
+	return out
+}
+
+// tagFor resolves the outbound tag a POOL should use for a node: the detoured
+// variant when THIS pool declares an underlay, the plain outbound otherwise.
+//
+// The selection is by the pool's OWN detour, not by the presence of a variant. The
+// distinction is the whole bug this comment exists for: keying the lookup on the
+// underlay name made the UNDERLAY group assemble itself out of the detoured
+// variants, so it pointed at nodes that dial out through itself. sing-box accepted
+// that — `check` is not a reachability check — and the symptom would be a pool that
+// resolves to nothing while every status read stays green.
+func tagFor(nodeID, pool string, detours map[string]string, tagOf map[string]string, tagDetoured map[string]map[string]string) (string, bool) {
+	if under := detours[pool]; under != "" {
+		if byUnder, ok := tagDetoured[nodeID]; ok {
+			if t, ok := byUnder[under]; ok {
+				return t, true
+			}
+		}
+	}
+	t, ok := tagOf[nodeID]
+	return t, ok
 }

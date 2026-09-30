@@ -52,6 +52,11 @@ type Config struct {
 	// from Registry entirely — nothing probes, routes or desyncs them — and are
 	// carried here only so a UI can list them and offer to switch them back on.
 	DisabledServices []string
+	// Detours composes egress: pool -> the pool its nodes dial out THROUGH. Empty for
+	// a v1 document. Composition, not fallback: `Chain` is "try until one works",
+	// a detour is "use this pool, but reach it through that one", and it nests. An
+	// empty map generates byte-identically, so it costs a v1 deployment nothing.
+	Detours map[string]string
 	// BypassedServices names the rules that declared `bypass: true`. They are absent
 	// from Registry for a different reason than DisabledServices — one is a switch
 	// the operator turned off, the other is a standing statement that these domains

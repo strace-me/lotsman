@@ -52,8 +52,76 @@ func (r *Rule) ValidateReferences(cfg *Configuration, strategies map[string][]st
 			// resolves fine at run time. Checking only the document made a working
 			// rule fail to load, and naming a built-in pool is exactly what a
 			// PARTIAL v2 file should be able to say.
-			if _, ok := cfg.Pools[vpn.Pool]; !ok && !builtinPools[vpn.Pool] {
-				return fmt.Errorf("rule %q references unknown pool %q", r.ID, vpn.Pool)
+			if err := requirePool(cfg, r.ID, "pool", vpn.Pool); err != nil {
+				return err
+			}
+			if vpn.Detour == "" {
+				continue
+			}
+			if err := requirePool(cfg, r.ID, "detour", vpn.Detour); err != nil {
+				return err
+			}
+			// The degenerate ring. Checked here as well as in ValidateDetours because
+			// this is a mistake you can make in a single rule, with no second rule
+			// needed to close it.
+			if vpn.Detour == vpn.Pool {
+				return fmt.Errorf("rule %q detours pool %q through itself", r.ID, vpn.Pool)
+			}
+		}
+	}
+	return nil
+}
+
+// requirePool accepts a declared pool or a built-in one, naming which of the two
+// roles failed so the error says "detour names an unknown pool" rather than making
+// the reader work out which of the two pools a rung carries.
+func requirePool(cfg *Configuration, ruleID, role, name string) error {
+	if _, ok := cfg.Pools[name]; ok || builtinPools[name] {
+		return nil
+	}
+	return fmt.Errorf("rule %q %s names unknown pool %q", ruleID, role, name)
+}
+
+// ValidateDetours refuses a detour cycle across the whole document.
+//
+// Each rule only ever names one detour, so the graph is a set of arcs pool→pool and
+// a cycle needs at least two rules pointing at each other. Walking it with a `seen`
+// set is the check; the alternative — comparing every pair of rules — is quadratic
+// and would miss a three-hop ring.
+func ValidateDetours(rules []Rule) error {
+	arc := map[string]string{} // pool -> the pool it detours through
+	for _, r := range rules {
+		for _, step := range r.Chain {
+			vpn := step.Action.VPN
+			if vpn == nil || vpn.Detour == "" {
+				continue
+			}
+			if prev, ok := arc[vpn.Pool]; ok && prev != vpn.Detour {
+				return fmt.Errorf("rule %q sends pool %q through %q, but another rule sends it through %q: "+
+					"one pool has one path out; split the pools or drop a detour",
+					r.ID, vpn.Pool, vpn.Detour, prev)
+			}
+			arc[vpn.Pool] = vpn.Detour
+		}
+	}
+	// pool -> seen set, so a ring is named with the pools that close it.
+	seenFrom := map[string]map[string]bool{}
+	for start := range arc {
+		walk := []string{start}
+		inWalk := map[string]bool{}
+		for len(walk) > 0 {
+			cur := walk[len(walk)-1]
+			walk = walk[:len(walk)-1]
+			if inWalk[cur] {
+				return fmt.Errorf("detour cycle: %v -> %s", seenFrom[start], cur)
+			}
+			inWalk[cur] = true
+			if seenFrom[start] == nil {
+				seenFrom[start] = map[string]bool{}
+			}
+			seenFrom[start][cur] = true
+			if next, ok := arc[cur]; ok {
+				walk = append(walk, next)
 			}
 		}
 	}

@@ -120,6 +120,20 @@ type DesyncAction struct {
 
 type VPNAction struct {
 	Pool string `yaml:"pool"`
+	// Detour wraps this rung's egress in ANOTHER pool: the traffic leaves through
+	// pool A's node, which itself dials out through pool B's live node. That is
+	// composition, not fallback — the chain is "try these until one works", and this
+	// is "use A, but get there through B", arbitrarily deep.
+	//
+	// Cycles are refused at load (A→B→A): sing-box would accept the config and
+	// resolve nothing, so the symptom would be traffic that simply never connects
+	// while every status read reports the strategy applied.
+	//
+	// Measured on sing-box 1.14.1: `detour` is accepted on a node outbound and MAY
+	// name a GROUP, so the underlay is itself a urltest and picks its own live
+	// member. It is REFUSED on a urltest group ("unknown field"), which is why this
+	// hangs on the nodes and not on the pool.
+	Detour string `yaml:"detour,omitempty"`
 }
 
 // Unmarshalling is hand-rolled because the step is a flat mapping with an

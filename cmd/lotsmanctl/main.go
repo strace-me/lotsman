@@ -534,6 +534,9 @@ func generate(args []string) {
 	opts.TproxyPort = *tproxyPort
 	opts.SocksProbeListen = *socksProbe
 	opts.PoolOpts = singbox.PoolOptionsFrom(cfg.Pools)
+	if len(cfg.Detours) > 0 {
+		opts.Detours = cfg.Detours
+	}
 	opts.UTLSFingerprint = cfg.UTLSFingerprint
 	if cfg.SingboxVersion != "" {
 		opts.TargetVersion = cfg.SingboxVersion
