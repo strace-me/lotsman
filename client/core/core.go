@@ -104,6 +104,9 @@ type Options struct {
 	RuleSetRefresh time.Duration
 	// RuleSetSnapshotDir holds the rollback points. "" puts them under RuleSetDir.
 	RuleSetSnapshotDir string
+	// RuleSetAutoBump keeps riding `latest` even when the document pins a release.
+	// False is the honest default: a pin that is ignored is worse than no pin.
+	RuleSetAutoBump bool
 	// V2Config is the SOURCE DOCUMENT when the config was v2, kept for what the
 	// runtime Config deliberately does not carry — data_sources, which says where
 	// rule-set content comes from rather than what the data plane should do.

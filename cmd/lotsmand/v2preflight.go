@@ -308,7 +308,10 @@ func materializeSource(ctx context.Context, name string, src configv2.DataSource
 	}
 	up := &rulesets.Updater{
 		Repo: src.Repo, Required: required, LiveDir: dir, Pin: src.Pin,
-		AutoBump: true, PathFor: singbox.RuleSetRelPath,
+		// Honour the document's pin exactly as the client does. If the preflight bumps
+		// where the client would not, it checks one release while another goes into
+		// service — the same class of disagreement as the list-tag one, one layer up.
+		AutoBump: src.Pin == "", PathFor: singbox.RuleSetRelPath,
 		Releaser: rulesets.GitHubReleaser{},
 		Counter:  entryCounter{},
 		Log:      slog.New(slog.DiscardHandler),

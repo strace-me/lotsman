@@ -85,6 +85,9 @@ func main() {
 		ruleSetPin     = flag.String("ruleset-pin", "", "fallback rule-set release tag (empty = track latest)")
 		ruleSetRefresh = flag.Duration("ruleset-refresh", 0,
 			"how often to re-read the rule-set bundle (0 = the document's data_sources.refresh, else 6h). This is what keeps the client's copy CURRENT rather than fetched once and stale")
+		ruleSetAutoBump = flag.Bool("ruleset-autobump", false,
+			"keep riding the latest rule-set release even when data_sources pins one. "+
+				"Default false: a pin means stay on that release, and an ignored pin is worse than none")
 		ruleSetMinRatio = flag.Float64("ruleset-min-ratio", 0.5,
 			"refuse a fetched rule-set with fewer rules than this fraction of what we have, and keep ours (the router's updater applies the same floor)")
 		storeV2     = flag.String("store-v2", "/etc/lotsman/desync/strategies", "v2 strategy bundle root, for resolving a rule's {instance, strategy}")
@@ -250,6 +253,7 @@ func main() {
 		RuleSetPin:         *ruleSetPin,
 		RuleSetRefresh:     *ruleSetRefresh,
 		RuleSetMinRatio:    *ruleSetMinRatio,
+		RuleSetAutoBump:    *ruleSetAutoBump,
 		ThroughputScan:     *throughputScan,
 		ThroughputBudget:   *throughputBudget,
 		ThroughputInterval: *throughputInterval,

@@ -60,9 +60,15 @@ func (c *Core) ruleSetUpdater(rc *reconcile.Reconciler) (*rulesets.Updater, time
 	if every <= 0 {
 		every = 6 * time.Hour
 	}
+	// A pin in the document means "stay on this release"; empty means "track
+	// latest". AutoBump=true overrode that, which made the pin decorative: the
+	// updater asked GitHub for `releases/latest` every period and failed with a 403
+	// (unauthenticated limit is 60/h) for a tag it already had. The flag is there
+	// for an operator who wants to keep riding latest while pinning as a floor.
+	autoBump := c.opts.RuleSetAutoBump || src.Pin == ""
 	up := &rulesets.Updater{
 		Repo: src.Repo, Required: required, LiveDir: c.opts.RuleSetDir,
-		Pin: src.Pin, AutoBump: true, MinRatio: c.opts.RuleSetMinRatio, PerTag: true,
+		Pin: src.Pin, AutoBump: autoBump, MinRatio: c.opts.RuleSetMinRatio, PerTag: true,
 		DryRun:      c.opts.DryRun,
 		SnapshotDir: c.opts.RuleSetSnapshotDir,
 		Counter:     rulesets.SingboxCounter{Bin: c.opts.SingboxBin},
