@@ -111,6 +111,16 @@ func runV2Preflight(f v2Flags) int {
 		note("reference: %v", err)
 	}
 
+	// One scratch root for the whole run, removed on the way out including on an early
+	// return. Per-source temp dirs leaked: each preflight left a partial copy of a
+	// 27 MB bundle in /tmp, and a check is the last thing that should accumulate state.
+	scratchRoot, err = os.MkdirTemp("", "lotsman-v2src-")
+	if err != nil {
+		note("scratch space: %v", err)
+	} else {
+		defer os.RemoveAll(scratchRoot)
+	}
+
 	providers := v2Providers(cfg, *f.rulesets, *f.plain, note)
 	domainShapes, ipShapes := map[string]configv2.ListShape{}, map[string]configv2.ListShape{}
 	domainDefs, ipDefs := cfg.Lists.Definitions()
@@ -279,13 +289,20 @@ const fetchTimeout = 2 * time.Minute
 // shared updater, not a second fetcher: the release selection, the extraction and the
 // validity check are the same code that will later put these files in service, so the
 // preflight cannot pass on a release the daemon would reject.
+// scratchRoot is the run-wide temp parent for materialized sources. Empty means the
+// MkdirTemp failed and the fetch is skipped rather than scattered across /tmp.
+var scratchRoot string
+
 func materializeSource(ctx context.Context, name string, src configv2.DataSource, required []string, note func(string, ...any)) (string, error) {
 	// A source with no repo is the plain form: it points at files somebody put on
 	// disk, and this is not the place to go looking for them.
 	if src.Repo == "" {
 		return "", fmt.Errorf("does not say where its lists come from; pass -rulesets-v2 or -plain-v2")
 	}
-	dir, err := os.MkdirTemp("", "lotsman-v2src-"+name+"-")
+	if scratchRoot == "" {
+		return "", fmt.Errorf("no scratch space available")
+	}
+	dir, err := os.MkdirTemp(scratchRoot, name+"-")
 	if err != nil {
 		return "", err
 	}
@@ -297,13 +314,10 @@ func materializeSource(ctx context.Context, name string, src configv2.DataSource
 		Log:      slog.New(slog.DiscardHandler),
 	}
 	if err := up.Update(ctx); err != nil {
-		os.RemoveAll(dir)
 		return "", err
 	}
 	note("data source %q: fetched %s%s into scratch space to check its lists", name, src.Repo,
 		pinSuffix(src.Pin))
-	// Cleaned up when the process exits; a preflight is a short-lived reader and
-	// leaving a copy of the bundle in /tmp is not ours to keep.
 	return dir, nil
 }
 
