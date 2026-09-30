@@ -19,9 +19,34 @@ import (
 	"time"
 )
 
-// BundleURL is the upstream sing-box rule-set bundle — the same source the
+// DefaultRepo is the upstream sing-box rule-set bundle — the same source the
 // router's updater uses, so a tag resolves to identical data on both.
-const BundleURL = "https://github.com/runetfreedom/russia-v2ray-rules-dat/releases/latest/download/sing-box.zip"
+//
+// It is a DEFAULT, not the answer: a v2 document names its own data source and the
+// repo comes from there. It was a hardcoded constant, which meant a fork or a pinned
+// mirror was impossible on the client without editing code, and the client's copy
+// could quietly drift from the router's.
+const DefaultRepo = "runetfreedom/russia-v2ray-rules-dat"
+
+// BundleURL is the release asset for a repo, following latest.
+func BundleURL(repo string) string {
+	if repo == "" {
+		repo = DefaultRepo
+	}
+	return "https://github.com/" + repo + "/releases/latest/download/sing-box.zip"
+}
+
+// BundleURLAt is the release asset for an explicit tag, so a document that pins a
+// release gets that release rather than whatever is newest.
+func BundleURLAt(repo, tag string) string {
+	if repo == "" {
+		repo = DefaultRepo
+	}
+	if tag == "" {
+		return BundleURL(repo)
+	}
+	return "https://github.com/" + repo + "/releases/download/" + tag + "/sing-box.zip"
+}
 
 // RelPath maps a rule-set tag to its path inside the bundle, which is also its
 // path under the local rule-set dir — mirroring what pkg/singbox emits for a
@@ -60,7 +85,29 @@ var bundleClient = &http.Client{
 	},
 }
 
+// Source is where the client's bundle comes from. It mirrors the daemon's document
+// data source so one config can drive both roots.
+type Source struct {
+	Repo string
+	Pin  string
+	URL  string // explicit asset URL; wins over Repo/Pin
+}
+
+// EnsureFrom is Ensure with the source named, so a v2 document is authoritative on
+// the client exactly as it is on the router.
+func EnsureFrom(ctx context.Context, src Source, dir string, tags []string, log *slog.Logger) error {
+	url := src.URL
+	if url == "" {
+		url = BundleURLAt(src.Repo, src.Pin)
+	}
+	return ensureFromURL(ctx, url, dir, tags, log)
+}
+
 func Ensure(ctx context.Context, dir string, tags []string, log *slog.Logger) error {
+	return ensureFromURL(ctx, BundleURL(""), dir, tags, log)
+}
+
+func ensureFromURL(ctx context.Context, bundleURL, dir string, tags []string, log *slog.Logger) error {
 	want := map[string]string{} // bundle-relative path -> destination
 	for _, tag := range tags {
 		rel, ok := RelPath(tag)
@@ -85,7 +132,7 @@ func Ensure(ctx context.Context, dir string, tags []string, log *slog.Logger) er
 	defer os.Remove(tmp.Name())
 	defer tmp.Close()
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, BundleURL, nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, bundleURL, nil)
 	if err != nil {
 		return fmt.Errorf("rulesets: request: %w", err)
 	}

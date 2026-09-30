@@ -21,7 +21,9 @@ import (
 	"github.com/strace-me/lotsman/client/core"
 	"github.com/strace-me/lotsman/client/platform/externalbox"
 	"github.com/strace-me/lotsman/client/scaffold"
+	"github.com/strace-me/lotsman/client/platform/rulesets"
 	"github.com/strace-me/lotsman/pkg/config"
+	"github.com/strace-me/lotsman/pkg/configv2"
 )
 
 // writeStarter emits a working starter config to path from the given comma-
@@ -78,6 +80,9 @@ func main() {
 		configPath = flag.String("config", "", "path to the lotsman client config (required unless -run-v2)")
 		runV2      = flag.String("run-v2", "",
 			"run on a v2 configuration.yaml (or its directory) instead of -config; the same loader the router daemon uses")
+		ruleSetRepo = flag.String("ruleset-repo", rulesets.DefaultRepo,
+			"fallback rule-set bundle repo for a v1 document, which declares no data sources; a v2 document's data_sources win over this")
+		ruleSetPin = flag.String("ruleset-pin", "", "fallback rule-set release tag (empty = track latest)")
 		storeV2     = flag.String("store-v2", "/etc/lotsman/desync/strategies", "v2 strategy bundle root, for resolving a rule's {instance, strategy}")
 		singboxBin  = flag.String("singbox-bin", "sing-box", "sing-box binary")
 		singboxCfg  = flag.String("singbox-config", "singbox.json", "where to write the live sing-box config")
@@ -190,12 +195,14 @@ func main() {
 	// the file cannot be handed to a binary that reads it as the other schema. Both
 	// roots go through the same loader (config.LoadAny), so the CLI, the router daemon
 	// and this client cannot disagree about what a configuration is.
+	var v2Document *configv2.Configuration
 	load := func() (*config.Config, error) {
 		path := *configPath
 		if path == "" {
 			path = *runV2
 		}
-		cfg, gaps, err := config.LoadAny(path, "", *storeV2)
+		cfg, v2doc, gaps, err := config.LoadAnyDocument(path, "", *storeV2)
+		v2Document = v2doc
 		for _, gap := range gaps {
 			log.Warn("v2: not carried into the runtime, running at a default instead", "gap", gap)
 		}
@@ -234,6 +241,9 @@ func main() {
 		FailLog:            *failLog,
 		CanaryGoodputKBps:  *canaryGoodput,
 		DryRun:             *dryRun,
+		V2Config:           v2Document,
+		RuleSetRepo:        *ruleSetRepo,
+		RuleSetPin:         *ruleSetPin,
 		ThroughputScan:     *throughputScan,
 		ThroughputBudget:   *throughputBudget,
 		ThroughputInterval: *throughputInterval,

@@ -28,6 +28,7 @@ import (
 	"github.com/strace-me/lotsman/pkg/audit"
 	"github.com/strace-me/lotsman/pkg/brain"
 	"github.com/strace-me/lotsman/pkg/config"
+	"github.com/strace-me/lotsman/pkg/configv2"
 	"github.com/strace-me/lotsman/pkg/dataplane"
 	"github.com/strace-me/lotsman/pkg/events"
 	"github.com/strace-me/lotsman/pkg/executor"
@@ -89,6 +90,14 @@ type Options struct {
 	// it is budgeted and off unless asked for. The daemon has the same flag, and it
 	// exists in both roots because a capability wired in only one of them is the
 	// drift this project already paid for (LOT-65).
+	// RuleSetRepo and RuleSetPin are the FALLBACK source for a v1 document, which
+	// declares no data sources. A v2 document's data_sources win over both.
+	RuleSetRepo string
+	RuleSetPin  string
+	// V2Config is the SOURCE DOCUMENT when the config was v2, kept for what the
+	// runtime Config deliberately does not carry — data_sources, which says where
+	// rule-set content comes from rather than what the data plane should do.
+	V2Config *configv2.Configuration
 	// DryRun makes the client OBSERVE: it reports every decision it would make and
 	// changes nothing — no selector flip, no nft install, no nfqws swap, no restart.
 	//
@@ -2205,7 +2214,24 @@ func (c *Core) ensureRuleSets(ctx context.Context) error {
 	if len(tags) == 0 {
 		return nil
 	}
-	return rulesets.Ensure(ctx, c.opts.RuleSetDir, tags, c.log)
+	// The source comes from the DOCUMENT when it declares one, so the client's copy of
+	// the rule-sets cannot drift from the router's: same repo, same pin, same bytes.
+	// It used to be a hardcoded constant on this side and a flag on the other, which
+	// is two answers to "where do the rule-sets come from".
+	src := rulesets.Source{Repo: c.opts.RuleSetRepo, Pin: c.opts.RuleSetPin}
+	// The document is read from the options rather than held on the Core: it has no
+	// other consumer, and a field on the long-lived struct is a thing that can go
+	// stale across a Reload.
+	for _, s := range config.RuleSetSources(c.opts.V2Config) {
+		if s.Fetch && s.Repo != "" {
+			src.Repo, src.Pin = s.Repo, s.Pin
+			break
+		}
+	}
+	if src.Repo == "" {
+		src.Repo = rulesets.DefaultRepo
+	}
+	return rulesets.EnsureFrom(ctx, src, c.opts.RuleSetDir, tags, c.log)
 }
 
 // waitControlReady blocks until the box answers on its loopback Clash-API, so the

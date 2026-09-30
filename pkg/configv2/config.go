@@ -152,11 +152,23 @@ type Runtime struct {
 	RuntimeDir      string   `yaml:"runtime_dir"`
 }
 
+// DataSource is where a named list's CONTENT comes from.
 type DataSource struct {
-	Type           string   `yaml:"type"`
-	Repo           string   `yaml:"repo"`
-	Geosite        string   `yaml:"geosite"`
-	Geoip          string   `yaml:"geoip"`
+	Type string `yaml:"type"`
+	// Repo is the GitHub repository whose release carries the bundle, for the
+	// v2ray-srs type. It is the reason a v2 document can be authoritative about its
+	// own rule-sets: with the repo here, the binary does not need a flag that says
+	// one thing while the config says another.
+	Repo string `yaml:"repo"`
+	// Pin is a release tag. Empty means track latest, which runs under the shrink
+	// guard — a release that lost rule-sets is refused rather than applied.
+	Pin     string `yaml:"pin,omitempty"`
+	Geosite string `yaml:"geosite"`
+	Geoip   string `yaml:"geoip"`
+	// Refresh is how often Lotsman itself re-reads this source. It is what replaces
+	// the separate cron that used to do the fetching: the period belongs to the
+	// thing it refreshes, and a document that declares a source without a period
+	// gets the global default rather than never being refreshed.
 	Refresh        Duration `yaml:"refresh,omitempty"`
 	VerifyChecksum bool     `yaml:"verify_checksum"`
 }

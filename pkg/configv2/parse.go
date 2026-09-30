@@ -245,8 +245,8 @@ func (c *Configuration) Validate() error {
 		return err
 	}
 	for name, source := range c.DataSources {
-		if source.Type == "" {
-			return fmt.Errorf("data source %q has no type", name)
+		if !contains(DataSourceTypes, source.Type) {
+			return fmt.Errorf("data source %q has unknown type %q (have %v)", name, source.Type, DataSourceTypes)
 		}
 		if source.Refresh < 0 {
 			return fmt.Errorf("data source %q has a negative refresh interval", name)

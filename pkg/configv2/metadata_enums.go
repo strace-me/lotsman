@@ -20,6 +20,9 @@ var (
 	// nothing measures (LOT-69: BandwidthMbps is filled by no one), and the term
 	// would leave the average while the number still read as a live setting.
 	TrafficClasses = []string{"general", "voice", "streaming", "gaming"}
+	// DataSourceTypes is the vocabulary of `data_sources[].type`, from the same table
+	// the validator and the GUI read.
+	DataSourceTypes = []string{"v2ray-srs", "srs", "plain"}
 )
 
 // nftTablePattern is one family/table pair, the form `table <family> <name>`

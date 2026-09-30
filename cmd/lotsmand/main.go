@@ -41,6 +41,7 @@ import (
 	"github.com/strace-me/lotsman/pkg/bypasslearn"
 	"github.com/strace-me/lotsman/pkg/capture"
 	"github.com/strace-me/lotsman/pkg/config"
+	"github.com/strace-me/lotsman/pkg/configv2"
 	"github.com/strace-me/lotsman/pkg/dataplane"
 	"github.com/strace-me/lotsman/pkg/desynctune"
 	"github.com/strace-me/lotsman/pkg/enginehealth"
@@ -194,6 +195,7 @@ func main() {
 	// and log membership counts (the nodes do not yet feed sing-box generation).
 	reg := registry.Builtin()
 	var conf *config.Config
+	var v2Config *configv2.Configuration
 	// The document decides its own schema from its `version` field, so there is one
 	// -config and no "which file is authoritative" question. -run-v2 stays as the
 	// explicit spelling of the same thing, and names the same loader.
@@ -213,6 +215,12 @@ func main() {
 		}
 		conf = loaded
 		reg = conf.Registry
+		// Remember the DOCUMENT, not just the projection: `data_sources` has no home
+		// in the runtime Config because it describes where content comes from, not what
+		// the data plane should do. The fetchers are the one consumer of it.
+		if v2Load, err := config.LoadV2(configFile, *v2.rules, *v2.store); err == nil {
+			v2Config = v2Load.Config
+		}
 		// Named, not swallowed: the projection leaves split-DNS, the uTLS fingerprint
 		// and the declared strategies at zero, and a daemon that starts and routes
 		// with all three defaulted looks exactly like one that was configured.
@@ -882,10 +890,39 @@ func main() {
 			pr.Add(periodic.Task{Name: "zapret-compose", Interval: *checkInterval, RunAtStart: true, Fn: zr.Reconcile})
 			log.Info("zapret per-rule composer enabled (LOT-10b)", "armed", armed)
 		}
-		if *rulesetsUpdate {
+		// Rule-set autoupdate. A v2 document DECLARES its sources, including the repo
+		// and the refresh period, so the document is authoritative and the flags are
+		// the v1 path (a v1 document has no data_sources at all).
+		//
+		// This is what replaces the separate cron that fetched the lists: the period
+		// belongs to the source it refreshes, the shrink guard and the snapshot come
+		// with it, and a failure is reported by the same log the rest of the daemon
+		// uses — rather than in a cron's own output that nobody reads.
+		sources := config.RuleSetSources(v2Config)
+		switch {
+		case len(sources) > 0:
+			for _, src := range sources {
+				if !src.Fetch || src.Repo == "" {
+					log.Warn("rule-set data source is declared but not fetchable",
+						"source", src.Name, "dir", *rulesetsDir,
+						"note", "its lists resolve from disk only; a rebuild will find nothing there")
+					continue
+				}
+				up := newRulesetsUpdater(reg, rc, src.Repo, src.Pin, *rulesetsDir, *singboxBin, *rulesetsBump, *rulesetsRatio, *dryRun, log)
+				interval := *checkInterval
+				if src.Refresh > 0 {
+					interval = src.Refresh
+				}
+				pr.Add(periodic.Task{Name: "rulesets-update:" + src.Name, Interval: interval, RunAtStart: true, Fn: up.Update})
+				log.Info("rule-set autoupdate from the document's data source",
+					"source", src.Name, "repo", src.Repo, "pin", src.Pin,
+					"interval", interval.String(), "dry_run", *dryRun)
+			}
+		case *rulesetsUpdate:
 			up := newRulesetsUpdater(reg, rc, *rulesetsRepo, *rulesetsPin, *rulesetsDir, *singboxBin, *rulesetsBump, *rulesetsRatio, *dryRun, log)
 			pr.Add(periodic.Task{Name: "rulesets-update", Interval: *checkInterval, Fn: up.Update})
-			log.Info("rule-set autoupdate enabled", "repo", *rulesetsRepo, "pin", *rulesetsPin, "dry_run", *dryRun)
+			log.Info("rule-set autoupdate enabled from flags (a v1 document declares no data sources)",
+				"repo", *rulesetsRepo, "pin", *rulesetsPin, "dry_run", *dryRun)
 		}
 		if *kbFile != "" {
 			pr.Add(periodic.Task{Name: "kb-save", Interval: *checkInterval, Fn: func(context.Context) error {

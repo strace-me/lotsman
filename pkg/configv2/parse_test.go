@@ -21,7 +21,7 @@ runtime:
   wan: auto
 data_sources:
   runetfreedom:
-    type: v2ray-geo-dat
+    type: v2ray-srs
     repo: runetfreedom/russia-v2ray-rules-dat
     refresh: 6h
 lists:

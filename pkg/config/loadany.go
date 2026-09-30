@@ -5,6 +5,8 @@ import (
 	"os"
 	"path/filepath"
 
+	"github.com/strace-me/lotsman/pkg/configv2"
+
 	"gopkg.in/yaml.v3"
 )
 
@@ -28,6 +30,16 @@ import (
 // A file that declares a version this build does not know is an ERROR, because
 // guessing produces a config that loads and behaves like something else.
 func LoadAny(path, v2RulesDir, v2StoreRoot string) (*Config, []string, error) {
+	cfg, _, gaps, err := LoadAnyDocument(path, v2RulesDir, v2StoreRoot)
+	return cfg, gaps, err
+}
+
+// LoadAnyDocument is LoadAny plus the SOURCE DOCUMENT, which the runtime Config
+// deliberately does not carry: `data_sources` says where content comes from, and
+// the fetcher is its only consumer. Returning it here is what keeps that plumbing out
+// of every call site — the alternative is a root that re-reads the file to recover
+// something the loader already had.
+func LoadAnyDocument(path, v2RulesDir, v2StoreRoot string) (*Config, *configv2.Configuration, []string, error) {
 	// A v2 deployment is configuration.yaml + rules/ as a unit, so the directory is
 	// the natural thing to be handed and the file is the natural thing to name. Both
 	// resolve, and neither is a second document: the rules are v2's SHAPE (one file
@@ -41,28 +53,28 @@ func LoadAny(path, v2RulesDir, v2StoreRoot string) (*Config, []string, error) {
 	}
 	data, err := os.ReadFile(path)
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
 	version, err := SchemaVersion(data)
 	if err != nil {
-		return nil, nil, fmt.Errorf("%s: %w", path, err)
+		return nil, nil, nil, fmt.Errorf("%s: %w", path, err)
 	}
 	switch version {
 	case 1:
 		cfg, err := Parse(data)
-		return cfg, nil, err
+		return cfg, nil, nil, err
 	case 2:
 		load, err := LoadV2(path, v2RulesDir, v2StoreRoot)
 		if err != nil {
-			return nil, nil, fmt.Errorf("%s: %w", path, err)
+			return nil, nil, nil, fmt.Errorf("%s: %w", path, err)
 		}
 		projected, gaps, err := FromV2(load.Config, load.Rules)
 		if err != nil {
-			return nil, nil, fmt.Errorf("%s: %w", path, err)
+			return nil, nil, nil, fmt.Errorf("%s: %w", path, err)
 		}
-		return projected, gaps, nil
+		return projected, load.Config, gaps, nil
 	default:
-		return nil, nil, fmt.Errorf("config declares version %d and this build reads 1 and 2. "+
+		return nil, nil, nil, fmt.Errorf("config declares version %d and this build reads 1 and 2. "+
 			"The file is newer than the program: upgrade before editing, rather than letting a "+
 			"newer document load and behave like an older one", version)
 	}
