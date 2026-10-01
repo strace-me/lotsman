@@ -138,13 +138,13 @@ func (s *Sandbox) installLocked(ctx context.Context) error {
 	// DesyncFwmark). Ensured HERE because the lane is what runs while production is
 	// unarmed — the exact window in which a missing rule turns a working recipe
 	// into a false negative.
-	_ = s.Run.Run(ctx, "ip", "rule", "del", "fwmark", fmt.Sprintf("0x%x", DesyncFwmark), "lookup", "main")
-	if err := s.Run.Run(ctx, "ip", "rule", "add", "fwmark", fmt.Sprintf("0x%x", DesyncFwmark), "lookup", "main", "pref", "100"); err != nil {
+	_ = s.Run.Run(ctx, "ip", "rule", "del", "fwmark", fmt.Sprintf("0x%x", DesyncFwmark), "lookup", "main", "pref", desyncRulePref)
+	if err := s.Run.Run(ctx, "ip", "rule", "add", "fwmark", fmt.Sprintf("0x%x", DesyncFwmark), "lookup", "main", "pref", desyncRulePref); err != nil {
 		return fmt.Errorf("zapret: sandbox: keep the desync fwmark out of the tunnel: %w", err)
 	}
 	probeMark := fmt.Sprintf("0x%x", s.mark())
-	_ = s.Run.Run(ctx, "ip", "rule", "del", "fwmark", probeMark, "lookup", "main")
-	if err := s.Run.Run(ctx, "ip", "rule", "add", "fwmark", probeMark, "lookup", "main", "pref", "101"); err != nil {
+	_ = s.Run.Run(ctx, "ip", "rule", "del", "fwmark", probeMark, "lookup", "main", "pref", probeRulePref)
+	if err := s.Run.Run(ctx, "ip", "rule", "add", "fwmark", probeMark, "lookup", "main", "pref", probeRulePref); err != nil {
 		return fmt.Errorf("zapret: sandbox: keep the probe fwmark on the physical route: %w", err)
 	}
 	// A table from a killed run would otherwise stack with this one.
@@ -166,9 +166,22 @@ func (s *Sandbox) installLocked(ctx context.Context) error {
 	return nil
 }
 
+// The isolation rules are identified by pref, and the deletion MUST carry it.
+//
+// `ip rule del` matches by the selector it is given and removes the FIRST rule that
+// matches. Without pref, "del fwmark 0x40000000 lookup main" was free to remove a
+// DIFFERENT rule that merely also says `lookup main` — and the live table has others:
+// `400: from all to 217.144.170.170 lookup main` routes one specific address, and it
+// was a candidate for being the one that got deleted. That is a foreign rule that
+// somebody installed for a reason, and a sandbox teardown is no place to lose it.
+const (
+	desyncRulePref = "100"
+	probeRulePref  = "101"
+)
+
 func (s *Sandbox) removeProbeRoute(ctx context.Context) {
 	mark := fmt.Sprintf("0x%x", s.mark())
-	_ = s.Run.Run(ctx, "ip", "rule", "del", "fwmark", mark, "lookup", "main")
+	_ = s.Run.Run(ctx, "ip", "rule", "del", "fwmark", mark, "lookup", "main", "pref", probeRulePref)
 }
 
 func (s *Sandbox) stopEngineLocked() {
