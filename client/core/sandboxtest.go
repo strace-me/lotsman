@@ -401,6 +401,21 @@ func (c *Core) gateEnable(ctx context.Context, service string) {
 	// would leave the rule with no route at all.
 	if !c.canJudge(svc) || !c.claimRotation(service) {
 		if top := c.rankedCandidates(service, "", 1); len(top) > 0 {
+			// Re-asserting is the EXECUTOR's job — it re-applies on every interval on
+			// its own, which is the whole reason this path may skip the re-test. So when
+			// the top candidate is what is already chosen, there is nothing to do, and
+			// calling applyCandidate did nothing either: it reinstalled the same recipe
+			// over itself and logged it as a move.
+			//
+			// An overnight run logged that 85 times for one service, every ten seconds,
+			// always verified=false replacing="" — and, worse, the cooldown means the
+			// judgement pass NEVER got a turn, so verified could never become true and
+			// the rule sat on a permanently unproven strategy. Quieting the log is not
+			// the point; the point is that "already in service" is a state, and it was
+			// not being asked about.
+			if c.zapExec.chosenPreset(service) == top[0] {
+				return
+			}
 			c.applyCandidate(ctx, service, top[0], false, "")
 		}
 		return
