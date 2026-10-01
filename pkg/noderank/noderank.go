@@ -378,8 +378,34 @@ func (r *Ranker) Pick(ctx context.Context, svc Service, cands []Candidate) (stri
 		pool = append(pool, scored{cand: balancer.Candidate{ID: c.Tag, Q: eff}, healthy: healthy})
 	}
 	if len(pool) == 0 { // every eligible node is down (sustained failure)
-		r.log.Warn("noderank: all eligible nodes down for service", "service", svc.Name,
-			"selector", svc.Selector, "eligible", len(eligible), "probe_url", svc.ProbeURL)
+		// The count leads, and the message says WHICH failure this is, because the
+		// two are not the same event and only one of them is alarming.
+		//
+		// A six-hour overnight run produced 58 of these and every single one had
+		// eligible=1. Read as "all eligible nodes down", that says 94 nodes died,
+		// which sent me hunting for a screening bug that does not even run in
+		// production (nothing sets ScreenURL/ScreenTimeout, so screen() returns
+		// immediately). The truth was the opposite and duller: narrowing by country,
+		// pool and selector had left ONE candidate, and that one failed its probe.
+		// There was no ranking to get wrong — there was nothing to rank.
+		//
+		// So: eligible=1 gets its own sentence, because that case is about a starved
+		// candidate set and the fix is upstream of the ranker. More than one is
+		// genuinely about nodes being down.
+		//
+		// The zero case is NOT handled here on purpose: an empty set is caught earlier
+		// and already says something better — "no country-eligible nodes" with the
+		// exclude/include lists. A test caught me adding a dead branch for it.
+		switch {
+		case len(eligible) == 1:
+			r.log.Warn("noderank: the only eligible candidate failed its probe", "eligible", 1,
+				"service", svc.Name, "selector", svc.Selector, "probe_url", svc.ProbeURL,
+				"node", eligible[0].Tag,
+				"note", "one candidate, one failure — there was nothing to rank; widening the candidate set is the fix, not a longer probe")
+		default:
+			r.log.Warn("noderank: all eligible nodes down for service", "eligible", len(eligible),
+				"service", svc.Name, "selector", svc.Selector, "probe_url", svc.ProbeURL)
+		}
 		return "", nil
 	}
 	// Healthy nodes outrank degraded ones; within a tier, rank by quality. So a
