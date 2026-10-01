@@ -34,10 +34,26 @@ type Check struct {
 	Restart   func(context.Context) error
 	Threshold int           // consecutive unhealthy passes before restarting (min 1)
 	Cooldown  time.Duration // min time between restarts of this engine
+	// Budget is how many restarts this engine gets before the watchdog STOPS trying
+	// and declares it unserviceable. 0 means DefaultBudget.
+	//
+	// The engine that motivated this cannot start at all — a payload file is missing —
+	// and a restart loop is the wrong answer to that: it is not flaky, it is
+	// impossible. Measured on the laptop, an impossible engine was restarted 559 times
+	// over three days, every ten seconds, each time with the counter reset to zero, so
+	// the streak never grew and nothing ever concluded. A watchdog that cannot conclude
+	// is not a watchdog, it is a metronome.
+	Budget int
 
 	fails       int
+	restarts    int
+	gaveUp      bool
 	lastRestart time.Time
 }
+
+// DefaultBudget is how many times a wedged engine is restarted before the watchdog
+// stops and says so. Three is enough to tell a flake from a refusal.
+const DefaultBudget = 3
 
 // Watchdog runs the engine checks behind a WAN gate. Construct the struct and call
 // Run on a ticker. Not safe for concurrent use (drive from one goroutine).
@@ -62,10 +78,12 @@ func (w *Watchdog) Run(ctx context.Context) error {
 	now := w.clock()
 	for _, c := range w.Checks {
 		if c.Healthy(ctx) {
-			if c.fails > 0 {
-				w.Log.Info("engine-health: engine recovered", "engine", c.Name)
+			if c.fails > 0 || c.restarts > 0 {
+				w.Log.Info("engine-health: engine recovered", "engine", c.Name, "restarts", c.restarts)
 			}
 			c.fails = 0
+			c.restarts = 0
+			c.gaveUp = false
 			continue
 		}
 		c.fails++
@@ -75,6 +93,20 @@ func (w *Watchdog) Run(ctx context.Context) error {
 		}
 		w.Log.Warn("engine-health: engine unhealthy while WAN up", "engine", c.Name, "fails", c.fails, "threshold", th)
 		if c.fails < th {
+			continue
+		}
+		if c.gaveUp {
+			continue
+		}
+		budget := c.Budget
+		if budget <= 0 {
+			budget = DefaultBudget
+		}
+		if c.restarts >= budget {
+			c.gaveUp = true
+			w.Log.Error("engine-health: giving up on this engine — it is not flaky, it cannot start",
+				"engine", c.Name, "restarts", c.restarts, "verdict", "unserviceable: this rung cannot be served",
+				"next", "the chain must move off this rung; restarting again will not help")
 			continue
 		}
 		if !c.lastRestart.IsZero() && now.Sub(c.lastRestart) < c.Cooldown {
@@ -88,6 +120,7 @@ func (w *Watchdog) Run(ctx context.Context) error {
 			continue
 		}
 		c.lastRestart = now
+		c.restarts++
 		c.fails = 0
 	}
 	return nil
