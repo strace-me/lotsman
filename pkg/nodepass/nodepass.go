@@ -61,7 +61,22 @@ func Run(ctx context.Context, conf *config.Config, reg *registry.Registry, ranke
 		return nil
 	}
 	all := nodes(ctx)
-	log.Debug("noderank: ranking this node set", "nodes", len(all))
+	// Visible, not Debug. I first wrote this at Debug with a comment saying the
+	// size goes to the log, and the client hardcodes LevelInfo with no flag to
+	// raise it — so the line was invisible in production and the claim in the
+	// commit message was false. The test passed anyway, because I built its logger
+	// at LevelDebug. A visibility guarantee has to be asserted at the level that
+	// actually runs, or it is not a guarantee.
+	//
+	// Warn only when it is empty. A small fleet is routine; an EMPTY one means the
+	// caller handed us nothing, and every service is about to be declared node-less
+	// for a reason that has nothing to do with the nodes.
+	if len(all) == 0 {
+		log.Warn("noderank: the authoritative node set is EMPTY — every service will look node-less",
+			"nodes", 0, "note", "this is the fleet, not a pool; if generation still routes, the ranker and the generator are reading different things again")
+	} else {
+		log.Debug("noderank: ranking this node set", "nodes", len(all))
+	}
 	memberships := conf.Pools.Memberships(all)
 	for _, svc := range reg.Services {
 		if svc.ProbeType != "" && svc.ProbeType != "http" {

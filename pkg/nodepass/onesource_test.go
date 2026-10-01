@@ -66,15 +66,17 @@ func TestEmptySourceIsNotFatal(t *testing.T) {
 		Pools:         &pools.Set{Pools: map[string]pools.Pool{"p": {Type: "urltest"}}},
 	}
 	reg := &registry.Registry{Services: map[string]registry.Service{}}
+	// LevelInfo on purpose: the client hardcodes exactly this and offers no flag, so
+	// a guarantee asserted at Debug proves nothing about what the operator sees.
 	var buf strings.Builder
-	log := slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug}))
+	log := slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelInfo}))
 	err := Run(context.Background(), conf, reg, noderank.New(nil, 1, true, log),
 		func(context.Context) []subscription.Node { return nil }, nil, log)
 	if err != nil {
 		t.Fatalf("an empty fleet should be a quiet pass, got %v", err)
 	}
 	if !strings.Contains(buf.String(), "nodes=0") {
-		t.Errorf("the ranked set size is not in the log, so a shrunken fleet is invisible again: %q", buf.String())
+		t.Errorf("an empty fleet is invisible at the level the client actually runs: %q", buf.String())
 	}
 }
 
