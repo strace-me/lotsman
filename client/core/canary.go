@@ -59,8 +59,17 @@ func (z *zapretExec) judge(ctx context.Context, service string, chosen map[strin
 	ok, why := z.canary(ctx, service)
 	z.record(service, recipe, ok)
 	z.noteCarrying(service, ok, why)
+	// A green verdict that cannot support the word "strategy" must not say it. This
+	// line is what an operator reads to decide whether the desync is earning its place,
+	// and "works" on a measurement taken with nothing on the queue is the answer that
+	// let a dead engine look healthy for a week.
+	if ok && strings.Contains(why, "NO DESYNC ON THE QUEUE") {
+		z.log.Warn("desync canary: service carries, but no desync was on the queue — the verdict says nothing about the strategy",
+			"service", service, "recipe", recipe, "why", why)
+		return
+	}
 	if ok {
-		z.log.Info("desync canary: strategy works", "service", service, "recipe", recipe)
+		z.log.Info("desync canary: strategy works", "service", service, "recipe", recipe, "why", why)
 		return
 	}
 	z.log.Warn("desync canary: strategy did not restore the service, demoting it",
@@ -170,10 +179,25 @@ func (c *Core) canaryProbe(ctx context.Context, service string) (bool, string) {
 			break
 		}
 	}
+	// Whether the engine was ALIVE for this measurement decides what the verdict may
+	// claim. A probe that carries volume proves the SERVICE is alive; it does not prove
+	// the desync helped, because the same volume arrives with no desync on the queue at
+	// all. That case is not rare and not hypothetical: the composer stops the engine
+	// deliberately whenever no rule sits on a zapret rung (LOT-46), and the lane is
+	// measured with and without it constantly.
+	//
+	// Reporting that as "strategy works" is the single loudest lie in the log — it is
+	// what made ALT13 look healthy for a week while the engine could not start at all
+	// (559 restarts). So the engine's state travels with the verdict, and the caller
+	// stops claiming credit the measurement cannot support.
+	desyncLive := pos >= 0 && c.zap != nil && c.zap.Alive()
 	if v := c.prober.Probe(ctx, service, pos); !v.OK {
 		return false, "the recipe did not answer the probe at all: " + v.Err
 	}
 	ok, why, _ := c.goodputOK(ctx, svc)
+	if ok && !desyncLive {
+		return true, "CARRIED WITH NO DESYNC ON THE QUEUE — this says the service is alive, not that the strategy helped: " + why
+	}
 	return ok, why
 }
 
