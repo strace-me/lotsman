@@ -39,16 +39,30 @@ import (
 // nudge, when non-nil, is called with a service name as soon as its fresh advice
 // is ready, so a caller can apply it without waiting for the whole (potentially
 // minutes-long) sweep to finish.
-func Run(ctx context.Context, conf *config.Config, reg *registry.Registry, ranker *noderank.Ranker, nudge func(string), log *slog.Logger) error {
+// nodes supplies the node set to rank. It is a FUNCTION, not a list, and that is
+// the whole point of the signature: the caller decides which set is authoritative
+// and both the config generator and this ranker go through the same one.
+//
+// This used to fetch subscriptions itself, privately, every cycle — while the
+// generator was using its own last-good snapshot. So when a subscription fetch
+// degraded, the box kept routing on 94 nodes it already had, and the ranker saw
+// one. It did not know: it ranked what it was handed and reported "all eligible
+// nodes down", 58 times in one overnight run, every one of them with eligible=1
+// and the same single node. A fleet that was 94-strong and busy was being called
+// dead because two sources of truth had drifted apart — the same failure as the
+// list-tag and preflight-release ones, one level up and worse, because membership
+// decides which nodes exist as candidates at all.
+//
+// Resilience is the caller's job and belongs in one place. Here, the only rule is
+// that the number is visible: a ranker about to rank three nodes says so, instead
+// of letting a shrunken set read as a verdict on the nodes.
+func Run(ctx context.Context, conf *config.Config, reg *registry.Registry, ranker *noderank.Ranker, nodes func(context.Context) []subscription.Node, nudge func(string), log *slog.Logger) error {
 	if len(conf.Subscriptions) == 0 {
 		return nil
 	}
-	mgr := subscription.NewManager(subscription.NewHTTPFetcher())
-	nodes, errs := mgr.Load(ctx, conf.Subscriptions)
-	for _, e := range errs {
-		log.Warn("noderank: subscription load issue", "err", e)
-	}
-	memberships := conf.Pools.Memberships(nodes)
+	all := nodes(ctx)
+	log.Debug("noderank: ranking this node set", "nodes", len(all))
+	memberships := conf.Pools.Memberships(all)
 	for _, svc := range reg.Services {
 		if svc.ProbeType != "" && svc.ProbeType != "http" {
 			continue // Clash /delay is an HTTP GET; tcp/stun services are not rankable this way

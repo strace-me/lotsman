@@ -748,7 +748,16 @@ func main() {
 				// rankNodes nudges Brain per service as each one's advice lands, so
 				// a fast pool (e.g. the 2-node UDP pool) applies immediately instead
 				// of waiting for a slow 50-node pool later in the pass.
-				return nodepass.Run(c, conf, reg, ranker, br.ReassertService, log)
+				// The same loader the reconciler generates with, so the ranker and the
+				// config it is ranking can never disagree about the fleet.
+				authoritative := func(c context.Context) []subscription.Node {
+					n, errs := subLoader(conf, *probeProxy, log).Load(c, conf.Subscriptions)
+					for _, e := range errs {
+						log.Warn("noderank: subscription load issue", "err", e)
+					}
+					return n
+				}
+				return nodepass.Run(c, conf, reg, ranker, authoritative, br.ReassertService, log)
 			}})
 			log.Info("per-service node ranker enabled (advisory)", "dry_run", *dryRun)
 		}
@@ -1429,6 +1438,22 @@ func newRulesetsUpdater(reg *registry.Registry, rc *reconcile.Reconciler, repo, 
 // generator Options match the R5S (socks probe-in mirrors -probe-proxy), the
 // Alive check waits for the Clash API to answer after a restart, and DryRun
 // follows the global -dry-run so a first deployment only logs what it would do.
+// subLoader is how THIS process fetches subscriptions. The reconciler (which
+// generates the running config) and the node ranker (which decides who serves
+// what) must both go through it: when they fetched differently, a degraded
+// subscription made the ranker see a one-node fleet while the box routed on 94,
+// and it reported a busy fleet as dead.
+func subLoader(conf *config.Config, socksProbe string, log *slog.Logger) *subscription.Manager {
+	if conf.SubViaPool != "" && socksProbe != "" {
+		if hosts := subViaHosts(conf.Subscriptions); len(hosts) > 0 {
+			log.Info("fetching subscriptions via VPN tunnel", "pool", conf.SubViaPool,
+				"hosts", strings.Join(hosts, ","), "proxy", socksProbe)
+			return subscription.NewManager(subscription.NewHTTPFetcherProxy(socksProbe))
+		}
+	}
+	return subscription.NewManager(subscription.NewHTTPFetcher())
+}
+
 func newReconciler(conf *config.Config, reg *registry.Registry, clash *dataplane.ClashClient, cfgPath, sbBin, restartCmd, backupDir, baselineFile, socksProbe string, dryRun bool, throughput func() map[string]float64, log *slog.Logger) *reconcile.Reconciler {
 	services := make([]registry.Service, 0, len(reg.Services))
 	for _, s := range reg.Services {
@@ -1454,14 +1479,11 @@ func newReconciler(conf *config.Config, reg *registry.Registry, clash *dataplane
 	// are required: without the proxy the route rule alone can't catch the box's
 	// own locally-generated fetch (only LAN traffic is tproxy'd), so we gate on
 	// both and otherwise fetch direct exactly as before.
-	loader := subscription.NewManager(subscription.NewHTTPFetcher())
+	loader := subLoader(conf, socksProbe, log)
 	if conf.SubViaPool != "" && socksProbe != "" {
-		hosts := subViaHosts(conf.Subscriptions)
-		if len(hosts) > 0 {
+		if hosts := subViaHosts(conf.Subscriptions); len(hosts) > 0 {
 			opts.SubViaPool = conf.SubViaPool
 			opts.SubViaHosts = hosts
-			loader = subscription.NewManager(subscription.NewHTTPFetcherProxy(socksProbe))
-			log.Info("reconcile: fetching subscriptions via VPN tunnel", "pool", conf.SubViaPool, "hosts", strings.Join(hosts, ","), "proxy", socksProbe)
 		}
 	}
 	alive := func(c context.Context) bool {

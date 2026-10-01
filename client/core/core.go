@@ -1338,7 +1338,15 @@ func (c *Core) noderankLoop(ctx context.Context) {
 		return
 	}
 	run := func() bool {
-		if err := nodepass.Run(ctx, c.conf, c.reg, c.ranker, c.brain.ReassertService, c.log); err != nil {
+		// c.loadNodes, not a fresh fetch: it falls back to the last-good fleet when
+		// a fetch comes back short, which is the same set the running config was
+		// generated from. Ranking a different set than the one in service is how a
+		// 94-node box reported a one-node fleet as dead.
+		authoritative := func(ctx context.Context) []subscription.Node {
+			n, _ := c.loadNodes(ctx)
+			return n
+		}
+		if err := nodepass.Run(ctx, c.conf, c.reg, c.ranker, authoritative, c.brain.ReassertService, c.log); err != nil {
 			c.log.Warn("noderank pass failed", "err", err)
 		}
 		return c.haveNodeAdvice()
