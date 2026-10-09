@@ -68,3 +68,6 @@ skills-lock.json
 # Каноника живёт в /tmp/opencode/replace-text-scrub; в репо не коммитить.
 /.replace-text-scrub
 .claude/
+
+# generated sing-box configs from local runs (contain clash secrets)
+/singbox.json

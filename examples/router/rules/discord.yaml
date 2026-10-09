@@ -1,0 +1,31 @@
+id: discord
+name: discord
+enabled: true
+match:
+    domain_lists:
+        - discord
+    domains:
+        - discord.media
+        - dis.gd
+    cidrs:
+        - 66.22.192.0/18
+probe:
+    type: http
+    target: https://discord.com/api/v9/gateway
+behavior:
+    sticky: true
+    profile: voice
+chain:
+    - tier: preferred
+      desync:
+        instance: nfqws1-main
+        strategy: auto
+    - tier: fallback
+      vpn:
+        pool: vpn_url_test_udp
+    - tier: fallback
+      vpn:
+        pool: vpn_url_test
+    - tier: emergency
+      vpn:
+        pool: emergency_pool

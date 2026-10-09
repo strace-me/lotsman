@@ -22,7 +22,7 @@ NanoPi R5S) — и для десктопа: тот же control-plane работ
 - [Что умеет](#что-умеет)
 - [Требования](#требования)
 - [Быстрый старт](#быстрый-старт)
-- [Конфигурация](#конфигурация) — сервисы, цепочки, пулы, подписки, hostlists, …
+- [Конфигурация](#конфигурация) — развёртывание, правила, цепочки, пулы, подписки, hostlists, …
 - [lotsmanctl — инструмент настройки](#lotsmanctl--инструмент-настройки)
 - [Флаги lotsmand](#флаги-lotsmand)
 - [Архитектура](#архитектура)
@@ -68,10 +68,13 @@ NanoPi R5S) — и для десктопа: тот же control-plane работ
 CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -ldflags="-s -w" -o bin/lotsmand-arm64  ./cmd/lotsmand
 CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -ldflags="-s -w" -o bin/lotsmanctl-arm64 ./cmd/lotsmanctl
 
-# 2. Свой конфиг (старт — с комментированного примера):
-cp examples/r5s.yaml /etc/lotsman/r5s.yaml      # затем впишите: subscriptions, pools, services
-#    examples/ — только плейсхолдеры. Реальные URL подписок / креды узлов кладите СЮДА,
-#    в конфиг на роутере, а НЕ в репозиторий.
+# 2. Свой конфиг. Развёртывание — это КАТАЛОГ: configuration.yaml + rules/ (по файлу на
+#    правило). Копируем аннотированный пример и вписываем в него свои подписки:
+scp -r examples/router root@192.168.1.1:/etc/lotsman
+#    примеры — только плейсхолдеры. Реальные URL подписок и креды узлов живут в
+#    /etc/lotsman на роутере, а НЕ в репозитории.
+#
+#    Минимальный развёртывание — examples/minimal, полный — examples/router.
 
 # 3. Залить бинари + init-скрипт на роутер:
 scp bin/lotsmand-arm64  root@192.168.1.1:/opt/lotsman/lotsmand
@@ -79,189 +82,190 @@ scp bin/lotsmanctl-arm64 root@192.168.1.1:/usr/bin/lotsmanctl
 scp examples/lotsmand.init root@192.168.1.1:/etc/init.d/lotsman
 scp examples/lotsmand.env  root@192.168.1.1:/opt/lotsman/lotsmand.env   # переопределение флагов
 
-# 4. Сначала только наблюдаем (dry-run — логирует решения, ничего не меняет):
+# 4. Проверить РАЗВЁРТЫВАНИЕ, ничего не применяя. Префлайт тянет в scratch то, что
+#    документ просит (rule-sets), сверяет ссылки и удаляет scratch на выходе:
+ssh root@192.168.1.1 '/usr/bin/lotsmand -preflight /etc/lotsman'
+
+# 5. Сначала только наблюдаем (dry-run — логирует решения, ничего не меняет):
 #    examples/lotsmand.init по умолчанию с -dry-run=1. Запускаем и смотрим:
 ssh root@192.168.1.1 '/etc/init.d/lotsman enable && /etc/init.d/lotsman start; logread -f | grep lotsmand'
 
-# 5. Когда доверяете — меняем -dry-run=0 в /opt/lotsman/lotsmand.env и рестарт.
+# 6. Когда доверяете — меняем -dry-run=0 в /opt/lotsman/lotsmand.env и рестарт.
 ```
 
-Перед подменой боевого конфига sing-box — всегда валидируйте сгенерированный:
+И посмотреть, что именно будет применено, до подмены боевого конфига sing-box:
 
 ```sh
-lotsmanctl generate -config /etc/lotsman/r5s.yaml -out /tmp/sb.json && sing-box check -c /tmp/sb.json
+lotsmanctl generate -config /etc/lotsman -out /tmp/sb.json && sing-box check -c /tmp/sb.json
 ```
+
+> `sing-box check` сам по себе **недостаточен**: он разрешает rule-set лениво, по первому
+> совпадению, и не скажет, что файла нет. Проверять развёртывание — через
+> `lotsmand -preflight`, который материалзует списки и сверяет ссылки.
 
 ---
 
 ## Конфигурация
 
-Полностью прокомментированные примеры — [`examples/r5s.yaml`](examples/r5s.yaml) и
-[`examples/config.yaml`](examples/config.yaml); боевой конфиг R5S целиком, со скрубленными
-адресами и кредами — [`examples/r5s-production.yaml`](examples/r5s-production.yaml).
-Ниже — разбор по секциям.
+Развёртывание — это **каталог**: `configuration.yaml` плюс `rules/` с одним файлом на
+правило. Правила вынесены по файлам не для красоты: правка одного правила не должна
+переформатировать остальные, а правило, которое держат руками, — это файл, который
+кто-то держит руками.
+
+Документ говорит, **откуда всё берётся** — подписки, rule-sets, хосты, пулы, движки.
+Файл правила говорит, **что делает один сервис**: что ловит, чем проверяется и по какой
+лестнице карабкается, когда ступень перестаёт работать.
+
+Полностью прокомментированные примеры — [`examples/minimal`](examples/minimal) (два
+правила, минимум) и [`examples/router`](examples/router) (девять правил, всё
+объяснено). Оба грузятся и проверяются тестом, так что шаблон не может разъехаться с
+загрузчиком. `examples/r5s.yaml` и `examples/r5s-production.yaml` — документы **версии 1**,
+оставшиеся как вход миграции: конвертируются `lotsmanctl v2-migrate`.
 
 > ⚠️ **Никогда не коммитьте реальные URL подписок и креды узлов.** Держите их только в
-> `/etc/lotsman/r5s.yaml` на роутере. В репозитории — только плейсхолдеры.
+> `/etc/lotsman` на роутере. В репозитории — только плейсхолдеры.
 
-### Сервис (`services`)
+### Документ — `configuration.yaml`
 
-Сервис описывает, **какой трафик** он ловит (по `rule_sets` / `domains` / `ips`) и **как
-его маршрутизировать** — через цепочку фолбэков `chain`.
+| Секция | Что делает |
+|---|---|
+| `version: 2` | Обязательна. Без неё файл считается версией 1 и отвергается с подсказкой. |
+| `target_version` | Версия sing-box, под которую документ генерируется. Это **декларация, а не умолчание**: без неё генератор работает на базовой версии и молча срезает версионные фичи узлов — hy2-нода теряет gecko-obfs, и ничто об этом не сообщает. |
+| `proxy` | `engine` и `mode` (`tun` \| `proxy`) — входной захват трафика. |
+| `desync.instances` | Инстансы десинк-движка: `engine` (`nfqws1`/`nfqws2`), `enabled`, `table`, `capture` (порты TCP/UDP), `connbytes`. **Порты не опциональны**: инстанс без них ставит nft-правило, которое не матчит ничего, и десинк отсутствует, а статус честно рапортует, что всё применено. Номер очереди выводится из **порядка** инстансов, задавать руками не нужно. |
+| `desync.override` | Одна сборка upstream на весь инстанс, запускается дословно вместо композиции по правилам. Нужен для бандлов вроде ALT12, у которых профили держат **разные** хостлисты: при сборке на правило оба профиля получили бы один список, второй не смог бы сматчиться, и рецепт был бы отвергнут как самозатенение. Цена названа в гейпе: обучение рецептов на правило **выключено**, один бандл на всех, и `strategy` у десинк-ступени при этом игнорируется. |
+| `runtime` | `mode`, `probe_interval`, `refresh_interval`, `wan`, `state_dir`, `runtime_dir`. |
+| `data_sources` | Откуда берутся наборы rule-set: `type` (`v2ray-srs`), `repo`, `pin`, `refresh`, `verify_checksum`. Объявленный источник без периода получает глобальный дефолт, а не «никогда не обновлять». |
+| `lists.domains` / `lists.ips` | Именованные списки. Либо `srs_url` (sing-box скачивает сам, мы ни разу не качаем и не компилируем), либо материализованная форма: `source` + `dataset` + `category`, либо `files`/`urls`/`domains`/`cidrs`. |
+| `hostlists` | Списки доменов **для десинк-движка**: `out` (файл, который перечитывает nfqws при изменении mtime — поэтому правка состава не рвёт живые соединения), `sources`, `exclude`, `domains` (свои записи), `min_keep_ratio` (shrink guard). Отдельная секция не по придирке: список становится rule-set'ом для sing-box, а хостлист — текстовым файлом для nfqws, и **одна секция не может кормить обоих**. |
+| `pools` | Именованные группы узлов: `type`, `caps`, `tags_include`/`tags_exclude`, `countries_include`/`countries_exclude`, `limit`, `min_coverage`, `warmup`, `interval`, `idle_timeout`. Три стандартных пула **встроены** и объявлять их не нужно, если не переопределяете. |
+| `devices` | Переопределение выхода для конкретных LAN-клиентов: `sources` (IP/CIDR), `policy` (`direct` \| `block` \| имя пула). |
+| `subscriptions` | `name`, `url`, `format`, `tags`, `enabled`, `expires`. |
+| `strategies` | Объявленные десинк-рецепты: `id`, `class`, `nfqws_args`, `block_types`, `notes`. |
+| `dns` | Split-DNS: `servers[]`, три роли (`final`, `direct`, `zapret`), `strategy`, `fakeip`, и два списка ротации — `failover` и `direct_failover`. |
+| `multiplex` | `enabled`, `protocol`, `max_connections`, `min_streams`, `padding`, `brutal_up_mbps`, `brutal_down_mbps`. |
+| `utls_fingerprint` | Маскирует TLS-отпечаток под браузерный. |
+| `subscription_via_pool` | Тянуть подписки через этот пул. |
+| `applied_migrations` | Какие миграции к документу уже применены — чтобы миграция была условием релиза, а не тем, что оператор должен помнить. |
 
-```yaml
-services:
-  - name: youtube
-    probe_target: https://www.youtube.com/generate_204   # что прозванивать
-    rule_sets: [geosite-youtube]        # матч по rule-set'ам sing-box
-    domains:   [googlevideo.com, ytimg.com]  # инлайн domain_suffix
-    sticky: true                        # не флапать с рабочего узла
-    profile: streaming                  # веса качества узла для выбора
-    priority: 0                         # порядок правил (меньше = раньше)
-    chain:                              # лесенка: лучшее → последний резерв
-      - { state: PREFERRED,  class: zapret, strategy_id: alt12 }  # десинк, трафик direct (низкий пинг)
-      - { state: ALT_ZAPRET, class: zapret }                      # strategy_id пусто = выберет KB
-      - { state: VPN,        class: vpn,       strategy_id: vpn_url_test_udp }
-      - { state: EMERGENCY,  class: emergency, strategy_id: emergency_pool }
-```
+### Три роли резолвера — и почему их три
 
-**Поля сервиса:**
+`final` отвечает по умолчанию. `direct` — для RU-прямых доменов. `zapret` — **отдельный,
+и он не опционален**: трафик десинк-рунга уходит напрямую, мимо туннеля, поэтому
+резолвер за туннелем ему недоступен. Без отдельного резолвера правило падает из-за
+*резолвинга имени*, а статус при этом рапортует, что стратегия применена.
 
-| Поле | Тип | Назначение |
-|---|---|---|
-| `name` | string | Уникальное имя сервиса. |
-| `probe_target` | string | HTTP: полный URL; TCP/STUN: `host:port`. |
-| `probe_type` | string | `http` (деф.) / `tcp` / `stun`. `quic` — только на уровне рунга (см. ниже). |
-| `rule_sets` | []string | Тэги rule-set'ов sing-box (`geosite-youtube`). |
-| `domains` | []string | Инлайн `domain_suffix`-матчи. |
-| `ips` | []string | Инлайн `ip_cidr` (для UDP/voice без SNI — напр. блок voice-серверов Discord). |
-| `ips_file` | string | Файл с доп. CIDR'ами (по одному в строке; `#`-комменты ок; отсутствие файла — не ошибка). |
-| `sticky` | bool/unset | `*bool`: unset = наследовать категорию; `true` = не флапать; `false` = балансировать по латентности. |
-| `profile` | string | `general` / `voice` / `streaming` / `gaming` — веса выбора узла. |
-| `priority` | int | Порядок эмиссии route-правил: **меньше = раньше** (sing-box first-match). Спец-правила в минус, catch-all в плюс. |
-| `escalate_after` | int | Сколько провалов пробы до эскалации (0 = глобальный дефолт). |
-| `exclude_domains` | []string | Передаётся в nfqws-композитор как `--hostlist-exclude-domains` (десинк ОТМЕНЯЕТСЯ для этих доменов — CDN, что ломаются под десинком). **Маршрут не меняется.** |
-| `spread_clients` | []string | CIDR'ы LAN-клиентов, размазанные по узлам VPN-пула (rendezvous-hash, LOT-23). |
-| `domain_lists` | []string | Имена объявленных `hostlists`, чьи домены вливаются в `domains` при парсинге (пак объявляется один раз — цепляется к любому сервису). |
-| `chain` | []step | Цепочка фолбэков (если пусто — наследуется из категории). |
+`direct_failover` — тот же механизм для `direct`: первый переход заменяет его целиком,
+адрес **и** транспорт, поэтому прописанный вручную офисный DNS перестаёт быть единственным,
+кто умеет ответить, и direct-рунги перестают зависеть от одной сети.
 
-**Рунг цепочки (`chain[]`):**
+### Файл правила — `rules/<id>.yaml`
+
+Имя файла обязано совпадать с `id` — благодаря этому развёртывание читается простым
+`ls`, а загрузчик отвергает файл, который врёт.
 
 | Поле | Значения | Назначение |
 |---|---|---|
-| `state` | `PREFERRED` `ALT_ZAPRET` `VPN` `EMERGENCY` `BROKEN` `LOCKED` | Метка рунга; эскалация слева-направо при провале. |
-| `class` | `zapret` `vpn` `emergency` `direct` | Класс стратегии. |
-| `strategy_id` | string | Для `zapret`: id из каталога (`alt12`) или пусто = KB выберет. Для `vpn`/`emergency`: имя пула. Для `direct`: `direct`. |
-| `probe_type` | `http` `tcp` `stun` `quic` | Пер-рунг override пробы (LOT-3). **`quic` только на direct/zapret-рунгах** (box-direct H3; на VPN-рунге даст ложный фейл — валидатор отвергнет). |
-| `probe_target` | string | Пер-рунг override цели пробы. |
+| `id` | string | Идентификатор. Это **имя правила в рантайме**: `/status`, логи и канарейка говорят им. |
+| `name` | string | Отображаемое имя. |
+| `enabled` | bool | Выключенное правило выпадает из рантайма целиком. |
+| `bypass` | bool | «Эти домены — не дело Лоцмана». Отличие от `enabled: false` — это заявление, а не переключатель, и UI не должен предлагать включить одно как другое. |
+| `priority` | int | Меньше — раньше. Отрицательные впереди всех, чтобы узкое правило успело совпасть до широкого catch-all. |
+| `match` | — | `domains`, `domain_lists`, `ip_lists`, `cidrs`. Имя из `domain_lists` может означать **и** список, **и** хостлист — решает документ, а не догадка. |
+| `probe` | `http`/`tcp`/`stun`, `target` | Отвечает «отвечает ли этот путь» и намеренно мелкий: заморозку объёма он не видит. |
+| `volume` | `targets`, `min_bytes` | Второй вопрос — «несёт ли путь объём». Только для правил, которым есть что мерить. |
+| `behavior` | `sticky` (три состояния!), `profile`, `spread_clients`, `escalate_after`, `recover_after`, `tls_fragment` | `sticky` — указатель: **unset не то же, что false**. Unset берёт дефолт, false переопределяет дефолт `true`. |
+| `chain` | список ступеней | Лестница. |
 
-### Подписки (`subscriptions`)
+### Ступень цепочки
 
-```yaml
-subscriptions:
-  - { name: main,   url: "https://YOUR-PANEL.example/s/TOKEN", format: auto, tags: [normal], enabled: true }
-  # одиночный узел прямо в URL (формат single_url — url И ЕСТЬ узел, без фетча):
-  - { name: inline-hy2, url: "hysteria2://PASSWORD@HOST:443?sni=SNI&obfs=salamander", format: single_url, tags: [normal], enabled: true }
-  - { name: backup, url: "https://YOUR-PANEL.example/s/EMERGENCY", format: clash, tags: [emergency], enabled: true }
-```
+`tier` — ярлык для вас: `preferred` / `fallback` / `emergency`. Может **повторяться**
+(две десинк-ступени в preferred = «попробовать десинк, но иначе»), но **не ходит
+назад**: `emergency` после `preferred` читается как «вернуться на лучший путь после
+последнего рубежа», а это не то, что делает лестница.
 
-`format`: `auto` (сниффит) / `clash` / `singbox` / `v2ray_base64` / `v2ray_plaintext` /
-`single_url`. `tags` группируют узлы для фильтров пулов. `enabled: false` — не фетчить.
-
-### Пулы (`pools`)
-
-Пул — это `url_test`-группа узлов, отфильтрованных по возможностям / тэгам / стране.
+Ровно **одно действие** на ступень, и это не «оба по возможности», а ошибка конфига:
 
 ```yaml
-pools:
-  vpn_url_test:                  # TCP-пул (VLESS и т.п.)
-    type: url_test
-    interval: 1m
-    filter:
-      caps: [tcp]
-      tags_exclude: [emergency]
-      countries_exclude: [ru]    # держим RF-блокнутые сервисы подальше от RU-выходов
-  vpn_url_test_udp:              # UDP-нативный пул (hy2/tuic) для voice/QUIC
-    type: url_test
-    warmup: true                 # всегда «горячий» (idle_timeout→0s) для мгновенного failover
-    filter:
-      caps: [udp_native]
-      tags_exclude: [emergency]
-  emergency_pool:
-    type: url_test
-    filter: { tags_include: [emergency] }
+- tier: preferred
+  desync: { instance: nfqws1-main, strategy: auto }   # трафик DIRECT, десинк ловит
+- tier: fallback
+  vpn: { pool: vpn_url_test, detour: vpn_bulk }       # выход через ДРУГОЙ пул
+- tier: emergency
+  direct: true                                        # как есть, без обхода
 ```
 
-`filter`: `caps` (`tcp` / `udp_native`, AND), `tags_include` (OR), `tags_exclude` (NOT),
-`countries_include`/`countries_exclude` (ISO-2, строчными; узлы без флага в имени = страна
-неизвестна → `countries_exclude` их НЕ режет). `warmup: true` форсит непрерывный прозвон.
+`strategy: auto` — не имя бандла, а «пусть выберет база знаний»: лестница пробует
+рецепты и запоминает, что пронесло. `detour` — **композиция**, а не запасной вариант
+(«идти через A, но дотянуться через B»), и она вкладывается глубоко, но без циклов.
 
-### Категории (`categories`)
+### Гейпы — что документ не сказал
 
-Семь встроенных (`ru_direct`, `streaming`, `messaging`, `gaming`, `dev_tools`, `iot_check`,
-`generic`); конфиг может переопределить/добавить. Сервис указывает `category:` и наследует
-`default_chain`, `profile`, `sticky`, `required_caps`.
+Загрузчик не прячет того, чего в документе нет: он печатает список. И список
+**вычисляется из документа**, а не зашит — иначе он врал бы о том, какие именно
+настройки вы потеряли, и читатель перестал бы смотреть на единственное место, где
+система признаётся в том, чего не делает:
 
-```yaml
-categories:
-  streaming:
-    required_caps: [tcp]
-    profile: streaming
-    sticky: true
-    default_chain:
-      - { state: PREFERRED,  class: zapret }
-      - { state: VPN, class: vpn, strategy_id: vpn_url_test }
-      - { state: EMERGENCY, class: emergency, strategy_id: emergency_pool }
+```
+gap: dns: no dns section declared, so the tun resolves through the runtime's own default
+gap: strategies: none declared, so only the builtin catalog and the on-disk bundle store are in scope
 ```
 
-### Hostlists (автообновляемые списки доменов)
+### Где живёт развёртывание: источник и производная копия
 
-Демон периодически (`-check-interval`) тянет `sources`, выкидывает `exclude`, дедуплицирует
-и атомарно пишет в `out` — файл, который читает nfqws.
+На настольной установке у конфигурации **две стороны**, и это не два источника
+правды — это источник и то, что из него получается:
 
-```yaml
-hostlists:
-  - name: gaming-zapret
-    out: /opt/zapret-lotsman/lists/gaming.txt
-    sources:
-      - https://example.invalid/gaming-launchers.txt
-    exclude:
-      - https://example.invalid/whitelist-cdn.txt
-    min_keep_ratio: 0.5    # не писать, если список усох ниже 50% прошлого хорошего (защита от пустого зеркала)
+| | Путь | Кто пишет | Кто читает |
+|---|---|---|---|
+| **источник** | `~/.config/lotsman/` | окно, без root | — |
+| **производная копия** | `/etc/lotsman/` | служба | служба |
+
+Окно непривилегированное и **не может** писать в `/etc` — и не должно. При первом
+запуске оно пишет развёртывание в каталог пользователя, а служба при старте
+копирует его туда, откуда читает сама (`-config-source`).
+
+Почему не «окно пишет в `/etc` через помощника»: первое действие нового пользователя
+оказалось бы за запросом привилегий в момент, когда он меньше всего понимает, о чём
+его спрашивают. Почему не «служба читает прямо из каталога пользователя»: тогда
+root-процесс исполняет конфигурацию из файла, который писать может пользователь, и
+у конфигурации появляется **два читателя**, расходящиеся без чьего-либо участия.
+
+Материализация **отказывает**, если источник не грузится: копирование сломанного
+документа поверх рабочего — это тихая деградация, которая иначе проявилась бы только
+при следующем старте службы, как туннель, который не поднялся.
+
+Дрейф виден, а не молчалив. Если источник менялся, а служба ещё не перечитала его,
+`/status` отдаёт уведомление `config_source_drift` с обоими путями. Оно считается на
+каждое чтение статуса, а не «залипает»: условие, которое стало ложным, обязано
+перестать показываться — иначе баннер учит, что баннер врёт.
+
+Формат манифеста и подробности — в `pkg/config/materialize.go` и в
+`docs/CODEMAP.md`.
+
+### Первый запуск
+
+Окно спрашивает, есть ли конфигурация, **раньше**, чем спрашивает службу: на новой
+машине службы ещё нет, и опрос `/status` первым нарисовал бы «сервис недоступен» —
+поломку поверх нормального начального состояния.
+
+Дальше — выбор одного из двух наборов (`Рекомендуемый` / `Минимальный`) и подписка.
+Запись идёт **напрямую**, минуя сокет, и проверяется тем же загрузчиком, который
+запустит служба. Перезаписать существующую конфигурацию она отказывается: это единственная
+операция в окне, способная уничтожить работу.
+
+### Мигрируйте с версии 1
+
+```sh
+lotsmanctl v2-migrate -config /path/to/v1.yaml -out /etc/lotsman
+lotsmand -preflight /etc/lotsman
 ```
 
-### Прочие секции
-
-```yaml
-devices:                          # пер-клиентский override по IP/CIDR LAN
-  - { name: gaming-pc, sources: [192.168.1.50], policy: direct }   # policy: direct | block | <имя пула>
-
-zapret:                           # nfqws-инстансы (один = глобальный, много = пер-правило)
-  instances:
-    - name: nfqws_0
-      qnum: 100
-      capture: { tcp: [80, 443], udp: [53, "50000-50100"] }
-
-fakeip:                           # маршрутизация по синтетическим IP вместо SNI
-  enabled: true
-  inet4_range: 198.18.0.0/15
-  resolver: https://1.1.1.1/dns-query
-
-subscription_via_pool: vpn_url_test   # тянуть подписки через VPN-пул (если зеркала флапают; нужен -probe-proxy)
-utls_fingerprint: chrome              # uTLS-отпечаток по умолчанию для TLS-outbound'ов
-singbox_version: "1.12.17"            # гейтит версия-специфичные фичи генератора
-```
-
-### Подводные камни
-
-- **`exclude_domains` не меняет маршрут** — только отменяет nfqws-десинк для доменов
-  (для CDN, что работают raw, но ломаются под десинком).
-- **`sticky` — указатель**: `unset` ≠ `false`. unset наследует категорию; явный `false`
-  переопределяет `sticky: true` категории.
-- **QUIC-проба только на direct/zapret-рунгах** — на VPN/emergency валидатор отвергнет.
-- **`warmup: true` форсит `idle_timeout: 0s`** — пул не засыпает (важно для voice/QUIC).
-
----
+Конвертер переносит всё, что v2 умеет, и **называет то, что не переносит**, а не
+молчит: отдельный блок `fakeip` сворачивается в `dns.fakeip` без своих диапазонов,
+`categories` уходят целиком (правила мигрируют с цепочкой, которую они разрешали, а не
+с названием категории), а инстанс десинка без портов получает дефолтный набор — потому
+что иначе это nft-правило, не матчащее ничего.
 
 ## lotsmanctl — инструмент настройки
 
@@ -272,16 +276,18 @@ read-only на боевом.
 
 ### `generate` — собрать конфиг sing-box с нуля
 
-Генерирует полный `config.json` sing-box из YAML + живых подписок. **Локально, read-only.**
+Генерирует полный `config.json` sing-box из развёртывания + живых подписок.
+**Локально, read-only.**
 
 ```sh
-lotsmanctl generate -config examples/r5s.yaml -out /tmp/sb.json
-sing-box check -c /tmp/sb.json    # обязательно проверить перед подменой
+lotsmanctl generate -config examples/router -out /tmp/sb.json
+sing-box check -c /tmp/sb.json    # обязательно перед подменой
 ```
 
 | Флаг | Деф. | Назначение |
 |---|---|---|
-| `-config` | (обяз.) | Путь к YAML-конфигу. |
+| `-config` | (обяз.) | Развёртывание: его каталог или `configuration.yaml` внутри. |
+| `-store-dir` | `/etc/lotsman/desync/strategies` | Корень бандлов стратегий — нужен, чтобы разрешить `{instance, strategy}`. |
 | `-out` | stdout | Куда писать `config.json` (пусто = stdout). |
 | `-clash-listen` | `127.0.0.1:9090` | Адрес clash-api в генерируемом конфиге. |
 | `-tproxy-port` | `7893` | Порт tproxy-inbound. |
@@ -378,7 +384,9 @@ lotsmanctl harvest -domains discord.com -target-class discord_tcp -out strategie
 
 | Флаг | Назначение |
 |---|---|
-| `-config` | YAML-конфиг (сервисы/подписки/пулы/zapret/devices). |
+| `-config` | Развёртывание: его каталог или `configuration.yaml` внутри. |
+| `-preflight` | Проверить развёртывание и выйти, ничего не применяя. Префлайт по построению сухой: не открывает сокет, не занимает очередь, не ставит правило и не запускает движок. |
+| `-store-dir` | Корень бандлов стратегий — чтобы разрешить `{instance, strategy}`. |
 | `-dry-run` | Логировать действия вместо выполнения (деф. true — начинайте отсюда). |
 | `-simulate` | Скриптовый прозвон вместо реального (локальное демо). |
 | `-interval` | Период пробы (напр. `30s`). |

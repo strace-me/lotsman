@@ -1,0 +1,39 @@
+# One rule per file. The file name MUST equal the id — that is what makes a deployment
+# readable by listing the directory, and the loader refuses a file that lies.
+id: youtube
+name: YouTube
+enabled: true
+
+match:
+  domain_lists: [youtube]
+
+probe:
+  # A probe answers "does this path respond", and it is deliberately tiny: it cannot see
+  # the failure that matters here, because the censor lets a flow establish and then
+  # freezes it a few tens of KB in. `volume` below is the second question.
+  type: http
+  target: https://www.youtube.com/generate_204
+volume:
+  targets: [https://www.youtube.com/]
+
+behavior:
+  # sticky is a THREE-state setting and unset is not the same as false: unset takes the
+  # default, false overrides a default of true. Sticky means "stay on the exit that
+  # works, change it on a real failure rather than on a latency blip".
+  profile: streaming
+
+chain:
+  # A ladder of rungs, tried in order. `tier` is a label for you and may repeat — two
+  # desync rungs in the preferred tier means "try desync, but differently". It may not
+  # go backwards: emergency after preferred reads as "climb back to the best path after
+  # the last resort", which is not what a ladder does.
+  - tier: preferred
+    # desync routes the rule DIRECT so its traffic reaches the local desync engine
+    # instead of vanishing into the tunnel. `strategy: auto` means "whatever the
+    # knowledge base has learned beats the DPI on this network" — the ladder is trying
+    # recipes and keeping what carried.
+    desync: { instance: nfqws1-main, strategy: auto }
+  - tier: fallback
+    vpn: { pool: vpn_url_test }
+  - tier: emergency
+    vpn: { pool: emergency_pool }

@@ -30,6 +30,8 @@ import (
 	"github.com/strace-me/lotsman/pkg/subscription"
 )
 
+const defaultStoreRoot = "/etc/lotsman/desync/strategies"
+
 func main() {
 	if len(os.Args) < 2 {
 		usage()
@@ -76,7 +78,8 @@ func usage() {
 // signal (voice is UDP/RTC — a separate STUN concern, not covered here). Read-only.
 func scan(args []string) {
 	fs := flag.NewFlagSet("scan", flag.ExitOnError)
-	configPath := fs.String("config", "", "path to YAML config (required)")
+	configPath := fs.String("config", "", "the deployment: its directory, or the configuration.yaml inside it (required)")
+	storeV2 := fs.String("store-v2", defaultStoreRoot, "strategy bundle root, for resolving a rule's {instance, strategy}")
 	timeout := fs.Duration("timeout", 6*time.Second, "per-domain probe timeout")
 	conc := fs.Int("concurrency", 8, "concurrent probes")
 	fs.Parse(args)
@@ -84,7 +87,7 @@ func scan(args []string) {
 		fmt.Fprintln(os.Stderr, "scan: -config is required")
 		os.Exit(2)
 	}
-	cfg, err := config.Load(*configPath)
+	cfg, _, _, err := config.Load(*configPath, "", *storeV2)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "config: %v\n", err)
 		os.Exit(1)
@@ -137,14 +140,15 @@ func scanReport(label string, res []domainscan.Result) {
 // domains the nfqws exclude list would drop). Read-only.
 func doctor(args []string) {
 	fs := flag.NewFlagSet("doctor", flag.ExitOnError)
-	configPath := fs.String("config", "", "path to YAML config (required)")
+	configPath := fs.String("config", "", "the deployment: its directory, or the configuration.yaml inside it (required)")
+	storeV2 := fs.String("store-v2", defaultStoreRoot, "strategy bundle root, for resolving a rule's {instance, strategy}")
 	excludePath := fs.String("nfqws-exclude", "", "optional nfqws exclude list (plaintext domains) to detect overlaps")
 	fs.Parse(args)
 	if *configPath == "" {
 		fmt.Fprintln(os.Stderr, "doctor: -config is required")
 		os.Exit(2)
 	}
-	cfg, err := config.Load(*configPath)
+	cfg, _, _, err := config.Load(*configPath, "", *storeV2)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "config: %v\n", err)
 		os.Exit(1)
@@ -198,7 +202,8 @@ func doctor(args []string) {
 // manually-added hy2 nodes). Validate the result with `sing-box check` before use.
 func merge(args []string) {
 	fs := flag.NewFlagSet("merge", flag.ExitOnError)
-	configPath := fs.String("config", "", "path to lotsman YAML config (subscriptions) (required)")
+	configPath := fs.String("config", "", "the deployment: its directory, or its configuration.yaml inside it (required)")
+	storeV2 := fs.String("store-v2", defaultStoreRoot, "strategy bundle root, for resolving a rule's {instance, strategy}")
 	sbPath := fs.String("singbox-config", "", "path to existing sing-box config.json to merge into (required)")
 	out := fs.String("out", "", "output path (default: stdout)")
 	selector := fs.String("selector", "vpn", "selector tag to point at the new pools")
@@ -212,7 +217,7 @@ func merge(args []string) {
 		os.Exit(2)
 	}
 
-	cfg, err := config.Load(*configPath)
+	cfg, _, _, err := config.Load(*configPath, "", *storeV2)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "merge: config: %v\n", err)
 		os.Exit(1)
@@ -478,35 +483,24 @@ func printStatusTable(w io.Writer, svcs []string, byService map[string]*serviceS
 
 func generate(args []string) {
 	fs := flag.NewFlagSet("generate", flag.ExitOnError)
-	configPath := fs.String("config", "", "path to YAML config (required)")
+	configPath := fs.String("config", "", "the deployment: its directory, or the configuration.yaml inside it (required)")
+	storeV2 := fs.String("store-v2", defaultStoreRoot, "strategy bundle root, for resolving a rule's {instance, strategy}")
 	out := fs.String("out", "", "output path for sing-box config (default: stdout)")
 	clashListen := fs.String("clash-listen", "127.0.0.1:9090", "clash-api external_controller")
 	tproxyPort := fs.Int("tproxy-port", 7893, "tproxy inbound port")
 	socksProbe := fs.String("socks-probe", "", "socks probe-in inbound host:port (empty = none)")
 	ruleSetDir := fs.String("rule-set-dir", "", "dir holding rule-set-{geosite,geoip}/*.srs (empty = the router's /etc/sing-box). Exists so a config can be checked WITHOUT writing to a root-owned /etc.")
-	configV2 := fs.String("config-v2", "", "v2 configuration.yaml; the same generation path, fed by the v2 projection instead of the v1 parser")
-	rulesV2 := fs.String("rules-v2", "", "v2 rule files dir (default: rules/ alongside the v2 config)")
-	storeV2 := fs.String("store-v2", "/etc/lotsman/desync/strategies", "v2 strategy bundle root, for resolving a rule's {instance, strategy}")
 	_ = fs.Parse(args)
 
-	if *configPath == "" && *configV2 == "" {
-		fmt.Fprintln(os.Stderr, "generate: one of -config or -config-v2 is required")
-		os.Exit(2)
-	}
-	if *configPath != "" && *configV2 != "" {
-		fmt.Fprintln(os.Stderr, "generate: -config and -config-v2 are mutually exclusive; one document, one parser")
+	if *configPath == "" {
+		fmt.Fprintln(os.Stderr, "generate: -config is required (the deployment directory, or its configuration.yaml)")
 		os.Exit(2)
 	}
 
-	// One load, one generation path. v2 is NOT a branch that forks the generator —
-	// it is the same pipeline fed by a different parser, which is the only way
-	// comparing a v1-generated config against a v2-generated one means anything.
-	var cfg *config.Config
-	var err error
-	if *configV2 != "" {
-		cfg, err = loadV2Config(*configV2, *rulesV2, *storeV2)
-	} else {
-		cfg, err = config.Load(*configPath)
+	// One load, one generation path. There is no second schema to fork for.
+	cfg, _, gaps, err := config.Load(*configPath, "", *storeV2)
+	for _, g := range gaps {
+		fmt.Fprintf(os.Stderr, "gap: %s\n", g)
 	}
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "generate: config: %v\n", err)
@@ -541,11 +535,13 @@ func generate(args []string) {
 		opts.RemoteRuleSets = cfg.RemoteRuleSets
 	}
 	opts.UTLSFingerprint = cfg.UTLSFingerprint
+	// The declared split-DNS has to reach the generator HERE as well, or this command
+	// validates a config the service never runs: without it the output carries no dns
+	// block, so `sing-box check` approves a deployment whose resolvers go unused. Same
+	// mapping the desktop client uses, so the two cannot drift.
+	opts.DNS = config.DNSOptions(cfg.DNS, "vpn_url_test")
 	if cfg.SingboxVersion != "" {
 		opts.TargetVersion = cfg.SingboxVersion
-	}
-	if cfg.FakeIP != nil {
-		opts.FakeIP = &singbox.FakeIPOptions{Inet4Range: cfg.FakeIP.Inet4Range, Inet6Range: cfg.FakeIP.Inet6Range, Resolver: cfg.FakeIP.Resolver}
 	}
 	if cfg.Multiplex != nil {
 		opts.Multiplex = &singbox.MultiplexOptions{Protocol: cfg.Multiplex.Protocol, MaxConnections: cfg.Multiplex.MaxConnections, MinStreams: cfg.Multiplex.MinStreams, Padding: cfg.Multiplex.Padding, BrutalUp: cfg.Multiplex.BrutalUp, BrutalDown: cfg.Multiplex.BrutalDown}

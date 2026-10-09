@@ -1,0 +1,11 @@
+id: ru-direct
+name: ru-direct
+enabled: true
+priority: -10
+match:
+    domain_lists:
+        - category-ru
+behavior:
+chain:
+    - tier: emergency
+      direct: true

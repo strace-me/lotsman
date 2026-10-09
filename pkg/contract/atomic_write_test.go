@@ -25,6 +25,10 @@ var handRolledAtomicWrites = map[string]string{
 	"client/platform/rulesets/rulesets.go": "streams a rule-set out of a zip, so the bytes are " +
 		"produced by a reader rather than held in memory",
 	"pkg/flowseal/installer.go": "renames a SYMLINK to repoint a versioned bundle directory",
+	"pkg/config/materialize.go": "swaps a whole deployment TREE — it renames the document and the " +
+		"rules directory as a unit and restores both halves if the second move fails, which " +
+		"atomicfile's single-file write cannot express. Its per-FILE writes use atomicfile; " +
+		"only the tree swap is hand-rolled",
 }
 
 var writeRe = []string{"os.CreateTemp", "os.Rename", "ioutil.TempFile"}

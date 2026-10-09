@@ -4,7 +4,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"github.com/strace-me/lotsman/pkg/atomicfile"
-	"io"
 	"log/slog"
 	"net"
 	"net/http"
@@ -34,7 +33,9 @@ type ControlServer struct {
 	core        *Core
 	stop        func()
 	restart     func() // re-exec the service to apply a new config (nil = config editing off)
-	configPath  string // path of the config file the GUI edits ("" = config editing off)
+	configPath  string // path of configuration.yaml the GUI edits ("" = config editing off)
+	rulesDir    string // where the per-rule files live ("" = beside configuration.yaml)
+	storeDir    string // the strategy bundle store, for validating against the real catalog
 	socketGroup string // group to own the control socket 0660 ("" = owner-only 0600)
 	srv         *http.Server
 	ln          net.Listener
@@ -57,12 +58,29 @@ func NewControlServer(core *Core, stop func(), log *slog.Logger) *ControlServer 
 }
 
 // WithConfig enables the config-editing endpoints (GET /config, POST /config,
-// POST /config/validate). The server reads and writes the config file at path and
-// applies a saved config by calling restart (a graceful Stop + re-exec). Left off
-// by default so a caller that does not want in-app config editing — or a test —
-// simply never enables it.
-func (s *ControlServer) WithConfig(path string, restart func()) *ControlServer {
-	s.configPath = path
+// POST /config/validate). path is the configuration.yaml the GUI edits; rulesDir is
+// the directory holding one file per rule, and storeDir the strategy bundle store —
+// a deployment is all three, and a save is validated against the real catalog rather
+// than a scratch copy of it. Left off by default so a caller that does not want in-app
+// config editing — or a test — simply never enables it.
+func (s *ControlServer) WithConfig(path, rulesDir, storeDir string, restart func()) *ControlServer {
+	// A deployment is a DIRECTORY, and `-config` accepts either that or the
+	// configuration.yaml inside it — the loader resolves both. The editor reads a
+	// FILE, so the directory form has to be resolved here or every read returns
+	// "is a directory": which is exactly what happened once the NixOS module moved
+	// -config to the directory shape the v2 schema is built around, leaving the
+	// whole config editor broken in the deployment it now installs.
+	// Resolve the document FIRST, then derive the rules directory from the RESOLVED
+	// path: RulesDirFor takes the document and joins its parent, so handing it the
+	// directory puts `rules/` one level too high — in /tmp rather than beside the
+	// document it belongs to.
+	doc := config.DocumentPath(path)
+	if rulesDir == "" {
+		rulesDir = config.RulesDirFor(doc, "")
+	}
+	s.configPath = doc
+	s.rulesDir = rulesDir
+	s.storeDir = storeDir
 	s.restart = restart
 	return s
 }
@@ -254,67 +272,16 @@ func errText(err error) string {
 	return err.Error()
 }
 
-// handleSetEnabled switches one service on or off — the tile toggle. It is a
-// CONFIG edit, not a runtime override, on purpose: the desired state is re-asserted
-// every few seconds from the config-built registry, so anything held only in memory
-// is undone within a tick. Writing the bit to the file and reloading makes the
-// switch mean the same thing to every consumer, survive a restart, and read the
-// same way on the router.
-//
-// The body is {"enabled":true|false}; a missing field is rejected rather than
-// guessed, because guessing here would silently switch a service the wrong way.
-func (s *ControlServer) handleSetEnabled(w http.ResponseWriter, r *http.Request) {
-	if s.configPath == "" || s.restart == nil {
-		http.Error(w, "in-app config editing is not enabled on this instance", http.StatusNotImplemented)
-		return
-	}
-	var in struct {
-		Enabled *bool `json:"enabled"`
-	}
-	if err := json.NewDecoder(io.LimitReader(r.Body, 1<<16)).Decode(&in); err != nil {
-		http.Error(w, "bad request: "+err.Error(), http.StatusBadRequest)
-		return
-	}
-	if in.Enabled == nil {
-		http.Error(w, `body must set "enabled" to true or false`, http.StatusBadRequest)
-		return
-	}
-	name := r.PathValue("name")
-	data, err := os.ReadFile(s.configPath)
-	if err != nil {
-		http.Error(w, "read config: "+err.Error(), http.StatusInternalServerError)
-		return
-	}
-	y, found, err := config.SetServiceEnabledYAML(data, name, *in.Enabled)
-	if err != nil {
-		http.Error(w, "the config file does not parse — repair it in the YAML editor first: "+err.Error(), http.StatusConflict)
-		return
-	}
-	if !found {
-		http.Error(w, "no service named "+name+" is declared in the config", http.StatusBadRequest)
-		return
-	}
-	// Validate the WHOLE config, not just the edit: switching the last service off
-	// leaves nothing to steer, and that must fail before the file is touched.
-	cfg, err := config.Parse(y)
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusBadRequest)
-		return
-	}
-	if err := writeFileAtomic(s.configPath, y, 0o600); err != nil {
-		http.Error(w, "write config: "+err.Error(), http.StatusInternalServerError)
-		return
-	}
-	s.log.Info("service switched", "service", name, "enabled", *in.Enabled)
-	w.WriteHeader(http.StatusAccepted)
-	json.NewEncoder(w).Encode(map[string]any{"service": name, "enabled": *in.Enabled})
-	s.applyAfterAck(cfg)
+// writeFileAtomic writes via a temp file + rename, so a crash mid-write cannot
+// leave a half-written (unparseable) config that the next start would choke on.
+func writeFileAtomic(path string, data []byte, perm os.FileMode) error {
+	return atomicfile.Write(path, data, perm)
 }
 
-// applyAfterAck applies a written config once the caller has its answer. An
-// in-place reload restarts sing-box only when its generated config actually
-// changed, so an edit that does not touch routing keeps every live connection;
-// a reload that cannot apply falls back to re-exec.
+// applyAfterAck applies a written config once the caller has its answer. An in-place
+// reload restarts sing-box only when its generated config actually changed, so an
+// edit that does not touch routing keeps every live connection; a reload that cannot
+// apply falls back to re-exec.
 func (s *ControlServer) applyAfterAck(cfg *config.Config) {
 	go func() {
 		if err := s.core.Reload(cfg); err != nil {
@@ -335,112 +302,4 @@ func (s *ControlServer) handleEvents(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(s.core.Events(limit, r.URL.Query().Get("service")))
-}
-
-// configDoc carries the config as the GUI works with it: the raw on-disk YAML plus
-// its path, AND — the primary path — the structured Document. A save (or validate)
-// carrying Doc uses it (the service turns structure → YAML → validation → file), so
-// the UI never handles YAML itself; one carrying only YAML is the raw escape hatch.
-type configDoc struct {
-	Path string           `json:"path"`
-	YAML string           `json:"yaml,omitempty"`
-	Doc  *config.Document `json:"doc,omitempty"`
-}
-
-// yamlBytes resolves the YAML to validate/write: the structured Doc when present
-// (re-serialised by the service), else the raw YAML text.
-func (in configDoc) yamlBytes() ([]byte, error) {
-	if in.Doc != nil {
-		return in.Doc.YAML()
-	}
-	return []byte(in.YAML), nil
-}
-
-func (s *ControlServer) handleGetConfig(w http.ResponseWriter, _ *http.Request) {
-	if s.configPath == "" {
-		http.Error(w, "in-app config editing is not enabled on this instance", http.StatusNotImplemented)
-		return
-	}
-	data, err := os.ReadFile(s.configPath)
-	if err != nil {
-		http.Error(w, "read config: "+err.Error(), http.StatusInternalServerError)
-		return
-	}
-	out := configDoc{Path: s.configPath, YAML: string(data)}
-	// The structured view is best-effort: if the file does not even parse
-	// structurally, the UI still gets the raw YAML to repair by hand.
-	if doc, derr := config.ParseDocument(data); derr == nil {
-		out.Doc = doc
-	}
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(out)
-}
-
-// handleValidateConfig parses a candidate config WITHOUT writing it, so the editor
-// can offer a "check" that never risks the running config.
-func (s *ControlServer) handleValidateConfig(w http.ResponseWriter, r *http.Request) {
-	in, err := readConfigDoc(r)
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusBadRequest)
-		return
-	}
-	y, err := in.yamlBytes()
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusBadRequest)
-		return
-	}
-	if _, err := config.Parse(y); err != nil {
-		http.Error(w, err.Error(), http.StatusBadRequest)
-		return
-	}
-	w.WriteHeader(http.StatusOK)
-	w.Write([]byte(`{"valid":true}`))
-}
-
-// handleSetConfig validates a candidate config, writes it atomically, and applies
-// it by re-executing the service. It validates BEFORE touching the file — a config
-// that fails to parse is never written, so the service can always restart into a
-// good file. That is the whole safety of editing config from a UI.
-func (s *ControlServer) handleSetConfig(w http.ResponseWriter, r *http.Request) {
-	if s.configPath == "" || s.restart == nil {
-		http.Error(w, "in-app config editing is not enabled on this instance", http.StatusNotImplemented)
-		return
-	}
-	in, err := readConfigDoc(r)
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusBadRequest)
-		return
-	}
-	y, err := in.yamlBytes()
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusBadRequest)
-		return
-	}
-	cfg, err := config.Parse(y)
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusBadRequest)
-		return
-	}
-	if err := writeFileAtomic(s.configPath, y, 0o600); err != nil {
-		http.Error(w, "write config: "+err.Error(), http.StatusInternalServerError)
-		return
-	}
-	w.WriteHeader(http.StatusAccepted)
-	w.Write([]byte(`{"applied":true}`))
-	// Apply AFTER the ack, so the caller sees success before the data plane blips.
-	s.applyAfterAck(cfg)
-}
-
-func readConfigDoc(r *http.Request) (configDoc, error) {
-	var in configDoc
-	if err := json.NewDecoder(io.LimitReader(r.Body, 1<<20)).Decode(&in); err != nil {
-		return configDoc{}, fmt.Errorf("bad request: %w", err)
-	}
-	return in, nil
-}
-
-// writeFileAtomic writes via a temp file + rename, so a crash mid-write cannot
-// leave a half-written (unparseable) config that the next start would choke on.
-func writeFileAtomic(path string, data []byte, perm os.FileMode) error {
-	return atomicfile.Write(path, data, perm)
 }

@@ -2,10 +2,12 @@ package core
 
 import (
 	"net"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 
+	"github.com/strace-me/lotsman/pkg/config"
 	"github.com/strace-me/lotsman/pkg/registry"
 	"github.com/strace-me/lotsman/pkg/singbox"
 	"github.com/strace-me/lotsman/pkg/strategy"
@@ -168,3 +170,115 @@ func TestIPv6NoticeSurvivesAnUnconfiguredCore(t *testing.T) {
 		t.Errorf("want a notice with no services on a core with no registry, got %+v", n)
 	}
 }
+
+func TestConfigSourceDriftNoticeIsSilentWhenThereIsNoPair(t *testing.T) {
+	// No -config-source: the service reads -config directly and has nothing to be
+	// out of step with. A notice here would nag every deployment that never opted in.
+	c := &Core{opts: Options{ConfigPath: t.TempDir()}}
+	if n := c.configSourceDriftNotice(); n != nil {
+		t.Fatalf("a direct -config service raised %s: %s", n.Code, n.Text)
+	}
+}
+
+func TestConfigSourceDriftNoticeFiresOnAnEditedSource(t *testing.T) {
+	src, dst := writeSourceAndMaterialize(t)
+
+	c := &Core{opts: Options{ConfigPath: dst, ConfigSource: src}}
+	if n := c.configSourceDriftNotice(); n != nil {
+		t.Fatalf("a fresh pair raised %s: %s", n.Code, n.Text)
+	}
+
+	// The operator edits the source, exactly what the GUI does on save.
+	editSourceRule(t, src)
+
+	n := c.configSourceDriftNotice()
+	if n == nil {
+		t.Fatal("an edited source reads as current against the materialized copy")
+	}
+	if n.Code != NoticeConfigDrift {
+		t.Fatalf("code %q, want %q", n.Code, NoticeConfigDrift)
+	}
+	// The text must name both paths: "something is out of date" is not actionable,
+	// and this project has been bitten by verdicts that did not say what to do.
+	for _, want := range []string{src, dst} {
+		if !strings.Contains(n.Text, want) {
+			t.Fatalf("notice does not name %s: %s", want, n.Text)
+		}
+	}
+}
+
+// Recomputed per read, so a condition that clears stops being shown. A latched
+// warning outliving its cause teaches the operator the banner lies.
+func TestConfigSourceDriftNoticeClearsWhenTheSourceIsReapplied(t *testing.T) {
+	src, dst := writeSourceAndMaterialize(t)
+	c := &Core{opts: Options{ConfigPath: dst, ConfigSource: src}}
+
+	editSourceRule(t, src)
+	if c.configSourceDriftNotice() == nil {
+		t.Fatal("setup: drift not reported")
+	}
+	if _, err := config.Materialize(src, dst, ""); err != nil {
+		t.Fatal(err)
+	}
+	if n := c.configSourceDriftNotice(); n != nil {
+		t.Fatalf("drift persists after re-materializing: %s", n.Text)
+	}
+}
+
+// A deleted source is its own condition: the service is running a copy it can no
+// longer refresh, which is worse than drift because re-deriving it is impossible.
+func TestConfigSourceDriftNoticeNamesAMissingSource(t *testing.T) {
+	src, dst := writeSourceAndMaterialize(t)
+	if err := os.RemoveAll(src); err != nil {
+		t.Fatal(err)
+	}
+	c := &Core{opts: Options{ConfigPath: dst, ConfigSource: src}}
+	n := c.configSourceDriftNotice()
+	if n == nil {
+		t.Fatal("a deleted source was not reported")
+	}
+	if n.Code != NoticeConfigNoSrc {
+		t.Fatalf("code %q, want %q", n.Code, NoticeConfigNoSrc)
+	}
+}
+
+func writeSourceAndMaterialize(t *testing.T) (src, dst string) {
+	t.Helper()
+	src = t.TempDir()
+	dst = t.TempDir()
+	if err := os.MkdirAll(filepath.Join(src, "rules"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	doc := "version: 2\nproxy: {engine: sing-box, mode: proxy}\n" +
+		"desync:\n  instances:\n    nfqws1-main: {engine: nfqws1, enabled: true, capture: {tcp: [443]}}\n"
+	if err := os.WriteFile(filepath.Join(src, "configuration.yaml"), []byte(doc), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	rule := "id: youtube\nname: YouTube\nenabled: true\nmatch: {domains: [youtube.com]}\n" +
+		"probe: {type: http, target: https://www.youtube.com/generate_204}\n" +
+		"chain:\n  - {tier: fallback, vpn: {pool: vpn_url_test}}\n"
+	if err := os.WriteFile(filepath.Join(src, "rules", "youtube.yaml"), []byte(rule), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := config.Materialize(src, dst, ""); err != nil {
+		t.Fatal(err)
+	}
+	return src, dst
+}
+
+func editSourceRule(t *testing.T, src string) {
+	t.Helper()
+	p := filepath.Join(src, "rules", "youtube.yaml")
+	body, err := os.ReadFile(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	edited := strings.Replace(string(body), "youtube.com", "youtu.be", 1)
+	if err := os.WriteFile(p, []byte(edited), 0o600); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// The end-to-end shape: a service configured with the pair, its source edited by
+// the GUI, and the drift visible through the SAME notices() the /status handler
+// calls — not through a private helper that could drift from it.

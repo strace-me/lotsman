@@ -1,5 +1,5 @@
 <script>
-  // Structured editor for doc.Pools — the named groups a rule's VPN rung selects
+  // Structured editor for cfg.Pools — the named groups a rule's VPN rung selects
   // through. Until now the only way to touch a pool was the raw-YAML hatch, which
   // meant the one place that decides WHICH exits a rule may use was the least
   // visible thing in the app.
@@ -8,50 +8,69 @@
   // Renaming is therefore delete+insert, which also has to follow the rules that
   // point at the old name — an unreferenced pool silently stops being used, and a
   // rule naming a pool that no longer exists fails validation on save.
-  export let doc
+  export let cfg
+  // The rules live in their OWN files, so the document cannot see them. They are passed
+  // in for the cross-references only — "which rules point at this pool" is what makes a
+  // rename safe and a delete honest.
+  export let rules = []
   export let touch = () => {}
 
   const TYPES = ['url_test', 'selector']
 
-  $: pools = Object.entries(doc.Pools || {}).sort(([a], [b]) => a.localeCompare(b))
+  $: pools = Object.entries(cfg.Pools || {}).sort(([a], [b]) => a.localeCompare(b))
 
-  // Which rules reference a pool, so deleting or renaming one is not a guess. A
-  // rung names it in strategy_id.
-  const usedBy = (name) =>
-    (doc.Services || [])
-      .filter((s) => (s.Chain || []).some((step) => step.StrategyID === name))
-      .map((s) => s.Name)
+  // Which rules reference a pool, so deleting or renaming one is not a guess. A VPN
+  // rung names it on its action, and a DETOUR names it too — a rename that followed
+  // only the pool would leave the detour pointing at a name that no longer exists,
+  // which sing-box accepts and resolves to nothing.
+  const liveRules = () => rules.map((r) => r.rule).filter(Boolean)
+  const usesPool = (r, name) =>
+    (r.Chain || []).some(
+      (step) =>
+        step.Action &&
+        ((step.Action.VPN && (step.Action.VPN.Pool === name || step.Action.VPN.Detour === name)) ||
+          (step.Action.Desync && step.Action.Desync.Strategy === name))
+    )
+  const usedBy = (name) => liveRules().filter((r) => usesPool(r, name)).map((r) => r.Name || r.ID)
 
   function add() {
-    doc.Pools ||= {}
+    cfg.Pools ||= {}
     let name = 'pool'
-    for (let i = 2; doc.Pools[name]; i++) name = 'pool-' + i
-    doc.Pools[name] = { Type: 'url_test', Filter: { Caps: [], TagsInclude: [], TagsExclude: [], CountriesInclude: [], CountriesExclude: [] } }
-    doc.Pools = doc.Pools
+    for (let i = 2; cfg.Pools[name]; i++) name = 'pool-' + i
+    cfg.Pools[name] = { Type: 'url_test', Filter: { Caps: [], TagsInclude: [], TagsExclude: [], CountriesInclude: [], CountriesExclude: [] } }
+    cfg.Pools = cfg.Pools
     touch()
   }
 
   function remove(name) {
     const used = usedBy(name)
     if (used.length && !confirm(`Пул «${name}» используют правила: ${used.join(', ')}.\nПосле удаления конфигурация не сохранится, пока они на него ссылаются. Всё равно удалить?`)) return
-    delete doc.Pools[name]
-    doc.Pools = doc.Pools
+    delete cfg.Pools[name]
+    cfg.Pools = cfg.Pools
     touch()
   }
 
   function rename(oldName, newName) {
     newName = (newName || '').trim()
     if (!newName || newName === oldName) return
-    if (doc.Pools[newName]) return // taken; leave the field for the operator to fix
-    doc.Pools[newName] = doc.Pools[oldName]
-    delete doc.Pools[oldName]
-    // Follow the references, or every rule pointing here breaks on save.
-    for (const s of doc.Services || []) {
-      for (const step of s.Chain || []) {
-        if (step.StrategyID === oldName) step.StrategyID = newName
+    if (cfg.Pools[newName]) return // taken; leave the field for the operator to fix
+    cfg.Pools[newName] = cfg.Pools[oldName]
+    delete cfg.Pools[oldName]
+    // Follow the references, or every rule pointing here breaks on save. The detour is
+    // followed as well as the pool: both name a pool, and one of them being left behind
+    // is a config that loads and routes nowhere.
+    for (const r of liveRules()) {
+      for (const step of r.Chain || []) {
+        const a = step.Action
+        if (!a) continue
+        if (a.VPN) {
+          if (a.VPN.Pool === oldName) a.VPN.Pool = newName
+          if (a.VPN.Detour === oldName) a.VPN.Detour = newName
+        }
+        if (a.Desync && a.Desync.Strategy === oldName) a.Desync.Strategy = newName
       }
     }
-    doc.Pools = doc.Pools
+    cfg.Pools = cfg.Pools
     touch()
   }
 

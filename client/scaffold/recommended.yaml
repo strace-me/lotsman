@@ -1,38 +1,105 @@
-# Lotsman client — RECOMMENDED starter, shipped with Lotsman.
-# Curated services for the common RU-blocked set. There are NO subscriptions/creds
-# here on purpose — add your own subscription (in the app, or with `-sub` on
-# `-init`) and Lotsman does the rest: the three standard pools and each service's
-# escalation chain (zapret -> VPN -> emergency) come from the builtin categories.
-# Community PRs extend this set.
+# Lotsman — RECOMMENDED starter, shipped with Lotsman.
+# Curated rules for the common RU-blocked set. Community PRs extend this file.
+#
+# This file holds ONE RULE PER DOCUMENT, separated by ---. `lotsman -init -recommended`
+# writes each as its own file under rules/, which is what a deployment looks like on
+# disk: editing one rule must not reformat the others.
+#
+# There are NO subscriptions/creds here on purpose — add your own subscription (in the
+# app, or with `-sub` on `-init`) and Lotsman does the rest. The three standard pools
+# (vpn_url_test, vpn_url_test_udp, emergency_pool) are built in; declare a `pools:`
+# entry only to override them.
+#
+# `probe` answers "does this path respond"; it is deliberately tiny, so it cannot see
+# the failure that matters here — TSPU lets a flow establish and then freezes it a few
+# tens of KB in. `volume` is the second question, "does the path CARRY", and only rules
+# that have one are re-measured for throughput. Point it at something the service
+# really serves in bulk.
 
-# probe_target answers "does this path respond"; it is deliberately tiny, so it
-# cannot see the failure that matters here — TSPU lets a flow establish and then
-# freezes it a few tens of KB in. volume_target is the second question, "does the
-# path CARRY", and only rules that have one are re-measured for throughput. Point
-# it at something the service really serves in bulk.
-services:
-  - name: youtube
-    category: streaming
-    probe_target: https://www.youtube.com/generate_204
-    volume_target: https://www.youtube.com/
-    domains: [youtube.com, googlevideo.com, ytimg.com, ggpht.com, youtu.be]
-  - name: discord
-    category: messaging
-    probe_target: https://discord.com/api/v9/gateway
-    domains: [discord.com, discord.gg, discordapp.com, discordapp.net, discord.media]
-  - name: instagram
-    category: streaming
-    probe_target: https://www.instagram.com/favicon.ico
-    domains: [instagram.com, cdninstagram.com, fbcdn.net]
-  - name: ai
-    category: generic
-    probe_target: https://chatgpt.com/robots.txt
-    domains: [openai.com, chatgpt.com, oaistatic.com, oaiusercontent.com, claude.ai, anthropic.com]
-  - name: x
-    category: generic
-    probe_target: https://x.com/robots.txt
-    domains: [x.com, twitter.com, twimg.com, t.co]
-  - name: gaming-epic
-    category: gaming
-    probe_target: https://store.epicgames.com/robots.txt
-    domains: [epicgames.com, unrealengine.com, easyanticheat.net, akamaized.net]
+id: youtube
+name: YouTube
+enabled: true
+match:
+  domains: [youtube.com, googlevideo.com, ytimg.com, ggpht.com, youtu.be, youtubei.googleapis.com]
+probe:
+  type: http
+  target: https://www.youtube.com/generate_204
+volume:
+  targets: [https://www.youtube.com/]
+chain:
+  - {tier: preferred, desync: {instance: nfqws1-main, strategy: auto}}
+  - {tier: fallback, vpn: {pool: vpn_url_test}}
+  - {tier: emergency, vpn: {pool: emergency_pool}}
+
+---
+id: discord
+name: Discord
+enabled: true
+match:
+  domains: [discord.com, discord.gg, discordapp.com, discordapp.net, discord.media]
+probe:
+  type: http
+  target: https://discord.com/api/v9/gateway
+chain:
+  - {tier: preferred, desync: {instance: nfqws1-main, strategy: auto}}
+  - {tier: fallback, vpn: {pool: vpn_url_test_udp}}
+  - {tier: emergency, vpn: {pool: emergency_pool}}
+
+---
+id: instagram
+name: Instagram
+enabled: true
+match:
+  domains: [instagram.com, cdninstagram.com, fbcdn.net]
+probe:
+  type: http
+  target: https://www.instagram.com/favicon.ico
+chain:
+  - {tier: preferred, desync: {instance: nfqws1-main, strategy: auto}}
+  - {tier: fallback, vpn: {pool: vpn_url_test}}
+  - {tier: emergency, vpn: {pool: emergency_pool}}
+
+---
+id: ai
+name: AI services
+enabled: true
+match:
+  domains: [openai.com, chatgpt.com, oaistatic.com, oaiusercontent.com, claude.ai, anthropic.com]
+probe:
+  type: http
+  target: https://chatgpt.com/robots.txt
+chain:
+  # No desync rung, and not by omission: an application-layer refusal is not a DPI
+  # handshake problem, so a desync here costs a restart and buys nothing. VPN only.
+  - {tier: preferred, vpn: {pool: vpn_url_test}}
+  - {tier: emergency, vpn: {pool: emergency_pool}}
+
+---
+id: x
+name: X / Twitter
+enabled: true
+match:
+  domains: [x.com, twitter.com, twimg.com, t.co]
+probe:
+  type: http
+  target: https://x.com/robots.txt
+volume:
+  targets: [https://x.com/robots.txt]
+chain:
+  - {tier: preferred, desync: {instance: nfqws1-main, strategy: auto}}
+  - {tier: fallback, vpn: {pool: vpn_url_test}}
+  - {tier: emergency, vpn: {pool: emergency_pool}}
+
+---
+id: gaming-epic
+name: Epic Games
+enabled: true
+match:
+  domains: [epicgames.com, unrealengine.com, easyanticheat.net, akamaized.net]
+probe:
+  type: http
+  target: https://store.epicgames.com/robots.txt
+chain:
+  - {tier: preferred, desync: {instance: nfqws1-main, strategy: auto}}
+  - {tier: fallback, vpn: {pool: vpn_url_test}}
+  - {tier: emergency, vpn: {pool: emergency_pool}}

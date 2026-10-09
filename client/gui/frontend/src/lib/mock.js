@@ -61,68 +61,133 @@ export function mock() {
 }
 
 // mockConfig backs the «Конфиг» editor in a plain-browser vite dev session. It
-// carries both the raw YAML (escape hatch) and the structured `doc` (PascalCase
-// keys, mirroring config.Document's default JSON) the structured forms edit.
+// carries the raw document text (the escape hatch) and the structured form the
+// structured views edit — `config` is the document and `rules` is one entry per rule
+// FILE, because that is what the service sends and what a save has to send back.
+//
+// A mock that carried the OLD shape would still render: the forms are driven by what
+// is present, so a missing section shows as an empty editor rather than as an error.
+// The demo would then look fine and be teaching a schema nothing uses.
 export function mockConfig() {
   return {
-    path: '/home/operator/.config/lotsman/config.yaml',
-    yaml: `# Lotsman client config (mock).
+    path: '/home/operator/.config/lotsman/configuration.yaml',
+    rules_dir: '/home/operator/.config/lotsman/rules',
+    yaml: `# Lotsman — main configuration (mock).
+version: 2
+target_version: "1.14.1"
+proxy:
+  engine: sing-box
+  mode: tun
+desync:
+  instances:
+    nfqws1-main:
+      engine: nfqws1
+      enabled: true
+      capture:
+        tcp: [80, 443]
+        udp: [443]
 subscriptions:
   - { name: demo-vless, url: "https://example.com/sub", format: auto, tags: [normal], enabled: true }
   - { name: fastsub, url: "https://fastsub.example/sub", format: auto, tags: [normal], enabled: true }
-services:
-  - name: youtube
-    category: streaming
-    probe_target: https://www.youtube.com/generate_204
-    domains: [youtube.com, googlevideo.com, ytimg.com]
-  - name: discord
-    category: messaging
-    probe_target: https://discord.com/api/v9/gateway
-    domains: [discord.com, discord.gg, discordapp.com]
+pools: {}
 `,
-    doc: {
+    config: {
+      Version: 2,
+      TargetVersion: '1.14.1',
+      Proxy: { Engine: 'sing-box', Mode: 'tun' },
+      Desync: {
+        Instances: {
+          'nfqws1-main': { Engine: 'nfqws1', Enabled: true, Table: 'inet nfqueue-nfqws1-main', Capture: { TCP: ['80', '443'], UDP: ['443'] }, Connbytes: 0 },
+        },
+      },
       Subscriptions: [
         { Name: 'demo-vless', URL: 'https://example.com/sub', Format: 'auto', Tags: ['normal'], Enabled: true, Expires: '' },
         { Name: 'fastsub', URL: 'https://fastsub.example/sub', Format: 'auto', Tags: ['normal'], Enabled: true, Expires: '2026-09-01' },
       ],
-      Services: [
-        { Name: 'youtube', Category: 'streaming', Priority: 0, ProbeTarget: 'https://www.youtube.com/generate_204', VolumeTarget: 'https://www.youtube.com/', Domains: ['youtube.com', 'googlevideo.com', 'ytimg.com'], DomainLists: ['ru-blocked'], Sticky: true, Profile: 'streaming', Chain: [
-          { State: 'PREFERRED', Class: 'zapret', StrategyID: 'flowseal-alt12-google' },
-          { State: 'ALT_ZAPRET', Class: 'zapret', StrategyID: '' },
-          { State: 'VPN', Class: 'vpn', StrategyID: 'vpn_url_test_udp' },
-        ] },
-        { Name: 'discord', Category: 'messaging', Priority: 0, ProbeTarget: 'https://discord.com/api/v9/gateway', Domains: ['discord.com', 'discord.gg', 'discordapp.com'], DomainLists: [], IPs: ['66.22.192.0/18'], EscalateAfter: 3, Chain: [
-          { State: 'VPN', Class: 'vpn', StrategyID: 'vpn_url_test_udp' },
-          { State: 'PREFERRED', Class: 'zapret', StrategyID: 'flowseal-alt12-discord' },
-          { State: 'VPN', Class: 'vpn', StrategyID: 'vpn_url_test' },
-        ] },
-      ],
       Pools: {
-        vpn_url_test: { Type: 'url_test', Filter: { Caps: ['tcp'], TagsInclude: [], TagsExclude: ['emergency'], CountriesInclude: [], CountriesExclude: ['ru'] }, Warmup: false, Interval: '1m', IdleTimeout: '30m' },
-        vpn_url_test_udp: { Type: 'url_test', Filter: { Caps: ['udp_native'], TagsInclude: [], TagsExclude: [], CountriesInclude: [], CountriesExclude: ['ru'] }, Warmup: true, Interval: '1m', IdleTimeout: '' },
+        vpn_url_test: { Type: 'url_test', Caps: ['tcp'], TagsInclude: [], TagsExclude: ['emergency'], CountriesInclude: [], CountriesExclude: ['ru'], Limit: 0, MinCoverage: 0, Warmup: false, Interval: '1m0s', IdleTimeout: '30m0s' },
+        vpn_url_test_udp: { Type: 'url_test', Caps: ['udp_native'], TagsInclude: [], TagsExclude: [], CountriesInclude: [], CountriesExclude: ['ru'], Limit: 0, MinCoverage: 0, Warmup: true, Interval: '1m0s', IdleTimeout: '' },
       },
       Hostlists: [
         { Name: 'ru-blocked', Out: '/var/lib/lotsman/ru-blocked.txt', Sources: ['https://example.com/blocked.txt'], Exclude: [], Domains: [], MinKeepRatio: 0.8 },
         { Name: 'мои', Out: '/var/lib/lotsman/mine.txt', Sources: [], Exclude: [], Domains: ['bank.example', 'work.example'], MinKeepRatio: 0 },
       ],
+      Strategies: [
+        { ID: 'flowseal-fake-multisplit', Class: 'zapret', NFQWSArgs: ['--dpi-desync=fake,multisplit', '--dpi-desync-fooling=md5sig'], BlockTypes: ['tcp_reset'], Notes: 'победитель на этом провайдере' },
+      ],
       DNS: {
         Servers: [
-          { Name: 'remote', Provider: 'cloudflare', Method: 'https', Type: '', Address: '', ServerName: '', Path: '', Detour: 'vpn' },
-          { Name: 'lan', Provider: '', Method: '', Type: 'local', Address: '', ServerName: '', Path: '', Detour: '' },
+          { Name: 'remote', URL: '', Provider: 'cloudflare', Method: 'https', Type: '', Address: '', Port: 0, Path: '', ServerName: '', Detour: 'vpn' },
+          { Name: 'lan', URL: '', Provider: '', Method: '', Type: 'local', Address: '', Port: 0, Path: '', ServerName: '', Detour: '' },
+          { Name: 'desync-pub', URL: '', Provider: 'quad9', Method: 'tls', Type: '', Address: '', Port: 0, Path: '', ServerName: '', Detour: 'direct' },
         ],
         Direct: 'lan',
+        Zapret: 'desync-pub',
         Final: 'remote',
         Strategy: 'prefer_ipv4',
         FakeIP: false,
         Failover: ['cloudflare', 'quad9', 'mullvad'],
+        DirectFailover: ['cloudflare', 'google'],
       },
-      UTLSFingerprint: 'chrome',
-      SingboxVersion: '1.13.14',
       Multiplex: { Enabled: true, Protocol: 'h2mux', MaxConnections: 1, MinStreams: 4, Padding: true, BrutalUp: 0, BrutalDown: 0 },
-      FakeIP: null,
-      Strategies: [
-        { ID: 'flowseal-fake-multisplit', Class: 'zapret', NFQWSArgs: ['--dpi-desync=fake,multisplit', '--dpi-desync-fooling=md5sig'], BlockTypes: ['rst'], Notes: 'победитель на этом провайдере' },
-      ],
+      UTLSFingerprint: 'chrome',
+      SubViaPool: '',
     },
+    rules: [
+      {
+        file: 'youtube.yaml',
+        rule: {
+          ID: 'youtube',
+          Name: 'YouTube',
+          Enabled: true,
+          Priority: 0,
+          Match: { Domains: ['youtube.com', 'googlevideo.com', 'ytimg.com'], DomainLists: ['ru-blocked'], IPLists: [], CIDRs: [] },
+          Probe: { Type: 'http', Target: 'https://www.youtube.com/generate_204' },
+          Volume: { Targets: ['https://www.youtube.com/'], MinBytes: 0 },
+          Behavior: { Sticky: true, Profile: 'streaming' },
+          Chain: [
+            { Tier: 'preferred', Action: { Desync: { Instance: 'nfqws1-main', Strategy: 'flowseal-fake-multisplit' } } },
+            { Tier: 'preferred', Action: { Desync: { Instance: 'nfqws1-main', Strategy: 'auto' } } },
+            { Tier: 'fallback', Action: { VPN: { Pool: 'vpn_url_test_udp' } } },
+            { Tier: 'emergency', Action: { VPN: { Pool: 'emergency_pool' } } },
+          ],
+        },
+      },
+      {
+        file: 'discord.yaml',
+        rule: {
+          ID: 'discord',
+          Name: 'Discord',
+          Enabled: true,
+          Priority: 0,
+          Match: { Domains: ['discord.com', 'discord.gg', 'discordapp.com'], DomainLists: [], IPLists: [], CIDRs: ['66.22.192.0/18'] },
+          Probe: { Type: 'http', Target: 'https://discord.com/api/v9/gateway' },
+          Behavior: { EscalateAfter: 3 },
+          Chain: [
+            { Tier: 'preferred', Action: { Desync: { Instance: 'nfqws1-main', Strategy: 'auto' } } },
+            { Tier: 'fallback', Action: { VPN: { Pool: 'vpn_url_test_udp' } } },
+            { Tier: 'emergency', Action: { VPN: { Pool: 'emergency_pool' } } },
+          ],
+        },
+      },
+    ],
+  }
+}
+
+// First-run, for `vite dev` in a plain browser. The window asks SetupState before it
+// asks /status, so without this a dev session would try first-run on every reload and
+// never reach the dashboard it exists to design.
+//
+// It reports a CONFIGURED machine, which is the interesting case to design against:
+// that is what every existing screen renders. The unconfigured case is reachable by
+// setting `?fresh=1` in the URL, because "what does a new user see" is exactly the
+// screen nobody looks at until it ships and then everybody does.
+export function mockSetup() {
+  const fresh =
+    typeof window !== 'undefined' && /[?&]fresh=1/.test(window.location.search)
+  return {
+    configured: !fresh,
+    source_path: '/home/user/.config/lotsman',
+    service_reachable: !fresh,
   }
 }

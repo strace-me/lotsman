@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"net"
 	"sort"
+
+	"github.com/strace-me/lotsman/pkg/config"
 )
 
 // preflight refuses to start when something already owns the resources this
@@ -148,4 +150,41 @@ func hostHasGlobalIPv6() bool {
 		}
 	}
 	return false
+}
+
+// configSourceDriftNotice says the running deployment is not what the operator is
+// editing.
+//
+// It is computed on EVERY status read rather than latched, for the reason the IPv6
+// notice is: a condition that was true five minutes ago may not be now, and a
+// latched warning that outlives its cause is worse than none — it teaches the
+// operator that the banner lies.
+//
+// It is a Notice, not an alert. This project has no alerting layer and wants none;
+// what a drift needs is for the condition to be legible in one place when the
+// operator is already looking, not for it to interrupt anything.
+func (c *Core) configSourceDriftNotice() *Notice {
+	if c.opts.ConfigSource == "" || c.opts.ConfigPath == "" {
+		return nil // no source/target pair: the service reads -config directly
+	}
+	st := config.CheckMaterialized(c.opts.ConfigSource, c.opts.ConfigPath)
+	switch {
+	case st.SourceMissing:
+		return &Notice{
+			Code: NoticeConfigNoSrc,
+			Text: fmt.Sprintf(
+				"This service was started with -config-source %s, and that directory no longer exists. "+
+					"It is running the last materialized copy under %s. Restart the service to re-derive it.",
+				st.Source, st.Target),
+		}
+	case st.Drifted:
+		return &Notice{
+			Code: NoticeConfigDrift,
+			Text: fmt.Sprintf(
+				"Your configuration source %s has changed since the service last read it, so the running "+
+					"configuration under %s is older than what you are editing. Restart the service to apply it.",
+				st.Source, st.Target),
+		}
+	}
+	return nil
 }

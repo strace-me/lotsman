@@ -1,10 +1,10 @@
-package config
+package configv2
 
 import "testing"
 
 func TestBuildDNSExpandsProvidersAndValidates(t *testing.T) {
-	y := &dnsYAML{
-		Servers: []dnsServerYAML{
+	y := &DNSSection{
+		Servers: []DNSSectionServer{
 			{Name: "cf-dot", Provider: "cloudflare", Method: "tls", Detour: "vpn"},
 			{Name: "quad9", Provider: "quad9"}, // method defaults to https
 			{Name: "lan", Type: "local"},
@@ -12,9 +12,9 @@ func TestBuildDNSExpandsProvidersAndValidates(t *testing.T) {
 		},
 		Direct: "lan", Final: "cf-dot", Strategy: "prefer_ipv4",
 	}
-	d, err := buildDNS(y)
+	d, err := BuildDNS(y)
 	if err != nil {
-		t.Fatalf("buildDNS: %v", err)
+		t.Fatalf("BuildDNS: %v", err)
 	}
 	if len(d.Servers) != 4 || d.Final != "cf-dot" || d.Direct != "lan" {
 		t.Fatalf("top-level wrong: %+v", d)
@@ -35,33 +35,33 @@ func TestBuildDNSExpandsProvidersAndValidates(t *testing.T) {
 }
 
 func TestBuildDNSRejectsBadConfigs(t *testing.T) {
-	cases := map[string]*dnsYAML{
-		"unknown provider":    {Servers: []dnsServerYAML{{Name: "x", Provider: "nope"}}, Final: "x"},
-		"final not declared":  {Servers: []dnsServerYAML{{Name: "a", Type: "local"}}, Final: "b"},
-		"bad strategy":        {Servers: []dnsServerYAML{{Name: "a", Type: "local"}}, Final: "a", Strategy: "fastest"},
-		"duplicate name":      {Servers: []dnsServerYAML{{Name: "a", Type: "local"}, {Name: "a", Type: "local"}}, Final: "a"},
-		"no type no provider": {Servers: []dnsServerYAML{{Name: "a"}}, Final: "a"},
-		"direct not declared": {Servers: []dnsServerYAML{{Name: "a", Type: "local"}}, Final: "a", Direct: "z"},
+	cases := map[string]*DNSSection{
+		"unknown provider":    {Servers: []DNSSectionServer{{Name: "x", Provider: "nope"}}, Final: "x"},
+		"final not declared":  {Servers: []DNSSectionServer{{Name: "a", Type: "local"}}, Final: "b"},
+		"bad strategy":        {Servers: []DNSSectionServer{{Name: "a", Type: "local"}}, Final: "a", Strategy: "fastest"},
+		"duplicate name":      {Servers: []DNSSectionServer{{Name: "a", Type: "local"}, {Name: "a", Type: "local"}}, Final: "a"},
+		"no type no provider": {Servers: []DNSSectionServer{{Name: "a"}}, Final: "a"},
+		"direct not declared": {Servers: []DNSSectionServer{{Name: "a", Type: "local"}}, Final: "a", Direct: "z"},
 	}
 	for name, y := range cases {
-		if _, err := buildDNS(y); err == nil {
+		if _, err := BuildDNS(y); err == nil {
 			t.Errorf("%s: expected an error, got none", name)
 		}
 	}
 }
 
 func TestBuildDNSFailoverValidatesAndRecordsProvider(t *testing.T) {
-	y := &dnsYAML{
-		Servers: []dnsServerYAML{
+	y := &DNSSection{
+		Servers: []DNSSectionServer{
 			{Name: "remote", Provider: "cloudflare", Method: "https", Detour: "vpn"},
 			{Name: "lan", Type: "local"},
 		},
 		Direct: "lan", Final: "remote",
 		Failover: []string{"cloudflare", "quad9", "google"},
 	}
-	d, err := buildDNS(y)
+	d, err := BuildDNS(y)
 	if err != nil {
-		t.Fatalf("buildDNS: %v", err)
+		t.Fatalf("BuildDNS: %v", err)
 	}
 	if len(d.Failover) != 3 || d.Failover[1] != "quad9" {
 		t.Errorf("failover list not carried through: %v", d.Failover)
@@ -72,28 +72,28 @@ func TestBuildDNSFailoverValidatesAndRecordsProvider(t *testing.T) {
 }
 
 func TestBuildDNSFailoverRejectsBadConfigs(t *testing.T) {
-	cases := map[string]*dnsYAML{
+	cases := map[string]*DNSSection{
 		"unknown failover provider": {
-			Servers:  []dnsServerYAML{{Name: "remote", Provider: "cloudflare"}, {Name: "lan", Type: "local"}},
+			Servers:  []DNSSectionServer{{Name: "remote", Provider: "cloudflare"}, {Name: "lan", Type: "local"}},
 			Final:    "remote",
 			Failover: []string{"cloudflare", "nope"},
 		},
 		"failover with manual final": {
-			Servers:  []dnsServerYAML{{Name: "remote", Type: "https", Address: "1.1.1.1", ServerName: "cloudflare-dns.com"}},
+			Servers:  []DNSSectionServer{{Name: "remote", Type: "https", Address: "1.1.1.1", ServerName: "cloudflare-dns.com"}},
 			Final:    "remote",
 			Failover: []string{"cloudflare", "quad9"},
 		},
 	}
 	for name, y := range cases {
-		if _, err := buildDNS(y); err == nil {
+		if _, err := BuildDNS(y); err == nil {
 			t.Errorf("%s: expected an error, got none", name)
 		}
 	}
 }
 
 func TestSetFinalProviderRepointsEndpointKeepsTag(t *testing.T) {
-	d, err := buildDNS(&dnsYAML{
-		Servers: []dnsServerYAML{
+	d, err := BuildDNS(&DNSSection{
+		Servers: []DNSSectionServer{
 			{Name: "remote", Provider: "cloudflare", Method: "tls", Detour: "vpn"},
 			{Name: "lan", Type: "local"},
 		},
@@ -121,8 +121,8 @@ func TestSetFinalProviderRepointsEndpointKeepsTag(t *testing.T) {
 // rotate to a public provider too, so a pinned office DNS that is unreachable on
 // another network does not leave the rung unable to resolve at all.
 func TestBuildDNSDirectFailoverValidatesAndRepoints(t *testing.T) {
-	d, err := buildDNS(&dnsYAML{
-		Servers: []dnsServerYAML{
+	d, err := BuildDNS(&DNSSection{
+		Servers: []DNSSectionServer{
 			{Name: "direct-pub", Provider: "cloudflare", Method: "https", Detour: "direct"},
 			{Name: "remote", Provider: "quad9", Method: "tls", Detour: "vpn"},
 		},
@@ -130,7 +130,7 @@ func TestBuildDNSDirectFailoverValidatesAndRepoints(t *testing.T) {
 		DirectFailover: []string{"cloudflare", "google", "adguard"},
 	})
 	if err != nil {
-		t.Fatalf("buildDNS: %v", err)
+		t.Fatalf("BuildDNS: %v", err)
 	}
 	if len(d.DirectFailover) != 3 || d.DirectFailover[1] != "google" {
 		t.Fatalf("direct_failover not carried: %v", d.DirectFailover)
@@ -151,8 +151,8 @@ func TestBuildDNSDirectFailoverValidatesAndRepoints(t *testing.T) {
 // and the first rotation REPLACES it with an encrypted provider so the rung can
 // still resolve on a network where the office DNS does not answer.
 func TestBuildDNSDirectFailoverReplacesManualDirect(t *testing.T) {
-	d, err := buildDNS(&dnsYAML{
-		Servers: []dnsServerYAML{
+	d, err := BuildDNS(&DNSSection{
+		Servers: []DNSSectionServer{
 			{Name: "office", Type: "udp", Address: "192.168.10.30", Detour: "direct"},
 			{Name: "remote", Provider: "cloudflare"},
 		},
@@ -160,7 +160,7 @@ func TestBuildDNSDirectFailoverReplacesManualDirect(t *testing.T) {
 		DirectFailover: []string{"cloudflare", "quad9"},
 	})
 	if err != nil {
-		t.Fatalf("buildDNS: %v", err)
+		t.Fatalf("BuildDNS: %v", err)
 	}
 	if len(d.DirectFailover) != 2 {
 		t.Fatalf("direct_failover not carried: %v", d.DirectFailover)
@@ -179,8 +179,8 @@ func TestBuildDNSDirectFailoverReplacesManualDirect(t *testing.T) {
 
 // Explicit URI form: the scheme IS the transport, no catalog alias, no method.
 func TestBuildDNSParsesExplicitURLs(t *testing.T) {
-	d, err := buildDNS(&dnsYAML{
-		Servers: []dnsServerYAML{
+	d, err := BuildDNS(&DNSSection{
+		Servers: []DNSSectionServer{
 			{Name: "doh", URL: "https://cloudflare-dns.com/dns-query", Detour: "direct"},
 			{Name: "doq", URL: "quic://dns.quad9.net"},
 			{Name: "dot", URL: "tls://1.1.1.1:853"},
@@ -190,7 +190,7 @@ func TestBuildDNSParsesExplicitURLs(t *testing.T) {
 		Direct: "lan", Final: "doh",
 	})
 	if err != nil {
-		t.Fatalf("buildDNS: %v", err)
+		t.Fatalf("BuildDNS: %v", err)
 	}
 	doh := d.Servers[0]
 	if doh.Type != "https" || doh.Address != "cloudflare-dns.com" || doh.Path != "/dns-query" || doh.ServerName != "cloudflare-dns.com" || !doh.Bootstrap {
@@ -211,8 +211,8 @@ func TestBuildDNSParsesExplicitURLs(t *testing.T) {
 }
 
 func TestBuildDNSRejectsBadURL(t *testing.T) {
-	if _, err := buildDNS(&dnsYAML{
-		Servers: []dnsServerYAML{{Name: "x", URL: "ftp://nope.example"}},
+	if _, err := BuildDNS(&DNSSection{
+		Servers: []DNSSectionServer{{Name: "x", URL: "ftp://nope.example"}},
 		Final:   "x",
 	}); err == nil {
 		t.Error("an unsupported scheme must be rejected")
@@ -222,8 +222,8 @@ func TestBuildDNSRejectsBadURL(t *testing.T) {
 // A failover entry may name a DECLARED server, not only a curated alias — so a
 // config can rotate among its own resolvers with no catalog entry.
 func TestFailoverCanNameADeclaredServer(t *testing.T) {
-	d, err := buildDNS(&dnsYAML{
-		Servers: []dnsServerYAML{
+	d, err := BuildDNS(&DNSSection{
+		Servers: []DNSSectionServer{
 			{Name: "remote", Provider: "cloudflare", Method: "https", Detour: "vpn"},
 			{Name: "my-doh", URL: "https://doh.example/dns-query", Detour: "vpn"},
 			{Name: "lan", Type: "local"},
@@ -232,7 +232,7 @@ func TestFailoverCanNameADeclaredServer(t *testing.T) {
 		Failover: []string{"my-doh", "quad9"},
 	})
 	if err != nil {
-		t.Fatalf("buildDNS: %v", err)
+		t.Fatalf("BuildDNS: %v", err)
 	}
 	if err := d.SetFinalProvider("my-doh"); err != nil {
 		t.Fatalf("SetFinalProvider by declared name: %v", err)
@@ -252,10 +252,10 @@ func TestFailoverCanNameADeclaredServer(t *testing.T) {
 }
 
 func TestBuildDNSNilOrEmptyIsNoConfig(t *testing.T) {
-	if d, err := buildDNS(nil); err != nil || d != nil {
+	if d, err := BuildDNS(nil); err != nil || d != nil {
 		t.Errorf("nil dns yaml => (nil,nil), got (%v,%v)", d, err)
 	}
-	if d, err := buildDNS(&dnsYAML{}); err != nil || d != nil {
+	if d, err := BuildDNS(&DNSSection{}); err != nil || d != nil {
 		t.Errorf("empty dns yaml => (nil,nil), got (%v,%v)", d, err)
 	}
 }

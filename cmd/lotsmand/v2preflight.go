@@ -23,30 +23,26 @@ import (
 // v2Flags registers the v2 preflight switch set. It is separate from the flag
 // block above because it is a DIFFERENT JOB: -config runs the v1 daemon, and
 // -config-v2 only reads and reports.
-type v2Flags struct {
-	config   *string
-	rules    *string
-	store    *string
-	rulesets *string
-	plain    *string
-	// run makes the daemon START on a v2 document instead of reporting on one. It is
-	// a separate flag from -config-v2 on purpose: that one means "validate and EXIT",
-	// and silently changing the meaning of a flag that already exists is how a
-	// documented safety property disappears.
-	run *string
+// configFlags are the flags that NAME a deployment's parts. There is no longer a
+// second schema to switch between, so there is no `-run-v2` or `-config-v2` —
+// `-config` takes the deployment directory or the configuration.yaml inside it, and
+// everything else is derived from that or from the flag set the daemon already had.
+//
+// It is a struct rather than three locals because the preflight and the daemon both
+// need the same two paths, and a second copy of "where do the bundles live" is how a
+// preflight checks a tree the daemon will never look at.
+type configFlags struct {
+	preflight *string
+	store     *string
 }
 
-func registerV2Flags(fs *flag.FlagSet) v2Flags {
-	return v2Flags{
-		config: fs.String("config-v2", "", "validate a v2 configuration.yaml and its rules/, then EXIT without applying anything"),
-		rules:  fs.String("rules-v2", "", "rule files dir (default: alongside the v2 config)"),
-		store:  fs.String("store-v2", "/etc/lotsman/desync/strategies", "strategy bundle root, for resolving a rule's {instance, strategy}"),
-		rulesets: fs.String("rulesets-v2", "",
-			"compiled .srs root; enables provider-backed lists"),
-		plain: fs.String("plain-v2", "",
-			"plain rule-set file; enables provider-backed lists without a converter"),
-		run: fs.String("run-v2", "",
-			"START the daemon on a v2 configuration.yaml (or its directory). Mutually exclusive with -config; -config-v2 only validates and exits"),
+func registerConfigFlags(fs *flag.FlagSet) configFlags {
+	return configFlags{
+		preflight: fs.String("preflight", "",
+			"validate a configuration.yaml and its rules/, then EXIT without applying anything. "+
+				"A dry-run by construction: no socket, no queue, no engine, no rule installed"),
+		store: fs.String("store-dir", "/etc/lotsman/desync/strategies",
+			"strategy bundle root, for resolving a rule's {instance, strategy}"),
 	}
 }
 
@@ -58,30 +54,15 @@ func registerV2Flags(fs *flag.FlagSet) v2Flags {
 // through lotsmanctl: a document that validates in the CLI and not here means the
 // CLI and the daemon disagree about what a config is, which is the one class of bug
 // a preflight exists to catch.
-func runV2Preflight(f v2Flags) int {
-	if *f.config == "" {
-		return 0 // not requested; the daemon carries on
-	}
-	rulesDir := *f.rules
-	if rulesDir == "" {
-		rulesDir = configv2.RulesDir
-		if filepath.Dir(*f.config) != "/" {
-			candidate := filepath.Join(filepath.Dir(*f.config), "rules")
-			if _, err := os.Stat(candidate); err == nil {
-				rulesDir = candidate
-			}
-		}
-	}
-
+func runV2Preflight(configPath, rulesDir, storeRoot, rulesetsDir, plainLists string) int {
 	var problems []string
 	note := func(format string, args ...any) {
 		problems = append(problems, fmt.Sprintf(format, args...))
 	}
 
-	// Accept the DIRECTORY as well as the file, because a v2 deployment is
+	// Accept the DIRECTORY as well as the file, because a deployment is
 	// configuration.yaml + rules/ as a unit. This is the same resolution -config
 	// does, so the preflight can be pointed at what the daemon is pointed at.
-	configPath, rulesDir := *f.config, *f.rules
 	if info, serr := os.Stat(configPath); serr == nil && info.IsDir() {
 		if rulesDir == "" {
 			rulesDir = filepath.Join(configPath, "rules")
@@ -100,13 +81,13 @@ func runV2Preflight(f v2Flags) int {
 
 	rules, err := configv2.LoadRules(rulesDir)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "lotsmand -config-v2: rules: %v\n", err)
+		fmt.Fprintf(os.Stderr, "lotsmand -preflight: rules: %v\n", err)
 		return 1
 	}
 	fmt.Printf("rules %s: %d loaded, %d enabled\n", rulesDir, len(rules), countEnabled(rules))
 
 	adapters := zapret.StrategyEngineAdapters()
-	strategies := bundleStrategiesFor(*f.store, adapters, cfg, note)
+	strategies := bundleStrategiesFor(storeRoot, adapters, cfg, note)
 	if err := configv2.ValidateReferencesAll(cfg, rules, strategies); err != nil {
 		note("reference: %v", err)
 	}
@@ -121,7 +102,7 @@ func runV2Preflight(f v2Flags) int {
 		defer os.RemoveAll(scratchRoot)
 	}
 
-	providers := v2Providers(cfg, *f.rulesets, *f.plain, note)
+	providers := v2Providers(cfg, rulesetsDir, plainLists, note)
 	domainShapes, ipShapes := map[string]configv2.ListShape{}, map[string]configv2.ListShape{}
 	domainDefs, ipDefs := cfg.Lists.Definitions()
 	for name, def := range domainDefs {
@@ -214,7 +195,7 @@ func bundleStrategiesFor(root string, adapters map[string]strategystore.EngineAd
 
 // v2Providers builds list providers for the preflight.
 //
-// An explicit -rulesets-v2/-plain-v2 wins, because the operator told us where the
+// An explicit -rulesets-dir/-plain-lists wins, because the operator told us where the
 // compiled files are and guessing would be rude. Failing that, a source that names a
 // repo is FETCHED into a scratch directory and read from there.
 //
@@ -297,7 +278,7 @@ func materializeSource(ctx context.Context, name string, src configv2.DataSource
 	// A source with no repo is the plain form: it points at files somebody put on
 	// disk, and this is not the place to go looking for them.
 	if src.Repo == "" {
-		return "", fmt.Errorf("does not say where its lists come from; pass -rulesets-v2 or -plain-v2")
+		return "", fmt.Errorf("does not say where its lists come from; pass -rulesets-dir or -plain-lists")
 	}
 	if scratchRoot == "" {
 		return "", fmt.Errorf("no scratch space available")

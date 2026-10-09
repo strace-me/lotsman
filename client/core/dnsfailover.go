@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/strace-me/lotsman/pkg/config"
+	"github.com/strace-me/lotsman/pkg/configv2"
 	"github.com/strace-me/lotsman/pkg/dataplane"
 )
 
@@ -265,7 +266,7 @@ func (c *Core) rotateDNSDirectFailoverTo(provider string) (from, to string, conf
 
 // currentDirectProvider is the provider alias the Direct resolver is pinned to
 // ("" when it is a manual, non-provider endpoint).
-func currentDirectProvider(d *config.DNS) string {
+func currentDirectProvider(d *configv2.DNS) string {
 	for _, s := range d.Servers {
 		if s.Name == d.Direct {
 			return s.Provider
@@ -332,7 +333,7 @@ func (c *Core) rotateDNSFailoverTo(provider string) (from, to string, conf *conf
 }
 
 // currentFinalProvider is the provider alias the Final resolver is currently pinned to.
-func currentFinalProvider(d *config.DNS) string {
+func currentFinalProvider(d *configv2.DNS) string {
 	for _, s := range d.Servers {
 		if s.Name == d.Final {
 			return s.Provider

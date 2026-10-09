@@ -1,4 +1,4 @@
-package config
+package configv2
 
 import (
 	"fmt"
@@ -90,18 +90,24 @@ func dnsEncryptedType(t string) bool {
 
 // --- on-disk shape ---
 
-type dnsYAML struct {
-	Servers        []dnsServerYAML `yaml:"servers"`
-	Direct         string          `yaml:"direct"`
-	Zapret         string          `yaml:"zapret"`
-	Final          string          `yaml:"final"`
-	Strategy       string          `yaml:"strategy"`
-	FakeIP         bool            `yaml:"fakeip"`
-	Failover       []string        `yaml:"failover"`        // ordered provider aliases the Final resolver rotates through on failure
-	DirectFailover []string        `yaml:"direct_failover"` // ordered provider aliases the Direct resolver rotates through on failure
+// DNSSection is the declared split-DNS block. Absent or empty means the generated
+// config carries no dns section at all and the runtime's own default applies.
+//
+// FakeIP lives HERE rather than as its own block: it is a property of the resolver
+// set (which resolver answers non-fake queries), and a separate top-level key let the
+// two disagree about which resolver was in charge.
+type DNSSection struct {
+	Servers        []DNSSectionServer `yaml:"servers"`
+	Direct         string             `yaml:"direct"`
+	Zapret         string             `yaml:"zapret"`
+	Final          string             `yaml:"final"`
+	Strategy       string             `yaml:"strategy"`
+	FakeIP         bool               `yaml:"fakeip"`
+	Failover       []string           `yaml:"failover"`        // ordered provider aliases the Final resolver rotates through on failure
+	DirectFailover []string           `yaml:"direct_failover"` // ordered provider aliases the Direct resolver rotates through on failure
 }
 
-type dnsServerYAML struct {
+type DNSSectionServer struct {
 	Name     string `yaml:"name"`
 	URL      string `yaml:"url"`      // explicit endpoint: https://host/path | tls://host | quic://host | h3://host | udp|tcp://host[:port]
 	Provider string `yaml:"provider"` // curated alias: fills address + server_name
@@ -115,8 +121,8 @@ type dnsServerYAML struct {
 	Detour     string `yaml:"detour"` // vpn(default for remote)|direct|a pool tag
 }
 
-// buildDNS translates + validates the on-disk dns block, expanding provider aliases.
-func buildDNS(y *dnsYAML) (*DNS, error) {
+// BuildDNS translates + validates the on-disk dns block, expanding provider aliases.
+func BuildDNS(y *DNSSection) (*DNS, error) {
 	if y == nil || len(y.Servers) == 0 {
 		return nil, nil
 	}
@@ -357,7 +363,7 @@ func parseDNSURL(raw string) (typ, address string, port int, path, serverName st
 	return typ, address, port, path, serverName, nil
 }
 
-func resolveDNSServer(s dnsServerYAML) (DNSServer, error) {
+func resolveDNSServer(s DNSSectionServer) (DNSServer, error) {
 	out := DNSServer{Name: s.Name, Port: s.Port, Detour: s.Detour, Provider: s.Provider}
 	if s.URL != "" {
 		// Explicit endpoint form — no catalog: `https://cloudflare-dns.com/dns-query`,

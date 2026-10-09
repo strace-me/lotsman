@@ -26,10 +26,13 @@ import (
 	"github.com/strace-me/lotsman/pkg/configv2"
 )
 
-// writeStarter emits a working starter config to path from the given comma-
-// separated subscription URLs. It refuses to overwrite an existing file — an
-// -init that clobbered a tuned config would be a nasty surprise — and validates
-// its own output before writing, so a bad scaffold fails here, not on first run.
+// writeStarter emits a working starter deployment to path from the given comma-
+// separated subscription URLs. It refuses to overwrite an existing one — an -init
+// that clobbered a tuned config would be a nasty surprise — and validates its own
+// output before writing, so a bad scaffold fails here, not on first run.
+//
+// A deployment is a directory: configuration.yaml plus rules/. So -config names
+// either the directory or the file inside it, and both are written.
 func writeStarter(path, subCSV string, recommended bool) error {
 	if path == "" {
 		return fmt.Errorf("-init needs -config <path> to write to")
@@ -46,23 +49,57 @@ func writeStarter(path, subCSV string, recommended bool) error {
 	if !recommended && len(subs) == 0 {
 		return fmt.Errorf("-init needs at least one -sub <url> (or pass -recommended for the curated default without creds)")
 	}
-	if _, err := os.Stat(path); err == nil {
+	// -config names EITHER the deployment directory or the configuration.yaml inside it,
+	// and both mean the same place, because a deployment is the two as a unit.
+	if info, err := os.Stat(path); err == nil && !info.IsDir() {
+		return fmt.Errorf("%s already exists — refusing to overwrite it", path)
+	} else if err == nil {
 		return fmt.Errorf("%s already exists — refusing to overwrite it", path)
 	} else if !os.IsNotExist(err) {
 		return fmt.Errorf("checking %s: %w", path, err)
 	}
-	out := scaffold.Starter(subs)
+	dir := path
+	if filepath.Ext(path) != "" {
+		dir = filepath.Dir(path)
+	}
+	// A rules/ directory left over from an abandoned run would merge with the new one,
+	// and the leftover rule would be routed by a document that says nothing about it.
+	rulesDir := filepath.Join(dir, "rules")
+	if _, err := os.Stat(rulesDir); err == nil {
+		return fmt.Errorf("%s already exists — refusing to write into it (a deployment's rules/ is the unit)", rulesDir)
+	} else if !os.IsNotExist(err) {
+		return fmt.Errorf("checking %s: %w", rulesDir, err)
+	}
+
+	dep := scaffold.Starter(subs)
 	if recommended {
-		out = scaffold.Recommended(subs)
+		dep = scaffold.Recommended(subs)
 	}
-	if _, err := config.Parse(out); err != nil {
-		return fmt.Errorf("generated config did not validate (a bug): %w", err)
-	}
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+	if err := os.MkdirAll(rulesDir, 0o700); err != nil {
 		return err
 	}
-	// 0600: the config will hold subscription URLs and, once fetched, node creds.
-	return os.WriteFile(path, out, 0o600)
+	// 0600: the document will hold subscription URLs and, once fetched, node creds.
+	docPath := filepath.Join(dir, "configuration.yaml")
+	if err := os.WriteFile(docPath, dep.Document, 0o600); err != nil {
+		return err
+	}
+	for name, body := range dep.Rules {
+		if err := os.WriteFile(filepath.Join(rulesDir, name), body, 0o600); err != nil {
+			return err
+		}
+	}
+	// Validated by LOADING what is now on disk, through the one reader — not a scratch
+	// copy of it, because the bytes on disk are what the service will read, and a
+	// scaffold validated somewhere else is a scaffold that can still be broken.
+	//
+	// A failure removes it again: an -init that leaves a directory the service will
+	// refuse to start from is worse than one that wrote nothing.
+	if _, err := config.LoadV2(docPath, rulesDir, ""); err != nil {
+		os.Remove(docPath)
+		os.RemoveAll(rulesDir)
+		return fmt.Errorf("the generated deployment does not load, so it was not kept (this is a bug): %w", err)
+	}
+	return nil
 }
 
 // hostlistFetchTimeout bounds the one-off fetch of domain packs that have no file yet,
@@ -77,9 +114,13 @@ const startFailureGrace = 30 * time.Second
 
 func main() {
 	var (
-		configPath = flag.String("config", "", "path to the lotsman client config (required unless -run-v2)")
-		runV2      = flag.String("run-v2", "",
-			"run on a v2 configuration.yaml (or its directory) instead of -config; the same loader the router daemon uses")
+		configPath   = flag.String("config", "", "the deployment: its directory, or the configuration.yaml inside it (required)")
+		configSource = flag.String("config-source", "",
+			"a user-writable deployment to copy -config FROM before loading. The GUI writes that at first run; "+
+				"the service then reads only the materialized -config, so a deployment has one reader rather than two. "+
+				"Empty = read -config directly")
+		rulesV2 = flag.String("rules-dir", "",
+			"where the per-rule files live (\"\" = the rules/ directory beside configuration.yaml)")
 		ruleSetRepo = flag.String("ruleset-repo", rulesets.DefaultRepo,
 			"fallback rule-set bundle repo for a v1 document, which declares no data sources; a v2 document's data_sources win over this")
 		ruleSetPin     = flag.String("ruleset-pin", "", "fallback rule-set release tag (empty = track latest)")
@@ -160,7 +201,8 @@ func main() {
 			log.Error("init failed", "err", err)
 			os.Exit(1)
 		}
-		log.Info("wrote starter config", "path", *configPath, "next", "edit it, then run without -init")
+		log.Info("wrote starter deployment", "document", *configPath,
+			"next", "add your subscription, then run without -init")
 		return
 	}
 
@@ -171,9 +213,30 @@ func main() {
 		*baselineFile = *singboxCfg + ".baseline"
 	}
 
-	if *configPath == "" && *runV2 == "" {
-		log.Error("missing required -config (or -run-v2 for a v2 document)")
+	if *configPath == "" {
+		log.Error("missing required -config (the deployment directory, or its configuration.yaml)")
 		os.Exit(2)
+	}
+
+	// A deployment can have a SOURCE the operator writes as their own user and a
+	// TARGET this service reads as root. When -config-source is set, materialize
+	// before loading anything, so there is exactly ONE configuration this process
+	// ever reads: the target. A second reader over the source would be the two
+	// sources of truth this project has already been bitten by twice — a flag
+	// disagreeing with the config, then a document disagreeing with a flag.
+	//
+	// Materialize refuses a source that does not load, which is the point: copying a
+	// broken document over a working one is a downgrade that would otherwise surface
+	// only at the NEXT service start, as a tunnel that does not come up.
+	if *configSource != "" {
+		m, err := config.Materialize(*configSource, *configPath, *storeV2)
+		if err != nil {
+			log.Error("could not materialize the configuration source", "source", *configSource,
+				"target", *configPath, "err", err)
+			os.Exit(1)
+		}
+		log.Info("configuration materialized", "source", m.Source, "target", *configPath,
+			"rules", m.Rules)
 	}
 	// Default the rule-set cache to a per-user location so a first run provisions
 	// itself instead of pointing at the router's /etc/sing-box.
@@ -198,20 +261,17 @@ func main() {
 		*controlSock = filepath.Join(base, "lotsman", "control.sock")
 	}
 
-	// The document decides its own schema from its `version` field: one -config, and
-	// the file cannot be handed to a binary that reads it as the other schema. Both
-	// roots go through the same loader (config.LoadAny), so the CLI, the router daemon
-	// and this client cannot disagree about what a configuration is.
+	// Both roots go through the same loader (config.Load), so the CLI, the router
+	// daemon and this client cannot disagree about what a configuration is. It
+	// resolves the deployment directory and returns both the runtime shape and the
+	// SOURCE document, because `data_sources` says where content comes from and the
+	// fetcher is its only consumer.
 	var v2Document *configv2.Configuration
 	load := func() (*config.Config, error) {
-		path := *configPath
-		if path == "" {
-			path = *runV2
-		}
-		cfg, v2doc, gaps, err := config.LoadAnyDocument(path, "", *storeV2)
+		cfg, v2doc, gaps, err := config.Load(*configPath, *rulesV2, *storeV2)
 		v2Document = v2doc
 		for _, gap := range gaps {
-			log.Warn("v2: not carried into the runtime, running at a default instead", "gap", gap)
+			log.Warn("not carried into the runtime, running at a default instead", "gap", gap)
 		}
 		return cfg, err
 	}
@@ -235,6 +295,8 @@ func main() {
 	box := externalbox.New(*singboxBin, *singboxCfg, log)
 	c := core.New(conf, box, core.Options{
 		ClashListen:        *clashListen,
+		ConfigPath:         config.DeployDir(*configPath),
+		ConfigSource:       *configSource,
 		Interval:           *interval,
 		KBFile:             *kbFile,
 		KBDir:              *kbDir,
@@ -313,7 +375,7 @@ func main() {
 	// down (Core.Stop) BEFORE we replace the process — no orphaned sing-box/nfqws.
 	var applyRestart atomic.Bool
 	restart := func() { applyRestart.Store(true); cancel() }
-	ctl := core.NewControlServer(c, cancel, log).WithConfig(*configPath, restart)
+	ctl := core.NewControlServer(c, cancel, log).WithConfig(*configPath, *rulesV2, *storeV2, restart)
 	if *controlGroup != "" {
 		ctl = ctl.WithSocketGroup(*controlGroup)
 	}

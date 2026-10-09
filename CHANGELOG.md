@@ -6,6 +6,215 @@ older sections carry working dates rather than release dates.
 
 ## [Unreleased] — v7.1
 
+### One configuration schema, and the eleven defects it was hiding
+
+- **The v1 parser and the `LoadAny` version-dispatcher are gone.** There is ONE schema now.
+  `pkg/config` is a projection plus the migration path, not a schema: `Load(path, rulesDir, storeDir)`
+  accepts a deployment DIRECTORY or the `configuration.yaml` in it and is the single reader shared by
+  the CLI, the router daemon and the desktop client. `version: 2` is required, and a document WITHOUT
+  `version:` is v1 and is refused with a pointer to `lotsmanctl v2-migrate` — because silently reading a
+  v1 file as v2 would drop `zapret`, `dns` and the preset without a word, and the deployment would start
+  up and route nothing. `LegacyDocument` survives only as `MigrateToV2`'s input; nothing loads a v1
+  document to RUN it.
+- **Eight declared gaps in v2 closed**: split-DNS with **three** resolver roles (`final`, `direct`, and
+  `zapret` — traffic that reaches nfqws reached it *without* a tunnel, so resolving those names through
+  a VPN-detoured resolver routes the probe path into the thing it is meant to bypass) plus separate
+  `failover` and `direct_failover` lists, which fail for different reasons; `fakeip` moved inside `dns`;
+  `hostlists` as its own section; `strategies`; `multiplex`; `utls_fingerprint`; `subscription_via_pool`;
+  and `desync.override`.
+- **`Gaps` stopped being a package-level `var`.** It is `GapsFor(cfg)`, computed from the document. A
+  fixed list lies the moment any one gap becomes declarable — which is exactly how `dns` kept being
+  advertised as unsupported for weeks after it shipped.
+- **Hostlists now feed the desync engine.** A v2 list resolves to a sing-box rule-set, which produces no
+  file nfqws will read, so `match.domain_lists` resolving only against `lists` meant the composer handed
+  nfqws an EMPTY hostlist while status reported the strategy applied. A name now resolves against either
+  section — one namespace to the author — and a name neither declares is an error, not an empty match.
+- **`desync.override` is a mode, and says what it costs.** It runs ONE upstream bundle verbatim for every
+  rule because decomposition is lossy: ALT12's profiles carry *different* hostlists, so per-rule
+  composition gives every profile the same one, the second cannot match, and the recipe is refused as
+  self-obstruction. When it is set, per-rule `{instance, strategy}` is not resolved at all — the runtime
+  ignores it, so asking for one is a load error rather than a silent no-op.
+- **`configv2` became strict.** It did not reject unknown keys at first, a regression against v1. The
+  symptom is exact: a typo passes validation, the feature it gated is silently off, and the editor then
+  deletes the line on save.
+- **Config apply is stage-then-swap**, and a request that omits `rules` no longer means "delete every
+  rule". The candidate is materialised in a scratch directory and loaded by the *same* reader the service
+  starts with — validation that disagrees with startup is worse than no validation. Absent `rules` means
+  "leave the rules alone" and an explicit `[]` means "delete them", so the client's field is
+  `json.RawMessage`: a slice cannot tell those apart after a round-trip.
+- **`POST /service/{name}/enabled` edits that rule's own file** and preserves comments and layout,
+  because a structured save may legitimately rewrite a file but a dashboard toggle must not expand every
+  zero the operator never wrote.
+- **A desync instance's queue is derived from its alphabetical position**, not a field: a queue that
+  changed because a map iterated differently would move an installed instance's traffic to another queue
+  unasked. It refuses queue 0 — which is how the live cutover found the value left at zero and the daemon
+  refusing to start.
+- **`-init` writes a real deployment and verifies what landed on disk**, deleting what it wrote if that
+  fails to load, and refuses a non-empty `rules/`. The starter is the only config a new user gets; one
+  that writes a document the loader rejects produces an install that looks complete and starts nothing.
+- **`examples/` is two tested deployments** (`minimal/` 2 rules, `router/` 9). `r5s.yaml` and
+  `r5s-production.yaml` are marked **v1 migration fixtures, not templates**.
+
+The eleven defects this was built on top of — found by running things, not by reading them:
+
+- **Migration dropped `zapret.preset`.** On the live config that is catastrophic and silent: the migration
+  would succeed, composition would engage, `flowseal-alt12-google` would be refused as self-obstruction,
+  and YouTube would lose its recipe with not one word in the report. Now carried into `desync.override`
+  with a warning that per-rule learning is off.
+- **Migration dropped `dns`, `fakeip`, `multiplex`, `strategies`, `devices`, `utls_fingerprint` and
+  `subscription_via_pool`** — the converter knew only what the first draft of v2 knew, and a converted
+  document that LOADS is exactly what makes such a loss invisible.
+- **Migration dropped an implied probe target.** A rule with no target cannot be checked, has no volume
+  measured, and cannot tell working from frozen.
+- **Migration created a desync instance with no capture ports** — an nft rule matching nothing, i.e. a
+  desync engine that is silently absent while every status read reports healthy. That is the same failure
+  the v1→v2 projection produced on the live cutover.
+- **Migration put hostlists in `lists.domains`**, which routes correctly and desyncs nothing.
+- **`lotsmanctl generate` never emitted the declared DNS.** It produced configs with no `dns` block, so
+  `sing-box check` approved a deployment whose resolvers the service would never use. A check that proves
+  something other than what it claims to check is the same failure class as the stale tests this project
+  keeps catching. The mapping moved to `pkg/config.DNSOptions` and both roots now share it.
+- **In override mode the loader demanded the per-rule pin the runtime ignores** — a migrated document
+  with a preset could not start at all.
+- **The "nothing left to steer" check was lost with the v1 parser**: v2 accepted a config where every
+  rule is off or bypassed, and started a box that routes nothing and reports healthy.
+- **`-rulesets-dir` was declared twice**, which made `lotsmand` die on startup with `flag redefined`.
+  Caught by running `-version`, not by reading the code.
+- **`client/mobile` was broken** — a separate Go module that `go build ./...` from the root never checked,
+  calling a `config.Parse` that no longer existed.
+- **`pkg/configv2/toggle.go` was missing entirely** while the API still promised a toggle.
+
+### Running the window, and the four defects only a running window shows
+
+The v2 cutover shipped saying "the frontend was not looked at". That is now closed:
+the window was built and run against a live service, driven through a browser and
+through the real Wails binary. Everything below was invisible to `go build`,
+`npm run build` and 230 passing tests.
+
+- **The documented build shell did not build the GUI.** `shell.nix` and the README
+  said `webkitgtk_4_1` with a plain `wails build`. Wails v2 looks for
+  `webkit2gtk-4.0` by default and nixpkgs has **removed** it — `webkitgtk_4_0` is a stub
+  that errors "has been removed, port to `libsoup_3`" — so the build died at pkg-config
+  with `No package 'webkit2gtk-4.0' found`. `scripts/build.sh` already passed
+  `-tags webkit2_41`; the shell and the README did not, so the one instruction a new
+  contributor follows is the one that fails. Both now pass and say the tag is required
+  and why.
+- **The config editor was broken on a DIRECTORY deployment.** `-config` accepts a
+  deployment directory and that is what the NixOS module now passes, but the control
+  server read the path as a file: `GET /config` answered 500, `read /etc/lotsman: is a
+  directory`. The editor was broken in precisely the shape the v2 schema and the
+  installer are built around. `WithConfig` now resolves the document, and derives the
+  rules directory from the RESOLVED path — handing `RulesDirFor` the directory puts
+  `rules/` one level too high, which is the second half of the same bug and was the
+  first fix's own failure.
+- **The window showed FIRST RUN on a configured machine, and offered to overwrite the
+  config.** `SetupState` answered from the window's own `~/.config/lotsman`, while the
+  service reads a root-owned copy under `/etc` — so with a healthy deployment running,
+  the window declared the machine unconfigured. The window now asks the SERVICE first
+  and trusts what it reports, falling back to its own directory only when there is no
+  service (the genuine first-run case) or when the service is too old to answer. `/status`
+  gained a `deployment` block for exactly this. The alternative was a config editor
+  that opens by asking whether you want to start over.
+- **Two smaller ones, both found by reading a screenshot.** My first CSS fix for the
+  first-run layout silently did nothing: `App.svelte` has no `<style>` block, so a
+  `replace('<style>', …)` matched nothing and I did not check — the layout was left to
+  the global `main` rule, which is a column, so a form meant to be centred sat hard
+  left. And `Rules.svelte` printed "3 доменов · 1 подстей" under a `n === 1` check,
+  on every rule row, which is the sort of small wrongness that makes an interface read
+  as machine-made. Both are fixed; the plural is a function with the teens handled.
+
+The first `.Rule` fix was also incomplete, and that is worth recording as its own
+lesson: a regex over `r.Rule`, `x.Rule` and `rule.Rule` left `item.Rule` in
+`Rules.svelte`'s rename and `r.Rule` in `RuleForm`'s strategy collector, both reached
+through a different local name. Rename silently stopped working and the strategy picker
+went empty. There is now a test asserting no component reads a PascalCase `.Rule` off a
+wire object — verified to fail when the defect is reintroduced, because a test that
+cannot fail is decoration.
+
+### Three defects of mine, found by reading and fixed by running
+
+These are the defects the v2 cutover left behind, listed in a handoff and fixed here.
+All three were found by reading code or by a mock, and all three would have shipped.
+
+- **A rule deleted in the editor was deleted in the DOCUMENT but not on disk.** `commit`
+  wrote the rules the candidate carried and never removed the files it dropped. The
+  loader reads a DIRECTORY, so the service kept steering the traffic the operator had
+  asked it to stop steering while the editor showed the rule as gone. It is the same
+  class `Materialize` got right in the same session — which is the point: the first
+  implementation of a rule-removal path is the one most likely to forget that a
+  directory is the unit of truth. Removal happens BEFORE the document lands, so a
+  failure leaves a superset (an unreferenced rule) rather than a document naming rules
+  that no longer exist. Files that are not plain `.yaml` names are left alone: a stray
+  file is a thing to notice, not to remove on the operator's behalf.
+- **The frontend read `r.Rule`; Go sends `rule`.** `configRule` tags the field
+  `json:"rule"`, so `/config` returned `rule`, and four Svelte components read
+  `r.Rule` and got `undefined` for every rule. The hand-written mock supplied `Rule:`,
+  so the build passed, `npm run dev` rendered a perfect configuration, and the defect
+  only existed against a real backend. A mock that lies about a contract turns a wiring
+  bug into a green CI run, so there is now a test that holds the mock to the shape Go
+  actually emits — read off the struct tags, including the detail that `configv2.Rule`
+  carries yaml tags but no json ones, so its INNER fields stay PascalCase and only the
+  wrapper key is lower-case.
+- **`Content-Type` set after `WriteHeader`** on two responses. After `WriteHeader` the
+  header is already flushed and the later `Set` is dropped silently, so `POST /config`
+  and the rule toggle arrived as `application/octet-stream` — a frontend treats that as
+  text, which presents as "the server is broken" rather than as "a header went out one
+  line too late".
+
+### First run in the window, and one reader for a deployment
+
+- **The window can now create the first configuration.** This closed a real deadlock
+  rather than a missing feature: every other screen edits the configuration THROUGH a
+  running service, and the service refuses to start without a valid deployment — so the
+  one thing a new user needs was the one thing the window could not produce. It now asks
+  whether a deployment exists BEFORE it asks `/status`, because on a fresh machine there
+  is no service and polling first rendered "сервис недоступен", a fault, over the normal
+  starting state. It offers the two decided sets (`Recommended` / `Minimal`) plus a
+  subscription, and writes the deployment **directly**, unprivileged, validated through
+  the loader the service will use, and refusing to overwrite an existing one.
+- **A desktop deployment has a SOURCE and a TARGET, and the window writes only the
+  source.** `~/.config/lotsman/` is what the operator edits; `/etc/lotsman/` is what the
+  service reads, materialized from it at start via the new `-config-source`. One reader,
+  one configuration: pointing the service straight at the user's directory would make a
+  user-writable file authoritative for a root process, and letting both read it is the
+  two-readers-of-one-file failure this project has already hit twice in other shapes (a
+  flag disagreeing with the config, a document disagreeing with a flag).
+- **`Materialize` refuses a source that does not load**, and validates through the same
+  `LoadV2` the service starts with. Copying a broken document over a working one is a
+  silent downgrade that would otherwise surface only at the next service start, as a
+  tunnel that does not come up.
+- **The whole tree is swapped, not written file by file.** Rules are staged and moved
+  into place, and both halves are restored if the second move fails — half new rules and
+  half old is a configuration from two different moments, and a loader that reads a
+  directory cannot tell. A rule deleted in the source is now deleted in the target; a
+  target that used to keep steering traffic the operator asked it to stop.
+- **Drift is reported, not inferred.** `/status` emits `config_source_drift` when the
+  source has moved on, and `config_source_missing` when it is gone entirely, both naming
+  the two paths. Both are recomputed on every status read rather than latched: a warning
+  that outlives its cause teaches the operator the banner lies.
+- **The NixOS module derives the flag**, because "the source does not exist yet" is a
+  first-run state the window resolves and the daemon must not treat as a fault — passing
+  it unconditionally would stop the service on exactly the machine that needs the window.
+- Verified end to end: a service started straight from the source and one started with
+  `-config-source` produce the **same** sing-box config apart from the per-install
+  Clash-API secret, which is random by design. That is the check that the target is a
+  derived copy rather than a second configuration.
+
+### What this cost, stated plainly
+
+- **The byte-for-byte comparison of a v1-generated and a v2-generated config of the live `r5s` file is
+  gone**, because with one schema there is no second side to compare against. It had found exactly two
+  real defects — an inverted `priority` and a hy2 node that had lost its obfs — and is replaced by
+  weaker tests: that migration carries, and that the example deployments generate and pass
+  `sing-box check`. Recorded in the code rather than quietly dropped.
+- **The GUI was not looked at.** The v2 rewrite changed `Config.svelte`, `RuleForm.svelte`,
+  `EnginesEdit.svelte`, `DnsEdit.svelte` and `Rules.svelte` substantially. They build and compile; nobody
+  has run the window and seen it.
+- **Windows and Android were not run**, only cross-compiled. `winws` has still never executed.
+- **`applied_migrations` is inert.** The gate is written and tested, but `SetRequiredMigrations` has no
+  production caller, so the check iterates an empty slice. A document missing a migration loads clean.
+
+
 ### A desync engine that never installed, and injected packets that looped
 
 - **A node's IPv6 address rendered inside the IPv4 `ip daddr` set** made `nft` refuse

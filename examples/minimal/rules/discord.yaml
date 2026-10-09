@@ -1,0 +1,20 @@
+id: discord
+name: Discord
+enabled: true
+
+match:
+  domain_lists: [discord]
+
+probe:
+  type: http
+  target: https://discord.com/api/v9/gateway
+
+chain:
+  - tier: preferred
+    desync: { instance: nfqws1-main, strategy: auto }
+  # The UDP-native pool: voice and QUIC want a node that carries UDP natively, and a
+  # TCP-only tunnel carries them badly enough to matter for a call.
+  - tier: fallback
+    vpn: { pool: vpn_url_test_udp }
+  - tier: emergency
+    vpn: { pool: emergency_pool }

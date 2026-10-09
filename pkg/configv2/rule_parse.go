@@ -6,13 +6,13 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
-
-	"gopkg.in/yaml.v3"
 )
 
 func ParseRule(data []byte) (*Rule, error) {
 	var rule Rule
-	if err := yaml.Unmarshal(data, &rule); err != nil {
+	// Strict for the same reason the document is: a misspelled key in a rule is
+	// indistinguishable from leaving it out, and the editor would then drop the line.
+	if err := strictUnmarshal(data, &rule); err != nil {
 		return nil, err
 	}
 	if err := rule.Validate(); err != nil {

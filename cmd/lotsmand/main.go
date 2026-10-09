@@ -158,6 +158,7 @@ func main() {
 		rulesetsBump       = flag.Bool("rulesets-autobump", true, "evaluate latest even when pinned; move the pin only if it validates")
 		rulesetsRatio      = flag.Float64("rulesets-min-ratio", 0.7, "shrink guard: reject a tag dropping below this fraction of its last good count (0 = off)")
 		rulesetsDir        = flag.String("rulesets-dir", "/etc/sing-box", "rule-set root holding rule-set-{geosite,geoip}/*.srs")
+		plainLists         = flag.String("plain-lists", "", "plain rule-set file; enables provider-backed lists without a converter binary")
 	)
 	// -version, because "which build is on the box?" had no answer that did not
 	// involve reading the log of a daemon that is already running. On the router
@@ -168,20 +169,18 @@ func main() {
 	showVersion := flag.Bool("version", false, "print the build identity and exit")
 	// Declared before Parse, like every other flag: registering afterwards is a
 	// silent "flag provided but not defined".
-	v2 := registerV2Flags(flag.CommandLine)
+	cfgFlags := registerConfigFlags(flag.CommandLine)
 	flag.Parse()
 	if *showVersion {
 		fmt.Println(version.String())
 		return
 	}
 
-	// A v2 config is validated and reported, and the process exits. It never starts
-	// the daemon: no socket, no queue, no engine, no rule installed. A preflight that
-	// had side effects would not be a preflight.
-	if *v2.config != "" {
-		// A preflight has side effects only if it lets the daemon run afterwards.
-		// Both outcomes exit: a valid config is a report, not a boot.
-		os.Exit(runV2Preflight(v2))
+	// A preflight validates and reports, and the process exits. It never starts the
+	// daemon: no socket, no queue, no engine, no rule installed. A preflight that had
+	// side effects would not be a preflight.
+	if *cfgFlags.preflight != "" {
+		os.Exit(runV2Preflight(*cfgFlags.preflight, "", *cfgFlags.store, *rulesetsDir, *plainLists))
 	}
 
 	log := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelInfo}))
@@ -196,42 +195,30 @@ func main() {
 	reg := registry.Builtin()
 	var conf *config.Config
 	var v2Config *configv2.Configuration
-	// The document decides its own schema from its `version` field, so there is one
-	// -config and no "which file is authoritative" question. -run-v2 stays as the
-	// explicit spelling of the same thing, and names the same loader.
-	configFile := *configPath
-	if configFile == "" {
-		configFile = *v2.run
-	}
-	if configFile != "" {
-		// The v2 document is PROJECTED onto the same Config the v1 parser produces,
+	if *configPath != "" {
+		// One schema, one reader. The document is PROJECTED onto the runtime Config,
 		// so everything below this line — Brain, Applier, the executors, the nft
-		// renderer, singbox.Generate — is untouched and unaware of which parser ran.
-		// That is the whole cutover: swapping the parser, not porting the data plane.
-		loaded, gaps, err := config.LoadAny(configFile, *v2.rules, *v2.store)
+		// renderer, singbox.Generate — reads it and is unaware of where it came from.
+		loaded, document, gaps, err := config.Load(*configPath, "", *cfgFlags.store)
 		if err != nil {
-			log.Error("config load failed", "path", configFile, "err", err)
+			log.Error("config load failed", "path", *configPath, "err", err)
 			os.Exit(1)
 		}
 		conf = loaded
 		reg = conf.Registry
-		// Remember the DOCUMENT, not just the projection: `data_sources` has no home
-		// in the runtime Config because it describes where content comes from, not what
-		// the data plane should do. The fetchers are the one consumer of it.
-		if v2Load, err := config.LoadV2(configFile, *v2.rules, *v2.store); err == nil {
-			v2Config = v2Load.Config
-		}
-		// Named, not swallowed: the projection leaves split-DNS, the uTLS fingerprint
-		// and the declared strategies at zero, and a daemon that starts and routes
-		// with all three defaulted looks exactly like one that was configured.
+		// Remember the DOCUMENT, not just the projection: `data_sources` has no home in
+		// the runtime Config because it describes where content comes from, not what the
+		// data plane should do. The fetchers are the one consumer of it.
+		v2Config = document
+		// Named, not swallowed: a document that omits split-DNS or the uTLS fingerprint
+		// leaves the runtime at a default, and a daemon that starts and routes that way
+		// looks exactly like one that was configured.
 		for _, gap := range gaps {
-			log.Warn("v2: not carried into the runtime, running at a default instead", "gap", gap)
+			log.Warn("not carried into the runtime, running at a default instead", "gap", gap)
 		}
-		log.Info("configuration loaded", "path", configFile,
+		log.Info("configuration loaded", "path", *configPath,
 			"services", len(reg.Services), "devices", len(conf.Devices),
 			"pools", len(conf.Pools.Pools), "target_singbox", conf.SingboxVersion)
-		conf = loaded
-		reg = conf.Registry
 		services := make([]registry.Service, 0, len(reg.Services))
 		for _, s := range reg.Services {
 			services = append(services, s)
@@ -1464,9 +1451,6 @@ func newReconciler(conf *config.Config, reg *registry.Registry, clash *dataplane
 	opts.UTLSFingerprint = conf.UTLSFingerprint
 	if conf.SingboxVersion != "" {
 		opts.TargetVersion = conf.SingboxVersion
-	}
-	if conf.FakeIP != nil {
-		opts.FakeIP = &singbox.FakeIPOptions{Inet4Range: conf.FakeIP.Inet4Range, Inet6Range: conf.FakeIP.Inet6Range, Resolver: conf.FakeIP.Resolver}
 	}
 	if conf.Multiplex != nil {
 		opts.Multiplex = &singbox.MultiplexOptions{Protocol: conf.Multiplex.Protocol, MaxConnections: conf.Multiplex.MaxConnections, MinStreams: conf.Multiplex.MinStreams, Padding: conf.Multiplex.Padding, BrutalUp: conf.Multiplex.BrutalUp, BrutalDown: conf.Multiplex.BrutalDown}

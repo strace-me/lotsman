@@ -172,6 +172,17 @@ nav button.active {
   border-bottom-color: var(--accent);
 }
 
+/* First run replaces the whole window, so it must opt out of the layout `main`
+   describes above: that rule is a COLUMN for the dashboard's panels, which is why a
+   first-run form placed inside it sits hard left. Centred, because a setup form at
+   the edge of a wide window reads as a broken page rather than a step. */
+main.firstrun {
+  flex-direction: row;
+  justify-content: center;
+  align-items: flex-start;
+  padding: 32px 24px;
+}
+
 main {
   padding: 18px;
   display: flex;

@@ -43,9 +43,15 @@ type Configuration struct {
 	Runtime           Runtime               `yaml:"runtime"`
 	DataSources       map[string]DataSource `yaml:"data_sources"`
 	Lists             Lists                 `yaml:"lists"`
+	Hostlists         []Hostlist            `yaml:"hostlists"`
 	Pools             map[string]Pool       `yaml:"pools"`
 	Devices           []Device              `yaml:"devices"`
 	Subscriptions     []Subscription        `yaml:"subscriptions"`
+	Strategies        []Strategy            `yaml:"strategies"`
+	DNS               *DNSSection           `yaml:"dns"`
+	Multiplex         *Multiplex            `yaml:"multiplex"`
+	UTLSFingerprint   string                `yaml:"utls_fingerprint"`
+	SubViaPool        string                `yaml:"subscription_via_pool"`
 }
 
 // Device is a per-LAN-client egress override: every source IP or CIDR listed
@@ -108,6 +114,10 @@ type Proxy struct {
 
 type Desync struct {
 	Instances map[string]Instance `yaml:"instances"`
+	// Override runs ONE upstream bundle verbatim for every rule, instead of composing
+	// a recipe per rule. It is a mode, not a shortcut: see configv2.Override for why
+	// taking such a bundle apart is lossy.
+	Override *Override `yaml:"override,omitempty"`
 }
 
 type Instance struct {
@@ -150,6 +160,18 @@ type Runtime struct {
 	WAN             string   `yaml:"wan"`
 	StateDir        string   `yaml:"state_dir"`
 	RuntimeDir      string   `yaml:"runtime_dir"`
+}
+
+// Multiplex enables a default `multiplex` block on TCP proxy outbounds
+// (vless/vmess/trojan/shadowsocks). Server-cooperative, so off by default.
+type Multiplex struct {
+	Enabled        bool   `yaml:"enabled"`
+	Protocol       string `yaml:"protocol"` // smux (default) | yamux | h2mux
+	MaxConnections int    `yaml:"max_connections"`
+	MinStreams     int    `yaml:"min_streams"`
+	Padding        bool   `yaml:"padding"`
+	BrutalUp       int    `yaml:"brutal_up_mbps"`
+	BrutalDown     int    `yaml:"brutal_down_mbps"`
 }
 
 // DataSource is where a named list's CONTENT comes from.

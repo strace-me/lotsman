@@ -1,0 +1,33 @@
+id: gaming-epic
+name: gaming-epic
+enabled: true
+match:
+    domains:
+        - epicgames.com
+        - unrealengine.com
+        - fortnite.com
+        - rocketleague.com
+        - psyonix.com
+        - helpshift.com
+        - easy.ac
+probe:
+    type: http
+    target: https://www.epicgames.com/
+behavior:
+    sticky: true
+    profile: gaming
+chain:
+    - tier: preferred
+      desync:
+        instance: nfqws1-main
+        strategy: auto
+    - tier: preferred
+      desync:
+        instance: nfqws1-main
+        strategy: auto
+    - tier: fallback
+      vpn:
+        pool: vpn_url_test
+    - tier: emergency
+      vpn:
+        pool: emergency_pool

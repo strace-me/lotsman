@@ -8,6 +8,7 @@ import (
 
 	"github.com/strace-me/lotsman/pkg/aggregate"
 	"github.com/strace-me/lotsman/pkg/config"
+	"github.com/strace-me/lotsman/pkg/configv2"
 	"github.com/strace-me/lotsman/pkg/subscription"
 )
 
@@ -29,7 +30,7 @@ const hostlistRefresh = time.Hour
 // Every failure is logged and swallowed: a dead mirror must not stop the tunnel coming
 // up, and the config will simply carry whatever else the service declares.
 func EnsureDomainLists(ctx context.Context, conf *config.Config, timeout time.Duration, log *slog.Logger) (rebuilt bool) {
-	var missing []config.Hostlist
+	var missing []configv2.ResolvedHostlist
 	for _, hl := range conf.Hostlists {
 		if _, err := os.Stat(hl.Out); err != nil {
 			missing = append(missing, hl)
@@ -87,7 +88,7 @@ func (c *Core) refreshHostlists(ctx context.Context, timeout time.Duration) {
 	}
 }
 
-func specOf(hl config.Hostlist) aggregate.RebuildSpec {
+func specOf(hl configv2.ResolvedHostlist) aggregate.RebuildSpec {
 	return aggregate.RebuildSpec{
 		Name: hl.Name, Out: hl.Out, Sources: hl.Sources,
 		Exclude: hl.Exclude, Domains: hl.Domains, MinKeepRatio: hl.MinKeepRatio,

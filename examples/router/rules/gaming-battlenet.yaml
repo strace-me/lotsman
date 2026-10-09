@@ -1,0 +1,30 @@
+id: gaming-battlenet
+name: gaming-battlenet
+enabled: true
+match:
+    domains:
+        - battle.net
+        - blizzard.com
+        - bnetcdn.com
+        - battlenet.com
+probe:
+    type: http
+    target: https://www.battle.net/
+behavior:
+    sticky: true
+    profile: gaming
+chain:
+    - tier: preferred
+      desync:
+        instance: nfqws1-main
+        strategy: auto
+    - tier: preferred
+      desync:
+        instance: nfqws1-main
+        strategy: auto
+    - tier: fallback
+      vpn:
+        pool: vpn_url_test
+    - tier: emergency
+      vpn:
+        pool: emergency_pool

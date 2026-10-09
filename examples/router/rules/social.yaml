@@ -1,0 +1,27 @@
+id: social
+name: social
+enabled: true
+match:
+    domains:
+        - instagram.com
+        - cdninstagram.com
+        - facebook.com
+        - fbcdn.net
+        - reddit.com
+        - redd.it
+        - redditstatic.com
+        - redditmedia.com
+        - pinterest.com
+        - pinimg.com
+probe:
+    type: http
+    target: https://www.instagram.com/
+behavior:
+    profile: general
+chain:
+    - tier: fallback
+      vpn:
+        pool: vpn_url_test
+    - tier: emergency
+      vpn:
+        pool: emergency_pool

@@ -12,7 +12,7 @@ import (
 	"github.com/strace-me/lotsman/pkg/aggregate"
 
 	"github.com/strace-me/lotsman/pkg/brain"
-	"github.com/strace-me/lotsman/pkg/config"
+	"github.com/strace-me/lotsman/pkg/configv2"
 	"github.com/strace-me/lotsman/pkg/dataplane"
 	"github.com/strace-me/lotsman/pkg/executor"
 	"github.com/strace-me/lotsman/pkg/registry"
@@ -63,8 +63,8 @@ type zapretExec struct {
 	files   string         // zapret payload dir, for resolving .bin references
 	// presets are upstream bundles run verbatim instead of composing per rule
 	// (empty = compose). Several means the lane tries them WHOLE and only one that
-	// carried moves live traffic. See config.ZapretPreset for what the mode costs.
-	presets   []config.ZapretPreset
+	// carried moves live traffic. See configv2.ResolvedOverride for what the mode costs.
+	presets   []configv2.ResolvedOverride
 	hostlists string                    // dir for per-service hostlist files ("" = inline the domains)
 	active    func() []registry.Service // services CURRENTLY on a zapret rung
 	resolve   zaptune.Resolver
@@ -304,7 +304,7 @@ func (z *zapretExec) applyPresetLocked(ctx context.Context, active []registry.Se
 // Falls back to the first declared preset, which is also the only sane cold start:
 // with nothing proven yet, catalogue order is the operator's own ordering of the
 // files.
-func (z *zapretExec) presetFor(active []registry.Service) config.ZapretPreset {
+func (z *zapretExec) presetFor(active []registry.Service) configv2.ResolvedOverride {
 	for _, svc := range active {
 		want := z.pinned[svc.Name]
 		if want == "" {
@@ -320,13 +320,13 @@ func (z *zapretExec) presetFor(active []registry.Service) config.ZapretPreset {
 }
 
 // presetByName returns a declared bundle by its upstream name.
-func (z *zapretExec) presetByName(name string) (config.ZapretPreset, bool) {
+func (z *zapretExec) presetByName(name string) (configv2.ResolvedOverride, bool) {
 	for _, p := range z.presets {
 		if p.Name == name {
 			return p, true
 		}
 	}
-	return config.ZapretPreset{}, false
+	return configv2.ResolvedOverride{}, false
 }
 
 // pinFor reports the strategy currently pinned for a service, if any.

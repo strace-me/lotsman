@@ -1,0 +1,27 @@
+id: dev
+name: dev
+enabled: true
+match:
+    domains:
+        - github.com
+        - githubusercontent.com
+        - githubassets.com
+        - ghcr.io
+        - github.io
+        - adobe.com
+        - adobe.io
+        - adobelogin.com
+        - creativecloud.adobe.com
+        - adobestatic.com
+probe:
+    type: http
+    target: https://github.com/
+behavior:
+    profile: general
+chain:
+    - tier: fallback
+      vpn:
+        pool: vpn_url_test
+    - tier: emergency
+      vpn:
+        pool: emergency_pool

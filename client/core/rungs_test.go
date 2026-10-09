@@ -5,7 +5,6 @@ import (
 	"log/slog"
 	"testing"
 
-	"github.com/strace-me/lotsman/pkg/config"
 	"github.com/strace-me/lotsman/pkg/executor"
 	"github.com/strace-me/lotsman/pkg/strategy"
 )
@@ -16,16 +15,7 @@ import (
 // laptop's state for the first seconds after a resume — and the zapret rung then stayed
 // gone until the process restarted, which it never does.
 func TestDroppedRungsReturnWhenTheirExecutorDoes(t *testing.T) {
-	conf, err := config.Parse([]byte(`
-services:
-  - name: youtube
-    category: streaming
-    probe_target: https://x
-    domains: [youtube.com]
-`))
-	if err != nil {
-		t.Fatal(err)
-	}
+	conf := testConfig(t, withDesyncInstance, map[string]string{"youtube.yaml": oneRule})
 	c := &Core{
 		conf: conf, reg: conf.Registry, log: slog.New(slog.DiscardHandler),
 		pristineChains: snapshotChains(conf.Registry),

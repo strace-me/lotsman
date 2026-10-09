@@ -47,6 +47,32 @@ let
   payloadDir = "/var/lib/lotsman-payloads";
   storePayloads = "${pkgs.zapret}/usr/share/zapret/files/fake";
   user = "alice"; # the desktop user whose unprivileged GUI/tray drives the service
+
+  # Where the GUI writes a FIRST deployment, and where the service reads from.
+  #
+  # The window is unprivileged by design, so it cannot write /etc — and it must not
+  # need to. It writes a user-owned deployment here, and the service materializes that
+  # into the root-owned path it actually reads. One reader, not two: pointing the
+  # service straight at this directory would make a user-writable file authoritative
+  # for a root process, and the two paths drifting apart is a failure this project has
+  # already been bitten by in two other shapes (a flag disagreeing with the config, a
+  # document disagreeing with a flag).
+  #
+  # Materialization REFUSES a source that does not load, so a broken configuration
+  # written in the window cannot take the working one down with it.
+  configSource = "/home/alice/.config/lotsman";
+  configTarget = "/etc/lotsman";
+  # Empty until the user deployment exists. It is derived HERE rather than by the
+  # service, because "the source does not exist yet" is a first-run state the window
+  # resolves and the daemon must not treat as a fault.
+  configSourceArg =
+    # Parenthesised: Nix binds function application tighter than `+`, so without
+    # these this is `(builtins.pathExists configSource) + "/configuration.yaml"` —
+    # coercing the Boolean pathExists returned into a string, and failing with
+    # "cannot coerce a Boolean to a string". Parse-checked, evaluation-checked.
+    if builtins.pathExists (configSource + "/configuration.yaml")
+    then "-config-source " + configSource
+    else "";
 in
 {
   # The privilege seam: the service runs as root, the GUI does not. A 0660 socket owned
@@ -92,7 +118,12 @@ in
       ExecStartPre = "${pkgs.coreutils}/bin/cp -ru ${storePayloads}/. ${payloadDir}/";
       ExecStart = lib.concatStringsSep " " [
         bin
-        "-config /etc/lotsman/client.yaml"
+        "-config ${configTarget}"
+        # ${configSourceArg} is empty until the window has written a deployment there.
+        # Passing the flag unconditionally would stop the service on a machine that
+        # has not been through first run — exactly the machine that needs the window
+        # to be able to start.
+        "${configSourceArg}"
         "-singbox-bin ${pkgs.sing-box}/bin/sing-box"
         "-nfqws-bin ${pkgs.zapret}/bin/nfqws"
         "-zapret-files ${payloadDir}"

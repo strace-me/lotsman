@@ -86,7 +86,13 @@ func SetEventSink(s EventSink) {
 // autonomy loop. filesDir is the app-private directory (Context.getFilesDir);
 // EVERY path derives from it, because os.TempDir() (/data/local/tmp) and
 // os.UserCacheDir() (/sdcard) are both unwritable on Android.
-func Start(configYAML string, filesDir string) (err error) {
+// Start brings up the mobile core. configDir is a DEPLOYMENT — the directory holding
+// configuration.yaml and rules/ — not a YAML string, because a deployment is those two
+// as a unit: the rules live one file each so that editing one does not reformat the
+// others, and a caller that can only hand over a single blob cannot express that.
+//
+// filesDir is where the app may write; nothing outside it is writable on Android.
+func Start(configDir string, filesDir string) (err error) {
 	defer recoverErr("Start", &err)
 	mu.Lock()
 	defer mu.Unlock()
@@ -131,17 +137,21 @@ func Start(configYAML string, filesDir string) (err error) {
 		return fmt.Errorf("mobile: libbox setup: %w", setupErr)
 	}
 
-	conf, err := config.Parse([]byte(configYAML))
-	if err != nil {
-		return fmt.Errorf("mobile: parse config: %w", err)
+	load := func() (*config.Config, error) {
+		cfg, _, _, err := config.Load(configDir, "", "")
+		return cfg, err
 	}
-	// A service's domain_lists are merged into its domains at PARSE time, so a pack
-	// whose file is missing is absent for the whole run. Fetch the missing ones and
-	// re-parse before anything consumes the config. (The Out paths in the config must
-	// themselves be under filesDir; nothing else on Android is writable.)
+	conf, err := load()
+	if err != nil {
+		return fmt.Errorf("mobile: load config: %w", err)
+	}
+	// A rule's domain_lists are merged into its domains at PARSE time, so a pack whose
+	// file is missing is absent for the whole run. Fetch the missing ones and reload
+	// before anything consumes the config. (The Out paths in the config must themselves
+	// be under filesDir; nothing else on Android is writable.)
 	if core.EnsureDomainLists(context.Background(), conf, hostlistFetchTimeout, logger) {
-		if conf, err = config.Parse([]byte(configYAML)); err != nil {
-			return fmt.Errorf("mobile: re-parse after fetching domain lists: %w", err)
+		if conf, err = load(); err != nil {
+			return fmt.Errorf("mobile: reload after fetching domain lists: %w", err)
 		}
 	}
 

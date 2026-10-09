@@ -1,8 +1,8 @@
 <script>
-  // Structured editor for doc.Subscriptions. Mutates the shared doc in place and
+  // Structured editor for cfg.Subscriptions. Mutates the shared doc in place and
   // calls touch() so the container recomputes "dirty" (Svelte won't see a nested
   // mutation otherwise).
-  export let doc
+  export let cfg
   export let touch = () => {}
   export let backend = null
 
@@ -14,11 +14,11 @@
   let busy = ''
 
   function add() {
-    ;(doc.Subscriptions ||= []).push({ Name: '', URL: '', Format: 'auto', Tags: ['normal'], Enabled: true, Expires: '' })
+    ;(cfg.Subscriptions ||= []).push({ Name: '', URL: '', Format: 'auto', Tags: ['normal'], Enabled: true, Expires: '' })
     touch()
   }
   function remove(i) {
-    doc.Subscriptions.splice(i, 1)
+    cfg.Subscriptions.splice(i, 1)
     touch()
   }
 
@@ -54,9 +54,9 @@
   <div class="sub-err">{result['*'].err}</div>
 {/if}
 
-{#if doc.Subscriptions && doc.Subscriptions.length}
+{#if cfg.Subscriptions && cfg.Subscriptions.length}
   <div class="cfg-list">
-    {#each doc.Subscriptions as s, i (i)}
+    {#each cfg.Subscriptions as s, i (i)}
       <div class="cfg-item">
         <label>Имя<input bind:value={s.Name} on:input={touch} placeholder="demo-vless" /></label>
         <label class="grow">URL<input bind:value={s.URL} on:input={touch} placeholder="https://…/sub" /></label>

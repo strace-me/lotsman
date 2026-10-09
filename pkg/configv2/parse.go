@@ -1,7 +1,10 @@
 package configv2
 
 import (
+	"bytes"
+	"errors"
 	"fmt"
+	"io"
 	"os"
 	"sort"
 	"strings"
@@ -22,7 +25,7 @@ func Load(path string) (*Configuration, error) {
 
 func Parse(data []byte) (*Configuration, error) {
 	var cfg Configuration
-	if err := yaml.Unmarshal(data, &cfg); err != nil {
+	if err := strictUnmarshal(data, &cfg); err != nil {
 		return nil, err
 	}
 	if err := cfg.Validate(); err != nil {
@@ -30,6 +33,26 @@ func Parse(data []byte) (*Configuration, error) {
 	}
 	cfg.ApplyDefaults()
 	return &cfg, nil
+}
+
+// strictUnmarshal decodes YAML and REJECTS keys the schema does not know.
+//
+// Without this a misspelled key ("subscriptions" for "subscription", "domain_lists"
+// for "domain_list") is indistinguishable from leaving it out: the config validates,
+// the feature is silently off, and the operator is left debugging why a setting they
+// can see in the file does nothing. Worse, the editor round-trips through a typed
+// struct, which serialises only known fields — so saving from the app would then
+// DELETE the misspelled line from their file.
+func strictUnmarshal(data []byte, into any) error {
+	dec := yaml.NewDecoder(bytes.NewReader(data))
+	dec.KnownFields(true)
+	if err := dec.Decode(into); err != nil {
+		if errors.Is(err, io.EOF) {
+			return nil // an empty document is a valid, empty configuration
+		}
+		return err
+	}
+	return nil
 }
 
 func (c *Configuration) ApplyDefaults() {
@@ -141,6 +164,17 @@ func SetRequiredMigrations(ids ...string) { requiredMigrations = ids }
 
 // RequiredMigrations reports what this build needs, for the preflight to print.
 func RequiredMigrations() []string { return requiredMigrations }
+
+// hostlistNames indexes the declared hostlists. A rule's match.domain_lists resolves
+// against it as well as against lists.domains, so the two are one namespace to the
+// author and the loader has to agree.
+func (c *Configuration) hostlistNames() map[string]bool {
+	out := make(map[string]bool, len(c.Hostlists))
+	for _, h := range c.Hostlists {
+		out[h.Name] = true
+	}
+	return out
+}
 
 func (c *Configuration) Validate() error {
 	applied := map[string]bool{}
@@ -294,6 +328,18 @@ func (c *Configuration) Validate() error {
 		if pool.Type == "" {
 			return fmt.Errorf("pool %q has no type", name)
 		}
+	}
+	// The sections that carry their own resolution rules are resolved HERE so a bad
+	// one is named at load, by the code that knows the rule, instead of surfacing as
+	// a default nobody chose somewhere downstream.
+	if _, err := BuildDNS(c.DNS); err != nil {
+		return err
+	}
+	if _, err := BuildHostlists(c.Hostlists); err != nil {
+		return err
+	}
+	if _, err := BuildStrategies(c.Strategies); err != nil {
+		return err
 	}
 	return nil
 }

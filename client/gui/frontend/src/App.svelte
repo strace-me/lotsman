@@ -6,7 +6,8 @@
   import Rules from './lib/Rules.svelte'
   import Advanced from './lib/Advanced.svelte'
   import Config from './lib/Config.svelte'
-  import { mock } from './lib/mock.js'
+  import Setup from './lib/Setup.svelte'
+  import { mock, mockSetup } from './lib/mock.js'
 
   let report = null
   let events = []
@@ -31,6 +32,11 @@
   let error = ''
   let tab = 'dashboard'
   let timer
+  // Whether this machine has a configuration at all. Asked once, before the first
+  // poll, because the answer decides which screen renders — and on a fresh install
+  // there is no service, so `report` stays null and every other screen would show
+  // nothing useful.
+  let setup = null
 
   // Wails injects window.go.main.App at runtime. In a plain `vite dev` browser it
   // is absent, so fall back to mock data — the skeleton still renders + designs.
@@ -47,6 +53,22 @@
   async function load() {
     try {
       if (backend) {
+        // The configuration question comes FIRST and separately. A fresh machine has
+        // no service, so asking /status first would paint "сервис недоступен" — a
+        // fault — over what is actually the normal starting state.
+        if (!setup && backend.SetupState) {
+          try {
+            setup = await backend.SetupState()
+          } catch (e) {
+            /* a backend without SetupState (an older window against a newer service)
+               simply never enters first-run; it falls through to the old behaviour */
+          }
+        }
+        if (setup && !setup.configured) {
+          // No deployment exists. There is nothing to poll for, and polling anyway
+          // would fill the error slot with a dial failure every two seconds.
+          return
+        }
         report = await backend.Status()
         events = await backend.Events(30, '')
       } else {
@@ -58,6 +80,26 @@
     } catch (e) {
       error = String(e && e.message ? e.message : e)
     }
+  }
+
+  // A machine with a configuration and a dead service is BROKEN, and must not be
+  // shown first-run — that would invite overwriting a working config with a fresh one.
+  //
+  // In a plain browser there is no backend at all, so the mock supplies the answer.
+  // `?fresh=1` makes it unconfigured, which is the screen nobody looks at until it
+  // ships and then everybody does.
+  $: if (!backend && !setup) setup = mockSetup()
+  $: firstRun = !!(setup && !setup.configured)
+
+  // ?tab=rules opens a tab directly. The mock exists so the UI can be worked on in a
+  // plain browser, and the tab being edited is the one you cannot otherwise reach
+  // without clicking through a header — which is enough friction that people end up
+  // designing the dashboard and shipping an unchecked rules editor. Read once: this is
+  // a deep link, not a live control.
+  const TAB_IDS = ['dashboard', 'rules', 'nodes', 'config', 'advanced']
+  if (typeof window !== 'undefined') {
+    const q = new URLSearchParams(window.location.search).get('tab')
+    if (q && TAB_IDS.includes(q)) tab = q
   }
 
   async function recheck(name) {
@@ -169,6 +211,13 @@
   ]
 </script>
 
+{#if firstRun}
+  <!-- Whole window, not a tab. Every other screen edits the configuration THROUGH a
+       running service, so on a fresh machine there is nothing for them to do. -->
+  <main class="firstrun">
+    <Setup {backend} sourcePath={setup && setup.source_path} legacy={!!(setup && setup.legacy)} />
+  </main>
+{:else}
 <div class="app">
   <header>
     <div class="brand">
@@ -235,7 +284,7 @@
       <div class="banner red">Сервис недоступен — {error}</div>
     {/if}
     {#if tab === 'config'}
-      <Config {backend} drifted={report && report.domain_lists_drifted} />
+      <Config {backend} drifted={report && report.domain_lists_drifted} onBack={() => (tab = 'dashboard')} />
     {:else if tab === 'rules'}
       <Rules {backend} {report} />
     {:else if report}
@@ -249,3 +298,4 @@
     {/if}
   </main>
 </div>
+{/if}

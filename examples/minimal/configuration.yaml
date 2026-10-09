@@ -1,0 +1,65 @@
+# Lotsman — the MINIMAL deployment: one document, two rules, nothing declared that is
+# already built in.
+#
+# Placeholders throughout. A real deployment lives on the machine and is not committed.
+# Subscription URLs here will fail to fetch — which is fine, and is what makes this file
+# usable as a config-path smoke test.
+#
+# Three pools are BUILT IN and do not need declaring: vpn_url_test, vpn_url_test_udp and
+# emergency_pool. A rule's ladder below names them and they resolve. Declare a `pools:`
+# entry only to override one — to keep volume traffic off a saturated exit, or to keep
+# RF-blocked services away from RU exits.
+version: 2
+
+desync:
+  instances:
+    # An instance is a process + its own NFQUEUE + the ports it captures. The ports are
+    # NOT optional: an instance with none installs an nft rule that matches nothing, so
+    # the desync engine is silently absent while every status read reports it applied.
+    # The queue number is derived from the instance's order, so adding one cannot
+    # collide with a number picked by hand.
+    nfqws1-main:
+      engine: nfqws1
+      enabled: true
+      capture:
+        tcp: [80, 443]
+        udp: [443]
+
+data_sources:
+  # Where the rule-sets below come from. Without a source a named list has nowhere to
+  # resolve from, and the rule names nothing.
+  runetfreedom:
+    type: v2ray-srs
+    repo: runetfreedom/russia-v2ray-rules-dat
+    refresh: 6h
+
+lists:
+  domains:
+    youtube: { source: runetfreedom, dataset: geosite, category: youtube }
+    discord: { source: runetfreedom, dataset: geosite, category: discord }
+
+subscriptions:
+  - { name: example-main,      url: "https://example.invalid/sub",       format: auto, tags: [normal],          enabled: true }
+  - { name: example-emergency, url: "https://example.invalid/whitelist", format: clash, tags: [emergency, slow], enabled: true }
+
+hostlists:
+  # A merged domain list, rebuilt on the maintenance loop. Each one fetches its sources,
+  # drops anything on an exclude source, merges in your own entries, dedups, and writes
+  # the result atomically to `out` — the file the desync engine reads. The shrink guard
+  # refuses a rebuild that collapses below the fraction of the last good list, because a
+  # mirror answering 200 with an empty body is not a failure anyone would notice, and the
+  # symptom is a service that quietly stops being desynced.
+  - name: blocked
+    out: /opt/zapret-lotsman/lists/blocked.txt
+    sources:
+      - https://example.invalid/antifilter-domains.txt
+      - https://example.invalid/community-list.txt
+    exclude:
+      - https://example.invalid/local-whitelist.txt
+    min_keep_ratio: 0.5
+
+# A merged list is NOT the same as a `lists.domains` entry, and the difference is the
+# consumer. A list becomes a sing-box rule-set, which the router matches against. A
+# hostlist becomes a plain text file the desync engine re-reads on mtime — so membership
+# changes without restarting the engine, which would drop the desync on every live
+# connection. A rule can name either, from the same field; the document decides which.

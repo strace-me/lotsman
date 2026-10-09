@@ -11,56 +11,73 @@
   import { onMount } from 'svelte'
   import { mockConfig } from './mock.js'
   import RuleForm from './RuleForm.svelte'
+  import { pluralList, pluralDomain, pluralCidr } from './format.js'
 
   export let backend = null
   // Live state per rule, from /status — so a line can say what the rule is doing
   // right now, not merely how it is configured.
   export let report = null
 
-  let doc = null
+  // A rule is a FILE. The document holds the deployment; the rules hold what it steers.
+  // So this tab holds a list of {file, yaml, Rule} and sends all of them back — absent
+  // would mean "leave the rules alone", which is never what this tab means.
+  let cfg = null
+  let rules = []
   let original = ''
   let path = ''
+  let rulesDir = ''
   let busy = ''
   let message = ''
   let messageKind = ''
   let openIdx = -1
 
   const errStr = (e) => String(e && e.message ? e.message : e)
-  const touch = () => (doc = doc)
-  $: dirty = doc && JSON.stringify(doc) !== original
+  const touch = () => (rules = rules)
+  const snapshot = () => JSON.stringify([cfg || null, rules.map((r) => [r.file, r.rule || null])])
+  $: dirty = snapshot() !== original
 
   // The order the rules are MATCHED in: priority first (lower earlier, negatives
-  // ahead of all), then NAME. Not file order — this was wrong here until the owner
-  // asked what the order was: the config is read into a map, file position does not
-  // survive it, and the generator has always tie-broken by name. A list claiming an
-  // order the engine does not use is worse than an unordered one.
-  $: ordered = (doc?.Services || [])
-    .map((s, i) => ({ s, i }))
+  // ahead of all), then ID. Not file order — the loader reads a directory and sorts,
+  // file position does not survive it, and the generator has always tie-broken by
+  // name. A list claiming an order the engine does not use is worse than an unordered
+  // one. The runtime's service name IS the rule id, which is why /status keys on it.
+  $: ordered = rules
+    .map((r, i) => ({ r, i, rule: r.rule }))
+    .filter((x) => x.rule)
     .sort(
       (a, b) =>
-        (a.s.Priority || 0) - (b.s.Priority || 0) ||
-        String(a.s.Name || '').localeCompare(String(b.s.Name || ''))
+        (a.rule.Priority || 0) - (b.rule.Priority || 0) ||
+        String(a.rule.ID || '').localeCompare(String(b.rule.ID || ''))
     )
 
   $: live = Object.fromEntries(((report && report.services) || []).map((r) => [r.service, r]))
   $: disabled = new Set(((report && report.disabled) || []))
 
-  // The ladder in one glance: zapret → vpn. This is the thing you scan the list
-  // for, and it is not derivable from the rule's name.
-  const ladder = (s) =>
-    (s.Chain || []).map((st) => st.Class || st.State || '?').join(' → ') || 'по категории'
+  // The ladder in one glance: desync → vpn. This is the thing you scan the list for,
+  // and it is not derivable from the rule's name. The step carries an ACTION, not a
+  // class, so the label is read off whichever of the three is present.
+  const stepLabel = (step) => {
+    const a = step && step.Action
+    if (!a) return '?'
+    if (a.Direct) return 'direct'
+    if (a.Desync) return 'desync'
+    if (a.VPN) return 'vpn'
+    return '?'
+  }
+  const ladder = (r) => (r.Chain || []).map(stepLabel).join(' → ') || 'пусто'
 
-  // Rule-sets count too. Without them the two rules that are defined ENTIRELY by
-  // rule-sets — ru-direct and the web-blocked catch-all — read as «ничего не
-  // выбрано», i.e. as broken, when they are the two that match the most traffic.
-  const scope = (s) => {
-    const n = (s.Domains || []).length + (s.DomainLists || []).length
-    const ips = (s.IPs || []).length
-    const sets = (s.RuleSets || []).length
+  // Named lists count too. Without them the two rules that are defined ENTIRELY by
+  // lists — ru-direct and the web-blocked catch-all — read as «ничего не выбрано»,
+  // i.e. as broken, when they are the two that match the most traffic.
+  const scope = (r) => {
+    const m = r.Match || {}
+    const lists = (m.DomainLists || []).length + (m.IPLists || []).length
+    const n = (m.Domains || []).length
+    const ips = (m.CIDRs || []).length
     const bits = []
-    if (sets) bits.push(`${sets} ${sets === 1 ? 'набор' : 'наборов'}`)
-    if (n) bits.push(`${n} доменов`)
-    if (ips) bits.push(`${ips} подсетей`)
+    if (lists) bits.push(pluralList(lists))
+    if (n) bits.push(pluralDomain(n))
+    if (ips) bits.push(pluralCidr(ips))
     return bits.join(' · ') || 'ничего не выбрано'
   }
 
@@ -69,11 +86,13 @@
     try {
       const d = backend ? await backend.Config() : mockConfig()
       path = d.path
-      doc = d.doc || null
-      original = doc ? JSON.stringify(doc) : ''
-      if (!doc) {
+      rulesDir = d.rules_dir || ''
+      cfg = d.config || null
+      rules = d.rules || []
+      original = snapshot()
+      if (!cfg) {
         messageKind = 'err'
-        message = 'Конфигурация не разбирается структурно — почини её на вкладке «Конфигурация», в режиме YAML.'
+        message = 'Документ не разбирается структурно — почини его на вкладке «Конфигурация», в режиме YAML.'
       }
     } catch (e) {
       messageKind = 'err'
@@ -91,8 +110,8 @@
     }
     busy = 'save'
     try {
-      await backend.SaveConfig(doc)
-      original = JSON.stringify(doc)
+      await backend.SaveConfig(cfg, JSON.stringify(rules.map((r) => ({ file: r.file, rule: r.rule || null }))))
+      original = snapshot()
       messageKind = 'ok'
       message = 'Сохранено, применяется…'
     } catch (e) {
@@ -102,15 +121,52 @@
     busy = ''
   }
 
+  // The file name IS the id, so a new rule gets one derived from the id and the two
+  // cannot drift — a deployment is readable by listing the directory.
+  const slug = (s) =>
+    (s || '')
+      .toLowerCase()
+      .replace(/[^a-z0-9]+/g, '-')
+      .replace(/^-|-$/g, '')
+
   function add() {
-    ;(doc.Services ||= []).push({ Name: '', Category: 'generic', ProbeTarget: '', Domains: [] })
-    openIdx = doc.Services.length - 1
+    let id = 'new-rule'
+    for (let i = 2; rules.some((r) => r.file === id + '.yaml'); i++) id = 'new-rule-' + i
+    rules.push({
+      file: id + '.yaml',
+      yaml: '',
+      Rule: {
+        ID: id,
+        Name: 'Новое правило',
+        Enabled: true,
+        Priority: 0,
+        Match: { Domains: [], DomainLists: [], IPLists: [], CIDRs: [] },
+        Probe: { Type: 'http', Target: '' },
+        Behavior: {},
+        Chain: [{ Tier: 'fallback', Action: { VPN: { Pool: 'vpn_url_test' } } }],
+      },
+    })
+    openIdx = rules.length - 1
     touch()
   }
   function remove(i) {
-    if (!confirm(`Удалить правило «${doc.Services[i].Name || 'без имени'}»?`)) return
-    doc.Services.splice(i, 1)
+    const r = rules[i]
+    if (!confirm(`Удалить правило «${(r.rule && (r.rule.Name || r.rule.ID)) || r.file}»?`)) return
+    rules.splice(i, 1)
     openIdx = -1
+    touch()
+  }
+  // Renaming the id renames the file, because the loader refuses a file whose name is
+  // not its rule's id — a rename that left the file behind would stop the deployment
+  // loading at all, and the error would point at the file, not at the rename.
+  function renameId(oldFile, newId) {
+    const id = slug(newId)
+    if (!id || id + '.yaml' === oldFile) return
+    if (rules.some((r) => r.file === id + '.yaml')) return // taken; leave the field
+    const item = rules.find((r) => r.file === oldFile)
+    if (!item || !item.rule) return
+    item.rule.ID = id
+    item.file = id + '.yaml'
     touch()
   }
 
@@ -120,7 +176,7 @@
 <div class="row-head">
   <h2>Правила</h2>
   <div class="rules-actions">
-    <button class="fix" on:click={add} disabled={!doc}>+ Правило</button>
+    <button class="fix" on:click={add} disabled={!cfg}>+ Правило</button>
     <button class="cta" on:click={save} disabled={!dirty || busy !== ''}>Сохранить и применить</button>
     <button class="ghost" on:click={load} disabled={!dirty || busy !== ''}>Сбросить</button>
   </div>
@@ -141,23 +197,24 @@
   впереди всех), при равных — имя. «Приоритет» наш, а не sing-box: в его конфиг он не
   попадает, он лишь задаёт место правила в списке маршрутов. Одна оговорка: правила,
   совпадающие только по IP, идут после <i>всех</i> доменных, каким бы ни был приоритет.
-  <span class="dim">{path}</span>
+  <span class="dim">{path}{#if rulesDir} · {rulesDir}/{/if}</span>
 </div>
 
-{#if doc}
+{#if cfg}
   <div class="rules">
-    {#each ordered as { s, i } (i)}
-      {@const st = live[s.Name]}
+    {#each ordered as { r, rule, i } (r.file)}
+      {@const st = live[rule.ID]}
       <div class="rule" class:open={openIdx === i}>
         <button class="rule-line" on:click={() => (openIdx = openIdx === i ? -1 : i)}>
           <span class="caret">{openIdx === i ? '▾' : '▸'}</span>
-          <span class="rule-name">{s.Name || 'без имени'}</span>
-          <span class="rule-ladder">{ladder(s)}</span>
-          <span class="rule-scope">{scope(s)}</span>
+          <span class="rule-name">{rule.Name || rule.ID || 'без имени'}</span>
+          <span class="rule-ladder">{ladder(rule)}</span>
+          <span class="rule-scope">{scope(rule)}</span>
           <!-- What it is doing right now, next to how it is configured. The two
                disagree more often than anyone expects, and that is worth seeing. -->
           <span class="rule-live">
-            {#if disabled.has(s.Name)}<span class="dim">выключено</span>
+            {#if rule.Bypass}<span class="dim">в обход</span>
+            {:else if !rule.Enabled}<span class="dim">выключено</span>
             {:else if st}
               <span class:red={st.broken} class:amber={!st.broken && st.fails > 0} class:ok={!st.broken && !st.fails}>
                 {st.broken ? 'цепочка исчерпана' : st.fails ? `подбор · ${st.fails}` : st.state}
@@ -167,7 +224,7 @@
         </button>
         {#if openIdx === i}
           <div class="rule-body">
-            <RuleForm rule={s} {doc} {touch} />
+            <RuleForm {rule} {cfg} {rules} {touch} {renameId} file={r.file} />
             <button class="danger rule-del" on:click={() => remove(i)}>Удалить правило</button>
           </div>
         {/if}

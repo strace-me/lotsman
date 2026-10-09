@@ -4,6 +4,7 @@ import (
 	"testing"
 
 	"github.com/strace-me/lotsman/pkg/config"
+	"github.com/strace-me/lotsman/pkg/configv2"
 )
 
 func TestNextFailoverProviderWraps(t *testing.T) {
@@ -26,8 +27,8 @@ func TestNextFailoverProviderWraps(t *testing.T) {
 }
 
 func TestCurrentFinalProviderReadsTheFinalServer(t *testing.T) {
-	d := &config.DNS{
-		Servers: []config.DNSServer{
+	d := &configv2.DNS{
+		Servers: []configv2.DNSServer{
 			{Name: "remote", Provider: "quad9"},
 			{Name: "lan", Provider: ""},
 		},
@@ -62,7 +63,7 @@ func TestRotateDNSFailoverCanBePutBackAfterAFailedApply(t *testing.T) {
 	if got := currentFinalProvider(c.conf.DNS); got != "cloudflare" {
 		t.Errorf("after a failed apply the config must read %q again, got %q", "cloudflare", got)
 	}
-	var final config.DNSServer
+	var final configv2.DNSServer
 	for _, s := range c.conf.DNS.Servers {
 		if s.Name == c.conf.DNS.Final {
 			final = s
@@ -76,22 +77,17 @@ func TestRotateDNSFailoverCanBePutBackAfterAFailedApply(t *testing.T) {
 // LOT-83: the Direct resolver may be a manual pinned endpoint (an office DNS).
 // The rotation must REPLACE it with a provider — endpoint and transport together.
 func TestRotateDNSDirectFailoverReplacesManualDirect(t *testing.T) {
-	conf, err := config.Parse([]byte(`
-subscriptions:
-  - { name: s, url: "https://e/x", format: auto, enabled: true }
-services:
-  - { name: yt, category: streaming, probe_target: https://x }
-dns:
-  servers:
-    - { name: office, type: udp, address: 192.168.10.30, detour: direct }
-    - { name: remote, provider: cloudflare, method: tls, detour: vpn }
-  final: remote
-  direct: office
-  direct_failover: [cloudflare, quad9]
-`))
+	d, err := configv2.BuildDNS(&configv2.DNSSection{
+		Servers: []configv2.DNSSectionServer{
+			{Name: "office", Type: "udp", Address: "192.168.10.30", Detour: "direct"},
+			{Name: "remote", Provider: "cloudflare", Method: "tls", Detour: "vpn"},
+		},
+		Final: "remote", Direct: "office", DirectFailover: []string{"cloudflare", "quad9"},
+	})
 	if err != nil {
 		t.Fatal(err)
 	}
+	conf := &config.Config{DNS: d}
 	c := &Core{conf: conf}
 	if got := currentDirectProvider(c.conf.DNS); got != "" {
 		t.Fatalf("a manual direct has no provider, got %q", got)
@@ -103,7 +99,7 @@ dns:
 	if from != "" || to != "cloudflare" || got == nil {
 		t.Fatalf("first rotation should be manual->cloudflare, got %q->%q (conf nil=%v)", from, to, got == nil)
 	}
-	var direct config.DNSServer
+	var direct configv2.DNSServer
 	for _, s := range c.conf.DNS.Servers {
 		if s.Name == "office" {
 			direct = s
@@ -119,8 +115,8 @@ dns:
 }
 
 func TestCurrentDirectProviderReadsTheDirectServer(t *testing.T) {
-	d := &config.DNS{
-		Servers: []config.DNSServer{
+	d := &configv2.DNS{
+		Servers: []configv2.DNSServer{
 			{Name: "direct-pub", Provider: "quad9"},
 			{Name: "remote", Provider: "cloudflare"},
 		},
@@ -133,48 +129,21 @@ func TestCurrentDirectProviderReadsTheDirectServer(t *testing.T) {
 
 func dnsFailoverConf(t *testing.T) *config.Config {
 	t.Helper()
-	conf, err := config.Parse([]byte(`
-subscriptions:
-  - { name: s, url: "https://e/x", format: auto, enabled: true }
-services:
-  - { name: yt, category: streaming, probe_target: https://x }
-dns:
-  servers:
-    - { name: remote, provider: cloudflare, method: tls, detour: vpn }
-    - { name: lan, type: local }
-  final: remote
-  direct: lan
-  failover: [cloudflare, quad9, mullvad]
-`))
+	d, err := configv2.BuildDNS(&configv2.DNSSection{
+		Servers: []configv2.DNSSectionServer{
+			{Name: "remote", Provider: "cloudflare", Method: "tls", Detour: "vpn"},
+			{Name: "lan", Type: "local"},
+		},
+		Final: "remote", Direct: "lan", Failover: []string{"cloudflare", "quad9", "mullvad"},
+	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	return conf
+	return &config.Config{DNS: d}
 }
 
 func TestRotateDNSFailoverAdvancesAndRepointsEndpoint(t *testing.T) {
-	d, err := config.ParseDocument([]byte(`
-subscriptions:
-  - { name: s, url: "https://e/x", format: auto, enabled: true }
-services:
-  - { name: yt, category: streaming, probe_target: https://x }
-dns:
-  servers:
-    - { name: remote, provider: cloudflare, method: tls, detour: vpn }
-    - { name: lan, type: local }
-  final: remote
-  direct: lan
-  failover: [cloudflare, quad9, mullvad]
-`))
-	if err != nil {
-		t.Fatal(err)
-	}
-	y, _ := d.YAML()
-	conf, err := config.Parse(y)
-	if err != nil {
-		t.Fatal(err)
-	}
-	c := &Core{conf: conf}
+	c := &Core{conf: dnsFailoverConf(t)}
 
 	from, to, got, err := c.rotateDNSFailover()
 	if err != nil {
@@ -184,7 +153,7 @@ dns:
 		t.Fatalf("first rotation should be cloudflare->quad9, got %q->%q (conf nil=%v)", from, to, got == nil)
 	}
 	// The Final server's endpoint must now be quad9's.
-	var final config.DNSServer
+	var final configv2.DNSServer
 	for _, s := range c.conf.DNS.Servers {
 		if s.Name == "remote" {
 			final = s

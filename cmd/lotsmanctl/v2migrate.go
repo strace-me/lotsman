@@ -47,7 +47,7 @@ func runV2Migrate(args []string) int {
 		fmt.Fprintf(os.Stderr, "v2-migrate: %v\n", err)
 		return 1
 	}
-	doc, err := config.ParseDocument(data)
+	doc, err := config.ParseLegacyDocument(data)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "v2-migrate: %v\n", err)
 		return 1
@@ -97,9 +97,15 @@ func runV2Migrate(args []string) int {
 			fmt.Printf("  - %s\n", w)
 		}
 	}
-	fmt.Printf("\ncompare before trusting it:\n"+
-		"  lotsmanctl generate -config %s        -rule-set-dir DIR -out /tmp/v1.json\n"+
-		"  lotsmanctl generate -config-v2 %s -rule-set-dir DIR -out /tmp/v2.json\n"+
-		"  diff /tmp/v1.json /tmp/v2.json\n", *configPath, *outDir)
+	// The advice used to be "generate from both and diff", and that is no longer
+	// possible: there is one schema, so the v1 side cannot be generated at all. Printing
+	// an instruction that cannot work is worse than printing nothing — the reader either
+	// follows it and stops, or learns to distrust the lines under it.
+	//
+	// What IS available is a preflight, which fetches the lists the document names and
+	// checks references and coherence against the REAL bundle store.
+	fmt.Printf("\nvalidate the result before starting on it:\n"+
+		"  lotsmand -preflight %s\n"+
+		"  lotsmand -config %s -dry-run=1\n", *outDir, *outDir)
 	return 0
 }

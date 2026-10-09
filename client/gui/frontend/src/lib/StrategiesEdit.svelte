@@ -1,19 +1,19 @@
 <script>
-  // Structured editor for doc.Strategies — custom desync recipes added on top of the
+  // Structured editor for cfg.Strategies — custom desync recipes added on top of the
   // builtin catalog. This is the nfqws engine's user-facing knob: the brain picks
   // among catalog + these by what the KB has learned works. Args are edited one per
   // line rather than as a single string, so an arg containing spaces stays one arg.
-  export let doc
+  export let cfg
   export let touch = () => {}
 
   const classes = ['zapret', 'byedpi', 'vpn', 'direct', 'emergency']
 
   function add() {
-    ;(doc.Strategies ||= []).push({ ID: '', Class: 'zapret', NFQWSArgs: [], BlockTypes: [], Notes: '' })
+    ;(cfg.Strategies ||= []).push({ ID: '', Class: 'zapret', NFQWSArgs: [], BlockTypes: [], Notes: '' })
     touch()
   }
   function remove(i) {
-    doc.Strategies.splice(i, 1)
+    cfg.Strategies.splice(i, 1)
     touch()
   }
   const argsText = (s) => (s.NFQWSArgs || []).join('\n')
@@ -37,9 +37,9 @@
   вручную назначать не нужно.
 </div>
 
-{#if doc.Strategies && doc.Strategies.length}
+{#if cfg.Strategies && cfg.Strategies.length}
   <div class="cfg-list">
-    {#each doc.Strategies as s, i (i)}
+    {#each cfg.Strategies as s, i (i)}
       <div class="cfg-item col">
         <div class="cfg-fields">
           <label>ID<input bind:value={s.ID} on:input={touch} placeholder="my-split-tls" /></label>

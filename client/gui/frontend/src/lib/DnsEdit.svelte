@@ -1,9 +1,16 @@
 <script>
-  // Structured editor for doc.DNS — the split-DNS block. Each server is either a
-  // curated provider (pick provider + method) or a manual endpoint (type + address).
-  // final/direct pick a declared server; failover lists the providers the remote
-  // resolver rotates through. Mutates the shared doc in place; touch() re-marks dirty.
-  export let doc
+  // Structured editor for the dns section — the split-DNS block. Each server is either
+  // a curated provider (pick provider + method) or a manual endpoint (type + address).
+  //
+  // There are THREE resolver roles, and the third is the one that was missing: `zapret`
+  // answers for desync-class rules, which leave the box DIRECT and therefore cannot
+  // reach a resolver that lives behind the tunnel. Without it a desync rung on a
+  // network whose LAN DNS is unreachable cannot resolve its target at all — the rule
+  // is down because of a NAME LOOKUP, and every status read says the strategy is
+  // applied. `direct_failover` is the matching repair: it rotates the direct resolver
+  // onto a public provider, so an office DNS pinned in the config stops being the only
+  // thing that can answer.
+  export let cfg
   export let touch = () => {}
 
   // The catalog + valid transports are package-private in pkg/config, so mirror them
@@ -14,12 +21,13 @@
   const strategies = ['prefer_ipv4', 'prefer_ipv6', 'ipv4_only', 'ipv6_only']
   const detours = ['vpn', 'direct']
 
-  // doc.DNS is null when the config has no dns block; init it before editing.
+  // The section is absent when the document has none; init it before editing.
   function ensure() {
-    doc.DNS ||= { Servers: [], Direct: '', Final: '', Strategy: '', FakeIP: false, Failover: [] }
-    doc.DNS.Servers ||= []
-    doc.DNS.Failover ||= []
-    return doc.DNS
+    cfg.DNS ||= { Servers: [], Direct: '', Zapret: '', Final: '', Strategy: '', FakeIP: false, Failover: [], DirectFailover: [] }
+    cfg.DNS.Servers ||= []
+    cfg.DNS.Failover ||= []
+    cfg.DNS.DirectFailover ||= []
+    return cfg.DNS
   }
 
   function addServer() {
@@ -27,19 +35,19 @@
     touch()
   }
   function removeServer(i) {
-    doc.DNS.Servers.splice(i, 1)
+    cfg.DNS.Servers.splice(i, 1)
     touch()
   }
-  function addFailover() {
-    ensure().Failover.push('cloudflare')
+  function addFailover(field) {
+    ensure()[field].push('cloudflare')
     touch()
   }
-  function removeFailover(i) {
-    doc.DNS.Failover.splice(i, 1)
+  function removeFailover(field, i) {
+    cfg.DNS[field].splice(i, 1)
     touch()
   }
 
-  $: dns = doc.DNS
+  $: dns = cfg.DNS
   $: names = (dns && dns.Servers ? dns.Servers : []).map((s) => s.Name).filter(Boolean)
 </script>
 
@@ -123,6 +131,13 @@
       </select>
     </label>
     <label
+      >zapret (десинк-рунги)
+      <select bind:value={dns.Zapret} on:change={touch}>
+        <option value="">—</option>
+        {#each names as n}<option value={n}>{n}</option>{/each}
+      </select>
+    </label>
+    <label
       >strategy
       <select bind:value={dns.Strategy} on:change={touch}>
         <option value="">prefer_ipv4</option>
@@ -133,11 +148,12 @@
   </div>
 
   <div class="row-head dns-fo-head">
-    <h3>Failover</h3>
-    <button class="fix" on:click={addFailover}>+ Провайдер</button>
+    <h3>Failover: final</h3>
+    <button class="fix" on:click={() => addFailover('Failover')}>+ Провайдер</button>
   </div>
   <div class="muted dns-hint">
-    Порядок провайдеров, на которые перекатывается final-резолвер, когда активный перестаёт отвечать. Требует, чтобы final был провайдерным.
+    Порядок провайдеров, на которые перекатывается final-резолвер, когда активный перестаёт отвечать. Требует, чтобы
+    final был провайдерным.
   </div>
   {#if dns.Failover && dns.Failover.length}
     <div class="cfg-list">
@@ -147,7 +163,30 @@
           <select bind:value={dns.Failover[i]} on:change={touch}>
             {#each providers as p}<option value={p}>{p}</option>{/each}
           </select>
-          <button class="del" on:click={() => removeFailover(i)} title="Удалить">✕</button>
+          <button class="del" on:click={() => removeFailover('Failover', i)} title="Удалить">✕</button>
+        </div>
+      {/each}
+    </div>
+  {/if}
+
+  <div class="row-head dns-fo-head">
+    <h3>Failover: direct</h3>
+    <button class="fix" on:click={() => addFailover('DirectFailover')}>+ Провайдер</button>
+  </div>
+  <div class="muted dns-hint">
+    То же для direct-резолвера. Первый переход заменяет его целиком — адрес И транспорт, — поэтому
+    прописанный вручную офисный DNS перестаёт быть единственным, кто умеет ответить, и direct-рунги
+    перестают зависеть от одной сети. Требует, чтобы direct был объявлен.
+  </div>
+  {#if dns.DirectFailover && dns.DirectFailover.length}
+    <div class="cfg-list">
+      {#each dns.DirectFailover as _, i (i)}
+        <div class="cfg-fields dns-fo-row">
+          <span class="dns-fo-ord">{i + 1}.</span>
+          <select bind:value={dns.DirectFailover[i]} on:change={touch}>
+            {#each providers as p}<option value={p}>{p}</option>{/each}
+          </select>
+          <button class="del" on:click={() => removeFailover('DirectFailover', i)} title="Удалить">✕</button>
         </div>
       {/each}
     </div>

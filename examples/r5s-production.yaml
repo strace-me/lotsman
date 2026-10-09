@@ -1,3 +1,14 @@
+# VERSION 1 — NOT A TEMPLATE.
+#
+# This file is kept because it is what `lotsmanctl v2-migrate` is TESTED against: the
+# migration audit runs on this exact document, because a fixture would not contain the
+# shapes that actually differ (two VPN rungs in one tier, an unpinned desync rung, a
+# catch-all next to a negative-priority sibling).
+#
+# For a deployment to copy, use `examples/router/`. To convert this one:
+#
+#   lotsmanctl v2-migrate -config <this file> -out /etc/lotsman
+#
 # The ACTUAL production config from the NanoPi R5S, copied 2026-08-03 after 30 days of
 # uptime with no escalations and no failed services. Kept alongside the annotated
 # examples/r5s.yaml (which stays the teaching one, and carries a hostlists demo this

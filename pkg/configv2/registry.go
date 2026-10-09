@@ -26,6 +26,21 @@ const listTagPrefix = "list:"
 // BuildRegistry converts v2 rules into registry services.
 func BuildRegistry(cfg *Configuration, rules []Rule, domains, ips map[string]listValues) (*registry.Registry, error) {
 	reg := &registry.Registry{Services: map[string]registry.Service{}}
+	// A nil configuration is a legal input: a caller projecting bare rules, with no
+	// lists and no hostlists to resolve against. It is not a document a service would
+	// load, but refusing to build a registry from one is a nil check masquerading as a
+	// validation, and the panic it replaces said nothing useful either.
+	var packs []ResolvedHostlist
+	if cfg != nil {
+		var err error
+		if packs, err = BuildHostlists(cfg.Hostlists); err != nil {
+			return nil, err
+		}
+	}
+	byName := make(map[string]ResolvedHostlist, len(packs))
+	for _, h := range packs {
+		byName[h.Name] = h
+	}
 	for _, rule := range rules {
 		// Neither a disabled nor a bypassed rule reaches the runtime. They are
 		// different facts and are carried separately for that reason — `enabled` is a
@@ -36,41 +51,67 @@ func BuildRegistry(cfg *Configuration, rules []Rule, domains, ips map[string]lis
 		if !rule.Enabled || rule.Bypass {
 			continue
 		}
-		service, err := buildService(cfg, rule, domains, ips)
+		service, err := buildService(cfg, rule, byName, domains, ips)
 		if err != nil {
 			return nil, err
 		}
 		reg.Services[rule.ID] = *service
+	}
+
+	// A deployment with nothing left to steer is refused BY NAME, the way v1 refused it.
+	//
+	// It is not a consumer guard — nothing downstream needs a non-empty registry, and
+	// adding one per consumer is how a feature gets disabled behind a green dashboard.
+	// It is a statement about the DOCUMENT: every rule declared, every rule switched
+	// off, is a different intent from "this machine has nothing to do", and the second
+	// one should be expressed by stopping the service. Starting anyway would produce a
+	// box that answers, routes nothing, and reports healthy — a working system quietly
+	// carrying nothing, which is the failure this project has an axiom about.
+	if len(reg.Services) == 0 && len(rules) > 0 {
+		return nil, fmt.Errorf("every one of the %d declared rules is disabled or bypassed — "+
+			"nothing left to steer; switch one on, or stop the service instead", len(rules))
 	}
 	return reg, nil
 }
 
 type listValues []string
 
-func buildService(cfg *Configuration, rule Rule, domains, ips map[string]listValues) (*registry.Service, error) {
+func buildService(cfg *Configuration, rule Rule, packs map[string]ResolvedHostlist, domains, ips map[string]listValues) (*registry.Service, error) {
 	service := &registry.Service{
 		Name:     rule.ID,
 		Priority: rule.Priority,
 		Domains:  append([]string{}, rule.Match.Domains...),
 		IPs:      append([]string{}, rule.Match.CIDRs...),
 	}
-	// A named list resolves to a sing-box rule-set TAG, and the tag is what the
-	// generator keys on: `geosite-x` means rule-set-geosite/x.srs, `geoip-x` means
-	// rule-set-geoip/x.srs.
+	// A named domain list resolves EITHER to a sing-box rule-set tag, which is what
+	// the generator keys on (`geosite-x` means rule-set-geosite/x.srs), OR to a
+	// hostlist, whose domains are merged INLINE into this rule.
 	//
-	// Namespacing the list name instead ("list:domain/x") was the first
-	// implementation here and it is wrong. The generator maps a tag to a PATH BY ITS
-	// PREFIX and deliberately skips anything unrecognised, so a namespaced name
-	// yields a routing rule pointing at a rule-set nothing defines: the config
-	// passes `sing-box check` (which resolves rule-sets lazily, on first match) and
-	// matches nothing at run time, so every listed rule falls through silently.
-	// Comparing a v1-generated config against a v2-generated one byte for byte is
-	// what made that visible — no test would have.
+	// Both exist because they feed different consumers, and a rule needs both at once.
+	// sing-box matches rule-sets; nfqws reads a plain text file. A rule whose domains
+	// live only in a rule-set routes correctly and DESYNCS NOTHING — the composer hands
+	// nfqws a hostlist built from Service.Domains, which would be empty, and the
+	// symptom is a service that looks healthy and is not being desynced at all.
 	//
-	// Resolving through the list's DATASET is also what keeps names apart: a domain
-	// list "ru-blocked" and an ip list "ru-blocked" become geosite-ru-blocked and
-	// geoip-ru-blocked — two different files, not one name used twice.
+	// Which one a NAME means is decided by what the document declares, never guessed:
+	// a name is a list or a hostlist, and the document says which. A name that is
+	// neither is refused.
+	seen := make(map[string]bool, len(service.Domains))
+	for _, d := range service.Domains {
+		seen[strings.ToLower(d)] = true
+	}
 	for _, name := range rule.Match.DomainLists {
+		if pack, isPack := packs[name]; isPack {
+			for _, d := range MergePack(pack) {
+				d = strings.TrimPrefix(strings.ToLower(d), "*.")
+				if d == "" || seen[d] {
+					continue
+				}
+				seen[d] = true
+				service.Domains = append(service.Domains, d)
+			}
+			continue
+		}
 		tag, err := resolveList(cfg, name, "geosite")
 		if err != nil {
 			return nil, fmt.Errorf("rule %q: %w", rule.ID, err)

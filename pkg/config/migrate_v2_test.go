@@ -3,6 +3,8 @@ package config
 import (
 	"strings"
 	"testing"
+
+	"github.com/strace-me/lotsman/pkg/configv2"
 )
 
 const v1Sample = `
@@ -42,7 +44,7 @@ hostlists:
 
 func migrate(t *testing.T) *V2Migration {
 	t.Helper()
-	doc, err := ParseDocument([]byte(v1Sample))
+	doc, err := ParseLegacyDocument([]byte(v1Sample))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -67,8 +69,24 @@ func TestMigrateToV2(t *testing.T) {
 	if list := m.Configuration.Lists.Domains["youtube"]; list.Source != "runetfreedom" || list.Category != "youtube" {
 		t.Errorf("rule_set became %#v", list)
 	}
-	if list := m.Configuration.Lists.Domains["my-list"]; len(list.Files) != 1 || len(list.URLs) != 1 || list.Domains[0] != "manual.example" {
-		t.Errorf("hostlist became %#v", list)
+	// A hostlist carries into `hostlists`, not `lists.domains`. Filing it as a list
+	// produced a config that routed correctly and desynced NOTHING: the rule matched
+	// its rule-set, the composer handed nfqws an empty hostlist, and every status read
+	// said the strategy was applied.
+	var pack *configv2.Hostlist
+	for i := range m.Configuration.Hostlists {
+		if m.Configuration.Hostlists[i].Name == "my-list" {
+			pack = &m.Configuration.Hostlists[i]
+		}
+	}
+	if pack == nil {
+		t.Fatalf("the hostlist was dropped: %#v", m.Configuration.Hostlists)
+	}
+	if len(pack.Sources) != 1 || pack.Domains[0] != "manual.example" || pack.Out == "" {
+		t.Errorf("hostlist = %#v", pack)
+	}
+	if _, asList := m.Configuration.Lists.Domains["my-list"]; asList {
+		t.Error("the hostlist also became a rule-set, which gives two definitions of one membership")
 	}
 	if len(m.Rules) != 2 {
 		t.Fatalf("rules = %#v", m.Rules)
@@ -106,7 +124,7 @@ func TestMigrateDropsRuntimeOnlyState(t *testing.T) {
 }
 
 func TestMigrateKeepsRepeatedTiers(t *testing.T) {
-	doc, err := ParseDocument([]byte(`
+	doc, err := ParseLegacyDocument([]byte(`
 zapret:
   instances: [{ name: nfqws1-main }]
 services:
@@ -177,7 +195,7 @@ func TestMigrateMakesAnUnpinnedZapretRungAuto(t *testing.T) {
 	// v1 left strategy_id empty on ALT_ZAPRET rungs to mean "let the KB choose".
 	// v2 has to say that out loud: a rung that named nothing used to look pinned
 	// to whatever happened to be selected.
-	doc, err := ParseDocument([]byte(`
+	doc, err := ParseLegacyDocument([]byte(`
 zapret:
   instances: [{ name: nfqws1-main }]
 services:
@@ -221,7 +239,7 @@ func containsWarning(warnings []string, substr string) bool {
 // The acceptance criterion is therefore SET equality, not sequence equality, and
 // asserting it is what stops "it looked the same" from standing in for a check.
 func TestMigratedRuleSetsAreTheSameSetNotTheSameOrder(t *testing.T) {
-	doc, err := ParseDocument([]byte(`
+	doc, err := ParseLegacyDocument([]byte(`
 zapret:
   instances: [{ name: nfqws1-main }]
 services:

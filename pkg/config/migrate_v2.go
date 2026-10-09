@@ -35,7 +35,7 @@ func Slug(name string) string {
 	return strings.Trim(nonSlug.ReplaceAllString(strings.ToLower(name), "-"), "-")
 }
 
-func MigrateToV2(doc *Document, desyncStrategy DesyncStrategyFor) (*V2Migration, error) {
+func MigrateToV2(doc *LegacyDocument, desyncStrategy DesyncStrategyFor) (*V2Migration, error) {
 	m := &V2Migration{Configuration: &configv2.Configuration{Version: 2, TargetVersion: doc.SingboxVersion}}
 	if doc.SingboxVersion == "" {
 		// Worth a warning rather than a shrug: with no target the generator runs at
@@ -43,6 +43,84 @@ func MigrateToV2(doc *Document, desyncStrategy DesyncStrategyFor) (*V2Migration,
 		// gecko obfs, for one) is emitted WITHOUT it. That is a silent behaviour
 		// change on a working config.
 		m.Warnings = append(m.Warnings, "no singbox_version: the generated config targets the generator baseline, so version-gated node features (e.g. hy2 gecko obfs) will be stripped")
+	}
+
+	// The engine knobs carry. Each of these was a v1 section the first v2 draft had no
+	// field for, and a migration that dropped one would look successful while quietly
+	// running at a default the operator did not choose — the failure mode this whole
+	// converter exists to avoid.
+	m.Configuration.UTLSFingerprint = doc.UTLSFingerprint
+	m.Configuration.SubViaPool = doc.SubViaPool
+	if doc.DNS != nil {
+		m.Configuration.DNS = &configv2.DNSSection{
+			Servers:        doc.DNS.Servers,
+			Direct:         doc.DNS.Direct,
+			Zapret:         doc.DNS.Zapret,
+			Final:          doc.DNS.Final,
+			Strategy:       doc.DNS.Strategy,
+			Failover:       doc.DNS.Failover,
+			DirectFailover: doc.DNS.DirectFailover,
+			FakeIP:         doc.DNS.FakeIP,
+		}
+		if len(doc.DNS.Servers) > 0 {
+			m.Warnings = append(m.Warnings, "the split-DNS block carried over, including its failover lists — the resolvability of a resolver is the host's, so check the new one answers before relying on the rotation")
+		}
+	}
+	// The LEGACY standalone fakeip block has no v2 spelling, because fakeip is a property
+	// of the resolver set rather than a document section of its own. It folds into
+	// dns.fakeip — and the ranges do NOT come with it, so that is said plainly: a
+	// converted document that quietly used different fake ranges would answer from
+	// addresses the operator never chose.
+	if f := doc.FakeIP; f != nil && f.Enabled {
+		if m.Configuration.DNS == nil {
+			m.Configuration.DNS = &configv2.DNSSection{}
+		}
+		m.Configuration.DNS.FakeIP = true
+		m.Warnings = append(m.Warnings, fmt.Sprintf(
+			"the standalone fakeip block became dns.fakeip: true. The RESOLVER follows the generated dns block, and the ranges are the standard reserved ones"+
+				" — your inet4_range %q / inet6_range %q / resolver %q are not carried",
+			f.Inet4Range, f.Inet6Range, f.Resolver))
+	}
+	if mx := doc.Multiplex; mx != nil && mx.Enabled {
+		m.Configuration.Multiplex = &configv2.Multiplex{
+			Enabled:        true,
+			Protocol:       mx.Protocol,
+			MaxConnections: mx.MaxConnections,
+			MinStreams:     mx.MinStreams,
+			Padding:        mx.Padding,
+			BrutalUp:       mx.BrutalUp,
+			BrutalDown:     mx.BrutalDown,
+		}
+	}
+	for _, st := range doc.Strategies {
+		m.Configuration.Strategies = append(m.Configuration.Strategies, configv2.Strategy{
+			ID: st.ID, Class: st.Class, NFQWSArgs: st.NFQWSArgs,
+			BlockTypes: st.BlockTypes, Notes: st.Notes,
+		})
+	}
+	for _, d := range doc.Devices {
+		m.Configuration.Devices = append(m.Configuration.Devices, configv2.Device{
+			Name: d.Name, Sources: d.Sources, Policy: d.Policy,
+		})
+	}
+	if len(doc.Categories) > 0 {
+		m.Warnings = append(m.Warnings, fmt.Sprintf(
+			"the %d `categories:` block(s) have no v2 equivalent: behaviour profiles were removed, and every rule now states its own ladder, sticky flag and profile. "+
+				"The rules migrated with the chain they RESOLVED to, not the category they inherited it from — check a category's rules", len(doc.Categories)))
+	}
+
+	// The PRESET carries, as an override. It is the one v1 section with no obvious
+	// v2 spelling — it is not a list, it is a MODE — and dropping it would look like a
+	// successful migration while quietly turning per-rule composition on. That is the
+	// worst possible outcome for this particular file: composition refuses
+	// `flowseal-alt12-google` as self-shadowing, so the Google rule would lose its
+	// recipe and the owner would have no idea why.
+	if p := doc.Zapret.Preset; p.Dir != "" || p.ArgsFile != "" {
+		m.Configuration.Desync.Override = &configv2.Override{Name: p.Name, ArgsFile: p.ArgsFile, Dir: p.Dir}
+		m.Warnings = append(m.Warnings, fmt.Sprintf(
+			"the preset (zapret.preset) became desync.override: it is now named as an override rather than a preset, and it still serves EVERY rule. "+
+				"Per-rule recipe learning stays off while it is set — one bundle serves all rules, so there is nothing to choose between. "+
+				"Note the per-rule `strategy_id` on a desync rung is IGNORED in this mode"))
 	}
 
 	for _, instance := range doc.Zapret.Instances {
@@ -57,10 +135,23 @@ func MigrateToV2(doc *Document, desyncStrategy DesyncStrategyFor) (*V2Migration,
 		// The CAPTURE set is carried because dropping it is not a default: an instance
 		// with no ports installs an nft rule that matches nothing, so the desync is
 		// silently absent while every status read stays healthy.
+		capture := configv2.Capture{TCP: portList(instance.Capture.TCP), UDP: portList(instance.Capture.UDP)}
+		if len(capture.TCP) == 0 && len(capture.UDP) == 0 {
+			// v1 let an instance declare no ports and meant "the whole thing"; v2 does
+			// not, and the difference is silent in the worst way — an nft rule that
+			// matches nothing, a desync engine that is absent, and every status read
+			// still reporting the strategy as applied. So the migrated instance is given
+			// the port set the desync is FOR and the substitution is announced.
+			capture = defaultMigratedCapture
+			m.Warnings = append(m.Warnings, fmt.Sprintf(
+				"desync instance %q declared no capture: it was given %v. That is what the DPI-desync "+
+					"lane is for — change it if your traffic arrives on other ports",
+				instance.Name, capture))
+		}
 		m.Configuration.Desync.Instances[Slug(instance.Name)] = configv2.Instance{
 			Engine:    "nfqws1",
 			Enabled:   true,
-			Capture:   configv2.Capture{TCP: portList(instance.Capture.TCP), UDP: portList(instance.Capture.UDP)},
+			Capture:   capture,
 			Connbytes: instance.Connbytes,
 		}
 	}
@@ -87,7 +178,7 @@ func MigrateToV2(doc *Document, desyncStrategy DesyncStrategyFor) (*V2Migration,
 		m.Configuration.Subscriptions = append(m.Configuration.Subscriptions, configv2.Subscription{
 			Name:    sub.Name,
 			URL:     sub.URL,
-			Format:  string(sub.Format),
+			Format:  sub.Format,
 			Tags:    sub.Tags,
 			Enabled: sub.Enabled,
 			Expires: sub.Expires,
@@ -96,17 +187,35 @@ func MigrateToV2(doc *Document, desyncStrategy DesyncStrategyFor) (*V2Migration,
 
 	m.Configuration.Lists.Domains = map[string]configv2.List{}
 	m.Configuration.Lists.IPs = map[string]configv2.List{}
+	// A hostlist carries into `hostlists`, NOT into `lists.domains`. The two feed
+	// different consumers: a list becomes a sing-box rule-set, a hostlist becomes a
+	// plain text file the desync engine re-reads on mtime. Filing it as a list produced
+	// a config that ROUTES correctly and DESYNCS NOTHING — the rule matched its
+	// rule-set, the composer handed nfqws an empty hostlist, and every status read said
+	// the strategy was applied.
+	//
+	// It also keeps what made a hostlist worth declaring: the exclude sources and the
+	// shrink guard, neither of which a rule-set has.
 	for _, hostlist := range doc.Hostlists {
-		m.Configuration.Lists.Domains[Slug(hostlist.Name)] = configv2.List{
-			Files:   nonEmpty([]string{hostlist.Out}),
-			URLs:    hostlist.Sources,
-			Domains: hostlist.Domains,
-		}
+		m.Configuration.Hostlists = append(m.Configuration.Hostlists, configv2.Hostlist{
+			Name:         hostlist.Name,
+			Out:          hostlist.Out,
+			Sources:      hostlist.Sources,
+			Exclude:      hostlist.Exclude,
+			Domains:      hostlist.Domains,
+			MinKeepRatio: hostlist.MinKeepRatio,
+		})
 	}
 
-	instance, err := soleDesyncInstance(m.Configuration)
+	instance, implicit, err := soleDesyncInstance(m.Configuration)
 	if err != nil {
 		return nil, err
+	}
+	if implicit {
+		m.Warnings = append(m.Warnings, fmt.Sprintf(
+			"no desync instance was declared, so one was materialised (%q) carrying %v. "+
+				"That is what the DPI-desync lane is for — declare an instance with the ports your "+
+				"traffic actually arrives on if it is not these", instance, defaultMigratedCapture))
 	}
 	for _, service := range doc.Services {
 		rule, warnings, err := migrateService(service, m.Configuration, instance, desyncStrategy)
@@ -141,7 +250,7 @@ func MigrateToV2(doc *Document, desyncStrategy DesyncStrategyFor) (*V2Migration,
 	return m, nil
 }
 
-func migrateService(service serviceYAML, cfg *configv2.Configuration, instance string, desyncStrategy DesyncStrategyFor) (*configv2.Rule, []string, error) {
+func migrateService(service LegacyService, cfg *configv2.Configuration, instance string, desyncStrategy DesyncStrategyFor) (*configv2.Rule, []string, error) {
 	var warnings []string
 	id := Slug(service.Name)
 	rule := &configv2.Rule{
@@ -168,8 +277,18 @@ func migrateService(service serviceYAML, cfg *configv2.Configuration, instance s
 			TLSFragment:   service.TLSFragment,
 		},
 	}
-	if service.ProbeType != "" {
-		rule.Probe = &configv2.Probe{Type: service.ProbeType, Target: service.ProbeTarget}
+	// The TARGET is what carries, and the type only qualifies it. Gating on the type
+	// dropped the target of every rule that relied on the default — which is most of
+	// them — leaving a rule with no probe at all: nothing to check it against, no volume
+	// verdict, and a ladder that cannot tell working from frozen.
+	if service.ProbeType != "" || service.ProbeTarget != "" {
+		probeType := service.ProbeType
+		if probeType == "" {
+			// http is the schema's own default for an unstated type, so writing it
+			// explicitly changes nothing and makes the migrated file say what it means.
+			probeType = "http"
+		}
+		rule.Probe = &configv2.Probe{Type: probeType, Target: service.ProbeTarget}
 	}
 	if targets := nonEmpty(append([]string{service.VolumeTarget}, service.VolumeTargets...)); len(targets) > 0 || service.VolumeBytes > 0 {
 		rule.Volume = &configv2.Volume{Targets: targets, MinBytes: int64(service.VolumeBytes)}
@@ -246,7 +365,7 @@ func migrateService(service serviceYAML, cfg *configv2.Configuration, instance s
 	return rule, warnings, nil
 }
 
-func migrateChain(ruleID string, steps []chainStepYAML, instance string, desyncStrategy DesyncStrategyFor) ([]configv2.ChainStep, []string, error) {
+func migrateChain(ruleID string, steps []LegacyChainStep, instance string, desyncStrategy DesyncStrategyFor) ([]configv2.ChainStep, []string, error) {
 	var out []configv2.ChainStep
 	var warnings []string
 	// The tier LABEL is clamped to be non-decreasing along the chain.
@@ -327,6 +446,13 @@ func migrateChain(ruleID string, steps []chainStepYAML, instance string, desyncS
 	return out, warnings, nil
 }
 
+// defaultMigratedCapture is the port set a v1 instance with no declared capture gets.
+// 80/443 is what a browser speaks; 443 on UDP is QUIC, which is what a lot of clients try
+// first and what the censor most often blocks. It is a DEFAULT, and every use of it is
+// announced — a migration that quietly picked different ports would be changing what the
+// desync covers without saying so.
+var defaultMigratedCapture = configv2.Capture{TCP: []string{"80", "443"}, UDP: []string{"443"}}
+
 const runetfreedomSource = "runetfreedom"
 
 func usesRunetfreedom(lists configv2.Lists) bool {
@@ -342,12 +468,22 @@ func usesRunetfreedom(lists configv2.Lists) bool {
 
 const registryStateBroken = "BROKEN"
 
-func soleDesyncInstance(cfg *configv2.Configuration) (string, error) {
+// soleDesyncInstance names the one instance a migrated document routes through, and
+// reports whether it had to be materialised — which is a fact the operator should be
+// told, because the port set was then chosen by this code rather than by them.
+func soleDesyncInstance(cfg *configv2.Configuration) (name string, implicit bool, err error) {
 	if len(cfg.Desync.Instances) == 0 {
-		// v1 allowed a config with zapret rungs and no declared instance — the
-		// single implicit nfqws1 process. v2 names instances, so materialise it.
-		cfg.Desync.Instances = map[string]configv2.Instance{"nfqws1-main": {Engine: "nfqws1", Enabled: true}}
-		return "nfqws1-main", nil
+		// v1 allowed a config with zapret rungs and no declared instance — the single
+		// implicit nfqws1 process, whose port set came from a launcher script rather
+		// than from the document. v2 names instances AND requires their ports, so the
+		// materialised one carries the default set.
+		//
+		// Without it the instance would be an nft rule matching nothing: the desync
+		// engine absent, and every status read still reporting the strategy applied.
+		cfg.Desync.Instances = map[string]configv2.Instance{
+			"nfqws1-main": {Engine: "nfqws1", Enabled: true, Capture: defaultMigratedCapture},
+		}
+		return "nfqws1-main", true, nil
 	}
 	if len(cfg.Desync.Instances) != 1 {
 		names := make([]string, 0, len(cfg.Desync.Instances))
@@ -355,12 +491,12 @@ func soleDesyncInstance(cfg *configv2.Configuration) (string, error) {
 			names = append(names, name)
 		}
 		sort.Strings(names)
-		return "", fmt.Errorf("migration needs exactly one desync instance, found %d %v", len(names), names)
+		return "", false, fmt.Errorf("migration needs exactly one desync instance, found %d %v", len(names), names)
 	}
 	for name := range cfg.Desync.Instances {
-		return name, nil
+		return name, false, nil
 	}
-	return "", nil
+	return "", false, nil
 }
 
 // tierRank orders the tier labels. It reads configv2.ChainTiers rather than

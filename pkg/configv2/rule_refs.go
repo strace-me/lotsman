@@ -20,8 +20,16 @@ func (r *Rule) ValidateReferences(cfg *Configuration, strategies map[string][]st
 		return fmt.Errorf("rule %q has an empty match", r.ID)
 	}
 	for _, name := range r.Match.DomainLists {
-		if _, ok := cfg.Lists.Domains[name]; !ok {
-			return fmt.Errorf("rule %q references unknown domain list %q", r.ID, name)
+		// A domain list may be EITHER a `lists.domains` entry, which becomes a
+		// sing-box rule-set, or a `hostlists` entry, whose domains are merged into the
+		// rule for the desync engine to read. Both are in scope under the same key,
+		// because a rule routinely needs both — see buildService — and the document
+		// says which one a name means. A name that is neither is refused rather than
+		// resolved to something plausible.
+		_, isList := cfg.Lists.Domains[name]
+		_, isPack := cfg.hostlistNames()[name]
+		if !isList && !isPack {
+			return fmt.Errorf("rule %q references unknown domain list %q: it is neither a lists.domains entry nor a hostlists entry", r.ID, name)
 		}
 	}
 	for _, name := range r.Match.IPLists {
@@ -38,10 +46,19 @@ func (r *Rule) ValidateReferences(cfg *Configuration, strategies map[string][]st
 			if !instance.Enabled {
 				return fmt.Errorf("rule %q uses disabled desync instance %q", r.ID, desync.Instance)
 			}
-			// "auto" is not a bundle: it is the rung deferring to what the KB has
+			// An OVERRIDE means one bundle serves every rule, so a per-rule strategy
+			// pin is not merely unresolvable — it is IGNORED. Validating it anyway
+			// refused a document whose pin could never apply: the migrated config of a
+			// preset deployment names a bundle that only exists as a preset, and the
+			// loader demanded it from the store it will never consult. A document has to
+			// load if the thing it names cannot affect what runs; the pin being dead is
+			// reported as a gap, not enforced as an error.
+			//
+			// "auto" is not a bundle either: it is the rung deferring to what the KB has
 			// learned, and the store never holds a file by that name. Looking it up
 			// would reject exactly the rungs v1 left unpinned.
-			if desync.Strategy != AutoStrategy && !contains(strategies[desync.Instance], desync.Strategy) {
+			if cfg.Desync.Override == nil && desync.Strategy != AutoStrategy &&
+				!contains(strategies[desync.Instance], desync.Strategy) {
 				return fmt.Errorf("rule %q references unknown strategy %q on instance %q", r.ID, desync.Strategy, desync.Instance)
 			}
 		}

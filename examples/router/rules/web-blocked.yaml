@@ -1,0 +1,25 @@
+id: web-blocked
+name: web-blocked
+enabled: true
+priority: 10
+match:
+    domain_lists:
+        - ru-blocked
+        - cloudflare
+    ip_lists:
+        - ru-blocked
+        - cloudflare
+        - telegram
+        - fastly
+probe:
+    type: http
+    target: https://www.cloudflare.com/cdn-cgi/trace
+behavior:
+    profile: general
+chain:
+    - tier: fallback
+      vpn:
+        pool: vpn_url_test
+    - tier: emergency
+      vpn:
+        pool: emergency_pool

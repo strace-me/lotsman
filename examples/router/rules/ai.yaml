@@ -1,0 +1,25 @@
+id: ai
+name: ai
+enabled: true
+match:
+    domains:
+        - openai.com
+        - chatgpt.com
+        - oaistatic.com
+        - claude.ai
+        - anthropic.com
+        - gemini.google.com
+        - perplexity.ai
+probe:
+    type: http
+    target: https://api.openai.com/
+behavior:
+    sticky: true
+    profile: general
+chain:
+    - tier: fallback
+      vpn:
+        pool: vpn_url_test
+    - tier: emergency
+      vpn:
+        pool: emergency_pool

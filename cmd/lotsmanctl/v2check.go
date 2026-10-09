@@ -258,7 +258,7 @@ func reportMigration(path, desyncStrategy string, note func(string, ...any)) {
 		note("migration: %v", err)
 		return
 	}
-	document, err := config.ParseDocument(data)
+	document, err := config.ParseLegacyDocument(data)
 	if err != nil {
 		note("migration: %v", err)
 		return

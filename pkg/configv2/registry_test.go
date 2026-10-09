@@ -1,6 +1,7 @@
 package configv2
 
 import (
+	"strings"
 	"testing"
 
 	"gopkg.in/yaml.v3"
@@ -126,17 +127,24 @@ func TestBypassIsARuleAndNotARung(t *testing.T) {
 	// entirely, so no consumer can forget a guard.
 	rule := sampleRule("a", 0, ChainStep{Tier: "preferred", Action: Action{Direct: true}})
 	rule.Bypass = true
-	reg, err := BuildRegistry(nil, []Rule{rule}, nil, nil)
+	// A second rule stays on: a deployment whose EVERY rule is disabled or bypassed is
+	// refused by name, and that refusal is a separate assertion. This one is about the
+	// flag's effect on a rule among others.
+	other := sampleRule("b", 1, ChainStep{Tier: "preferred", Action: Action{Direct: true}})
+	reg, err := BuildRegistry(nil, []Rule{rule, other}, nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if _, ok := reg.Services["a"]; ok {
 		t.Error("a bypassed rule reached the runtime")
 	}
+	if _, ok := reg.Services["b"]; !ok {
+		t.Error("the bypassed rule took its neighbour with it")
+	}
 	// Un-bypassing the same rule brings it back, so the flag is the thing doing it
 	// and not an accidental exclusion.
 	rule.Bypass = false
-	reg, err = BuildRegistry(nil, []Rule{rule}, nil, nil)
+	reg, err = BuildRegistry(nil, []Rule{rule, other}, nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -241,5 +249,45 @@ func TestRuleRejectsAnUnknownTrafficClass(t *testing.T) {
 	// ParseRule validates on the way in, which is the path a real load takes.
 	if _, err := ParseRule(data); err == nil {
 		t.Fatal("an unknown traffic class was accepted")
+	}
+}
+
+// A deployment whose every rule is off is refused BY NAME. Not a consumer guard —
+// nothing downstream needs a non-empty registry — but a statement about the document:
+// "every rule I declared is switched off" is a different intent from "this machine has
+// nothing to do", and the second should be expressed by stopping the service. Starting
+// anyway gives a box that answers, routes nothing, and reports healthy.
+func TestEveryRuleOffIsRefusedByName(t *testing.T) {
+	off := sampleRule("a", 0, ChainStep{Tier: "preferred", Action: Action{Direct: true}})
+	off.Enabled = false
+	_, err := BuildRegistry(nil, []Rule{off}, nil, nil)
+	if err == nil {
+		t.Fatal("a deployment with every rule disabled was accepted")
+	}
+	// The message has to be actionable: the operator has to know switching one on is
+	// the fix, and that stopping the service is the other one.
+	for _, want := range []string{"nothing left to steer", "stop the service"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error %q does not mention %q", err, want)
+		}
+	}
+}
+
+func TestBypassingEveryRuleIsAlsoRefused(t *testing.T) {
+	// Bypassed and disabled have the same effect on the registry, so they get the same
+	// refusal — a deployment of nothing-but-bypass is as unsteerable as an empty one.
+	rule := sampleRule("a", 0, ChainStep{Tier: "preferred", Action: Action{Direct: true}})
+	rule.Bypass = true
+	if _, err := BuildRegistry(nil, []Rule{rule}, nil, nil); err == nil {
+		t.Fatal("a deployment where every rule is bypassed was accepted")
+	}
+}
+
+// An EMPTY deployment is not the same as one whose rules are all off: there is nothing
+// declared yet, which is a legitimate state for a first run before the rules directory
+// is populated.
+func TestNoRulesAtAllIsNotRefused(t *testing.T) {
+	if _, err := BuildRegistry(nil, nil, nil, nil); err != nil {
+		t.Fatalf("a deployment with no rules yet must load: %v", err)
 	}
 }

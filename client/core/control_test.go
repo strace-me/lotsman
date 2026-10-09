@@ -11,11 +11,12 @@ import (
 	"os"
 	"os/user"
 	"path/filepath"
+	"strings"
 	"testing"
-	"time"
 
 	"github.com/strace-me/lotsman/pkg/audit"
 	"github.com/strace-me/lotsman/pkg/config"
+	"github.com/strace-me/lotsman/pkg/configv2"
 )
 
 // shortTempDir keeps the socket path under the sockaddr_un limit: the default
@@ -208,19 +209,52 @@ func TestControlRecheckRejectsUnknownService(t *testing.T) {
 	}
 }
 
-// validStarterConfig parses cleanly (builtin `streaming` category supplies the chain).
-const validStarterConfig = `subscriptions:
+// A minimal deployment that LOADS. Two of these things are load-bearing rather than
+// decoration: the document declares `version: 2`, because a file without it is a
+// version-1 document and is refused with a conversion hint; and the rule's chain names
+// pools it does not declare, because that is what the builtins are for and a starter
+// that had to hand-write them would be a worse first impression.
+const validStarterDocument = `version: 2
+target_version: "1.14.1"
+subscriptions:
   - { name: s1, url: "https://example.com/sub", format: auto, tags: [normal], enabled: true }
-services:
-  - name: youtube
-    category: streaming
-    probe_target: https://www.youtube.com/generate_204
-    domains: [youtube.com]
+desync:
+  instances:
+    nfqws1-main: { engine: nfqws1, enabled: true, capture: { tcp: [443] } }
+pools: {}
 `
+
+func youtubeRule() string {
+	return `id: youtube
+name: YouTube
+enabled: true
+match:
+  domains: [youtube.com]
+probe:
+  type: http
+  target: https://www.youtube.com/generate_204
+chain:
+  - {tier: preferred, desync: {instance: nfqws1-main, strategy: auto}}
+  - {tier: fallback, vpn: {pool: vpn_url_test}}
+`
+}
+
+func discordRule() string {
+	return `id: discord
+name: Discord
+enabled: true
+match:
+  domains: [discord.com]
+probe:
+  type: http
+  target: https://discord.com/api/v9/gateway
+chain:
+  - {tier: fallback, vpn: {pool: vpn_url_test_udp}}
+`
+}
 
 func TestControlConfigEditingDisabledByDefault(t *testing.T) {
 	path, _ := startControl(t, func() {})
-	// Without WithConfig the file endpoints must refuse rather than expose a path.
 	resp, err := unixClient(path).Get("http://unix/config")
 	if err != nil {
 		t.Fatalf("get config: %v", err)
@@ -232,34 +266,48 @@ func TestControlConfigEditingDisabledByDefault(t *testing.T) {
 }
 
 func TestControlConfigValidate(t *testing.T) {
-	path, _ := startControl(t, func() {})
-	post := func(yaml string) int {
-		body, _ := json.Marshal(map[string]string{"yaml": yaml})
-		resp, err := unixClient(path).Post("http://unix/config/validate", "application/json", bytes.NewReader(body))
+	dir := seedDeployment(t, validStarterDocument, map[string]string{"youtube.yaml": youtubeRule()})
+	post := func(doc string) int {
+		body, _ := json.Marshal(map[string]string{"yaml": doc})
+		resp, err := unixClient(dir.sock).Post("http://unix/config/validate", "application/json", bytes.NewReader(body))
 		if err != nil {
 			t.Fatalf("post validate: %v", err)
 		}
 		defer resp.Body.Close()
 		return resp.StatusCode
 	}
-	if code := post("this: [is not: valid: lotsman"); code != http.StatusBadRequest {
-		t.Errorf("invalid config validate = %d, want 400", code)
+	if code := post("version: 2\nthis: [is not: valid"); code != http.StatusBadRequest {
+		t.Errorf("an invalid document validate = %d, want 400", code)
 	}
-	if code := post(validStarterConfig); code != http.StatusOK {
-		t.Errorf("valid config validate = %d, want 200", code)
+	// ABSENT rules means "I am not touching the rules", so a document-only candidate is
+	// validated against the LIVE ones. It must pass — and it must not have deleted
+	// anything, because a request that only meant to change the document is not a
+	// request to remove every rule the operator has.
+	if code := post(validStarterDocument); code != http.StatusOK {
+		t.Errorf("a document-only candidate over a deployment with rules = %d, want 200", code)
+	}
+	if _, err := os.Stat(filepath.Join(dir.rulesDir, "youtube.yaml")); err != nil {
+		t.Errorf("validate deleted a rule file: %v", err)
+	}
+	body, _ := json.Marshal(map[string]any{"yaml": validStarterDocument, "rules": []any{
+		map[string]string{"file": "youtube.yaml", "yaml": youtubeRule()},
+	}})
+	resp, err := unixClient(dir.sock).Post("http://unix/config/validate", "application/json", bytes.NewReader(body))
+	if err != nil {
+		t.Fatalf("post validate: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("a complete candidate validate = %d, want 200", resp.StatusCode)
 	}
 }
 
-func TestControlConfigGetReturnsTheFile(t *testing.T) {
-	dir := shortTempDir(t)
-	cfg := filepath.Join(dir, "config.yaml")
-	if err := os.WriteFile(cfg, []byte(validStarterConfig), 0o600); err != nil {
-		t.Fatalf("seed config: %v", err)
-	}
-	path, s := startControl(t, func() {})
-	s.WithConfig(cfg, func() {}) // handlers read configPath live, so post-Serve is fine
+func TestControlConfigGetReturnsTheDocumentAndEveryRule(t *testing.T) {
+	dir := seedDeploymentNoServer(t, validStarterDocument, map[string]string{"youtube.yaml": youtubeRule()})
+	dir.sock, dir.server = startControl(t, func() {})
+	dir.server.WithConfig(dir.configPath, dir.rulesDir, "", func() {})
 
-	resp, err := unixClient(path).Get("http://unix/config")
+	resp, err := unixClient(dir.sock).Get("http://unix/config")
 	if err != nil {
 		t.Fatalf("get config: %v", err)
 	}
@@ -267,53 +315,98 @@ func TestControlConfigGetReturnsTheFile(t *testing.T) {
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("GET /config = %d, want 200", resp.StatusCode)
 	}
-	var got struct{ Path, YAML string }
+	var got struct {
+		Path     string
+		RulesDir string
+		YAML     string
+		Config   *configv2.Configuration
+		Rules    []struct {
+			File string
+			Rule *configv2.Rule
+		}
+	}
 	if err := json.NewDecoder(resp.Body).Decode(&got); err != nil {
 		t.Fatalf("decode: %v", err)
 	}
-	if got.Path != cfg || got.YAML != validStarterConfig {
-		t.Errorf("config mismatch: path=%q yaml-len=%d", got.Path, len(got.YAML))
+	if got.Path != dir.configPath || got.YAML != validStarterDocument {
+		t.Errorf("config mismatch: path=%q rulesDir=%q yaml-len=%d", got.Path, got.RulesDir, len(got.YAML))
+	}
+	if got.Config == nil || got.Config.Version != 2 {
+		t.Errorf("the structured document did not decode: %#v", got.Config)
+	}
+	// The rules come back as their own entries, each with the file it belongs under —
+	// the UI never has to invent a path, and never has to guess which rule a
+	// structural edit was meant to touch.
+	if len(got.Rules) != 1 || got.Rules[0].File != "youtube.yaml" || got.Rules[0].Rule == nil {
+		t.Fatalf("rules = %#v", got.Rules)
+	}
+	if got.Rules[0].Rule.ID != "youtube" {
+		t.Errorf("rule id = %q", got.Rules[0].Rule.ID)
 	}
 }
 
-// twoServiceConfig has a spare service, so switching one off still leaves something
-// to steer — the all-off case is exercised separately.
-const twoServiceConfig = `services:
-  - name: youtube
-    category: streaming
-    probe_target: https://www.youtube.com/generate_204
-    domains: [youtube.com]
-  - name: discord
-    category: messaging
-    probe_target: https://discord.com/api/v9/gateway
-    domains: [discord.com]
-`
+// twoRuleDeployment has a spare rule, so switching one off still leaves something to
+// steer — the all-off case is exercised separately.
+const twoRuleDocument = validStarterDocument
 
-// seedConfig writes a config file and attaches it to a control server, returning
-// the socket path, the file path and a channel that fires when the service applies.
-func seedConfig(t *testing.T, yaml string) (string, string, chan struct{}) {
+type deployment struct {
+	configPath string
+	rulesDir   string
+	sock       string
+	server     *ControlServer
+}
+
+// seedDeploymentNoServer writes a deployment and returns where it is, WITHOUT
+// starting a control server: some tests attach one afterwards with their own apply
+// signal, and some need the server up before they can post.
+func seedDeploymentNoServer(t *testing.T, document string, rules map[string]string) deployment {
 	t.Helper()
-	cfg := filepath.Join(shortTempDir(t), "config.yaml")
-	if err := os.WriteFile(cfg, []byte(yaml), 0o600); err != nil {
-		t.Fatalf("seed config: %v", err)
+	dir := shortTempDir(t)
+	d := deployment{
+		configPath: filepath.Join(dir, "configuration.yaml"),
+		rulesDir:   filepath.Join(dir, "rules"),
 	}
-	applied := make(chan struct{}, 4)
-	path, s := startControl(t, func() {})
-	// A zero Core cannot reload in place, so the apply path lands on restart — which
-	// is exactly the signal we want: the edit reached the apply step.
-	s.WithConfig(cfg, func() {
-		select {
-		case applied <- struct{}{}:
-		default:
+	if err := os.WriteFile(d.configPath, []byte(document), 0o600); err != nil {
+		t.Fatalf("seed document: %v", err)
+	}
+	if err := os.MkdirAll(d.rulesDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	for name, body := range rules {
+		if err := os.WriteFile(filepath.Join(d.rulesDir, name), []byte(body), 0o600); err != nil {
+			t.Fatalf("seed rule: %v", err)
 		}
-	})
-	return path, cfg, applied
+	}
+	return d
 }
 
-func postEnabled(t *testing.T, sock, service string, body any) int {
+func seedDeployment(t *testing.T, document string, rules map[string]string) deployment {
+	t.Helper()
+	d := seedDeploymentNoServer(t, document, rules)
+	d.sock, d.server = startControl(t, func() {})
+	d.server.WithConfig(d.configPath, d.rulesDir, "", func() {})
+	return d
+}
+
+// load reads a seeded deployment back through the one reader, so a test asserts what a
+// SERVICE would see rather than what a text file appears to say.
+func (d deployment) load(t *testing.T) *config.Config {
+	t.Helper()
+	load, err := config.LoadV2(d.configPath, d.rulesDir, "")
+	if err != nil {
+		t.Fatalf("the written deployment does not load: %v", err)
+	}
+	cfg, _, err := config.FromV2(load.Config, load.Rules)
+	if err != nil {
+		t.Fatalf("the written deployment does not project: %v", err)
+	}
+	return cfg
+}
+
+func postEnabled(t *testing.T, sock, rule string, body any) int {
 	t.Helper()
 	b, _ := json.Marshal(body)
-	resp, err := unixClient(sock).Post("http://unix/service/"+service+"/enabled", "application/json", bytes.NewReader(b))
+	resp, err := unixClient(sock).Post("http://unix/service/"+rule+"/enabled", "application/json", bytes.NewReader(b))
 	if err != nil {
 		t.Fatalf("post enabled: %v", err)
 	}
@@ -322,79 +415,100 @@ func postEnabled(t *testing.T, sock, service string, body any) int {
 	return resp.StatusCode
 }
 
-func TestControlSwitchingAServiceOffWritesItToTheConfig(t *testing.T) {
-	sock, cfgPath, applied := seedConfig(t, twoServiceConfig)
+func TestControlSwitchingARuleOffWritesItToTheFile(t *testing.T) {
+	d := seedDeployment(t, twoRuleDocument, map[string]string{
+		"youtube.yaml": youtubeRule(),
+		"discord.yaml": discordRule(),
+	})
 
-	if code := postEnabled(t, sock, "discord", map[string]bool{"enabled": false}); code != http.StatusAccepted {
+	if code := postEnabled(t, d.sock, "discord", map[string]bool{"enabled": false}); code != http.StatusAccepted {
 		t.Fatalf("POST enabled=false = %d, want 202", code)
 	}
 	// The bit must be in the FILE, not merely in memory: the desired state is
 	// re-asserted from the config-built registry every few seconds, so a runtime-only
 	// override would be undone within a tick and would not survive a restart.
-	data, err := os.ReadFile(cfgPath)
-	if err != nil {
-		t.Fatalf("read back: %v", err)
-	}
-	parsed, err := config.Parse(data)
-	if err != nil {
-		t.Fatalf("re-parse written config: %v", err)
-	}
-	if _, ok := parsed.Registry.Services["discord"]; ok {
+	cfg := d.load(t)
+	if _, ok := cfg.Registry.Services["discord"]; ok {
 		t.Error("discord is still in the registry after being switched off")
 	}
-	if _, ok := parsed.Registry.Services["youtube"]; !ok {
+	if _, ok := cfg.Registry.Services["youtube"]; !ok {
 		t.Error("switching discord off took youtube with it")
 	}
-	select {
-	case <-applied:
-	case <-time.After(2 * time.Second):
-		t.Error("the edit was written but never applied")
+	if len(cfg.DisabledServices) != 1 || cfg.DisabledServices[0] != "discord" {
+		t.Errorf("disabled = %v, want [discord]", cfg.DisabledServices)
 	}
 
-	// And back on.
-	if code := postEnabled(t, sock, "discord", map[string]bool{"enabled": true}); code != http.StatusAccepted {
+	// And back on. Switching ON removes the key rather than writing `enabled: true`,
+	// so a rule nobody ever touched reads as if it never had been.
+	if code := postEnabled(t, d.sock, "discord", map[string]bool{"enabled": true}); code != http.StatusAccepted {
 		t.Fatalf("POST enabled=true = %d, want 202", code)
 	}
-	data, _ = os.ReadFile(cfgPath)
-	parsed, err = config.Parse(data)
-	if err != nil {
-		t.Fatalf("re-parse after enable: %v", err)
-	}
-	if _, ok := parsed.Registry.Services["discord"]; !ok {
+	if _, ok := d.load(t).Registry.Services["discord"]; !ok {
 		t.Error("discord did not come back")
 	}
 }
 
-func TestControlSwitchingRejectsUnknownServiceAndMissingField(t *testing.T) {
-	sock, cfgPath, _ := seedConfig(t, twoServiceConfig)
-	before, _ := os.ReadFile(cfgPath)
-
-	if code := postEnabled(t, sock, "nosuch", map[string]bool{"enabled": false}); code != http.StatusBadRequest {
-		t.Errorf("unknown service = %d, want 400", code)
+func TestControlSwitchingKeepsCommentsInTheRuleFile(t *testing.T) {
+	// A tile toggle is a one-bit change. Rewriting the whole file for it would expand
+	// every zero value the operator never wrote and drop every comment they did — a
+	// switch on the dashboard must not reformat the file behind it.
+	commented := "# the operator's own note\n" + strings.Replace(youtubeRule(), "enabled: true", "enabled: true\n# keep me", 1)
+	// A spare rule, because switching the last one off is refused by name — and this
+	// test is about what the rewrite does to the file, not about that refusal.
+	d := seedDeployment(t, twoRuleDocument, map[string]string{
+		"youtube.yaml": commented,
+		"discord.yaml": discordRule(),
+	})
+	if code := postEnabled(t, d.sock, "youtube", map[string]bool{"enabled": false}); code != http.StatusAccepted {
+		t.Fatalf("POST enabled=false = %d, want 202", code)
 	}
-	// An absent field is refused rather than defaulted, because defaulting here
-	// switches a service the wrong way and the caller is never told.
-	if code := postEnabled(t, sock, "discord", map[string]string{"note": "hi"}); code != http.StatusBadRequest {
-		t.Errorf("missing enabled field = %d, want 400", code)
+	body, err := os.ReadFile(filepath.Join(d.rulesDir, "youtube.yaml"))
+	if err != nil {
+		t.Fatal(err)
 	}
-	after, _ := os.ReadFile(cfgPath)
-	if !bytes.Equal(before, after) {
-		t.Error("a rejected request rewrote the config file")
+	for _, want := range []string{"the operator's own note", "keep me"} {
+		if !strings.Contains(string(body), want) {
+			t.Errorf("the toggle dropped the comment %q:\n%s", want, body)
+		}
 	}
 }
 
-// Validation runs over the WHOLE candidate config before the file is touched, so
-// switching off the last service fails with the file still intact.
-func TestControlRefusesToSwitchOffTheLastService(t *testing.T) {
-	sock, cfgPath, _ := seedConfig(t, validStarterConfig)
-	before, _ := os.ReadFile(cfgPath)
+func TestControlSwitchingRejectsUnknownRuleAndMissingField(t *testing.T) {
+	d := seedDeployment(t, twoRuleDocument, map[string]string{
+		"youtube.yaml": youtubeRule(),
+		"discord.yaml": discordRule(),
+	})
+	before, _ := os.ReadFile(filepath.Join(d.rulesDir, "youtube.yaml"))
 
-	if code := postEnabled(t, sock, "youtube", map[string]bool{"enabled": false}); code != http.StatusBadRequest {
-		t.Errorf("switching off the only service = %d, want 400", code)
+	if code := postEnabled(t, d.sock, "nosuch", map[string]bool{"enabled": false}); code != http.StatusBadRequest {
+		t.Errorf("an unknown rule = %d, want 400", code)
 	}
-	after, _ := os.ReadFile(cfgPath)
+	// An absent field is refused rather than defaulted, because defaulting here switches
+	// a rule the wrong way and the caller is never told.
+	if code := postEnabled(t, d.sock, "discord", map[string]string{"note": "hi"}); code != http.StatusBadRequest {
+		t.Errorf("a missing enabled field = %d, want 400", code)
+	}
+	after, _ := os.ReadFile(filepath.Join(d.rulesDir, "youtube.yaml"))
 	if !bytes.Equal(before, after) {
-		t.Error("the config was written despite failing validation")
+		t.Error("a rejected request rewrote a rule file")
+	}
+}
+
+// Validation runs over the WHOLE candidate deployment before any file is touched, so
+// switching off the last rule fails with the files still intact.
+func TestControlRefusesToSwitchOffTheLastRule(t *testing.T) {
+	d := seedDeployment(t, validStarterDocument, map[string]string{"youtube.yaml": youtubeRule()})
+	beforeDoc, _ := os.ReadFile(d.configPath)
+	beforeRule, _ := os.ReadFile(filepath.Join(d.rulesDir, "youtube.yaml"))
+
+	if code := postEnabled(t, d.sock, "youtube", map[string]bool{"enabled": false}); code != http.StatusBadRequest {
+		t.Errorf("switching off the only rule = %d, want 400", code)
+	}
+	if afterDoc, _ := os.ReadFile(d.configPath); !bytes.Equal(beforeDoc, afterDoc) {
+		t.Error("the document was written despite failing validation")
+	}
+	if afterRule, _ := os.ReadFile(filepath.Join(d.rulesDir, "youtube.yaml")); !bytes.Equal(beforeRule, afterRule) {
+		t.Error("the rule was written despite failing validation")
 	}
 }
 
@@ -402,5 +516,187 @@ func TestControlSwitchingNeedsConfigEditingEnabled(t *testing.T) {
 	sock, _ := startControl(t, func() {})
 	if code := postEnabled(t, sock, "youtube", map[string]bool{"enabled": false}); code != http.StatusNotImplemented {
 		t.Errorf("without WithConfig = %d, want 501", code)
+	}
+}
+
+// A rule deleted in the editor is deleted in the DOCUMENT but not on disk, and the
+// loader reads a DIRECTORY — so the service kept steering the traffic the operator
+// asked it to stop steering, while the editor showed the rule as gone.
+func TestControlSetConfigRemovesARuleDroppedFromTheCandidate(t *testing.T) {
+	dir := seedDeployment(t, validStarterDocument, map[string]string{
+		"youtube.yaml": youtubeRule(),
+		"discord.yaml": discordRule(),
+	})
+
+	body, _ := json.Marshal(map[string]any{
+		"yaml": validStarterDocument,
+		"rules": []any{
+			map[string]string{"file": "youtube.yaml", "yaml": youtubeRule()},
+		},
+	})
+	resp, err := unixClient(dir.sock).Post("http://unix/config", "application/json", bytes.NewReader(body))
+	if err != nil {
+		t.Fatalf("post config: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusAccepted {
+		t.Fatalf("set config = %d, want 202", resp.StatusCode)
+	}
+
+	if _, err := os.Stat(filepath.Join(dir.rulesDir, "discord.yaml")); err == nil {
+		t.Error("a rule the candidate dropped is still on disk")
+	}
+	// The survivors must survive: a commit that emptied the directory would pass the
+	// assertion above.
+	cfg := dir.load(t)
+	if _, ok := cfg.Registry.Services["youtube"]; !ok {
+		t.Error("the rule that was kept did not survive the commit")
+	}
+	if _, ok := cfg.Registry.Services["discord"]; ok {
+		t.Error("the dropped rule is still in the loaded runtime config")
+	}
+}
+
+// An explicit empty list is how the UI says "delete them all", and it must actually
+// empty the directory rather than leaving it as a cache nobody reads.
+func TestControlSetConfigEmptiesTheRulesDirectoryForAnEmptyList(t *testing.T) {
+	dir := seedDeployment(t, validStarterDocument, map[string]string{
+		"youtube.yaml": youtubeRule(),
+		"discord.yaml": discordRule(),
+	})
+
+	body, _ := json.Marshal(map[string]any{"yaml": validStarterDocument, "rules": []any{}})
+	resp, err := unixClient(dir.sock).Post("http://unix/config", "application/json", bytes.NewReader(body))
+	if err != nil {
+		t.Fatalf("post config: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusAccepted {
+		t.Fatalf("set config with an explicit empty list = %d, want 202", resp.StatusCode)
+	}
+	names, err := ruleFilesIn(dir.rulesDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(names) != 0 {
+		t.Errorf("explicit [] left %d rule files: %v", len(names), names)
+	}
+}
+
+// A file that is not a plain rule is a thing to notice, not to remove on the
+// operator's behalf.
+func TestControlSetConfigLeavesNonRuleFilesAlone(t *testing.T) {
+	dir := seedDeployment(t, validStarterDocument, map[string]string{"youtube.yaml": youtubeRule()})
+	notes := filepath.Join(dir.rulesDir, "NOTES.md")
+	if err := os.WriteFile(notes, []byte("scratch"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	body, _ := json.Marshal(map[string]any{
+		"yaml":  validStarterDocument,
+		"rules": []any{},
+	})
+	resp, err := unixClient(dir.sock).Post("http://unix/config", "application/json", bytes.NewReader(body))
+	if err != nil {
+		t.Fatalf("post config: %v", err)
+	}
+	defer resp.Body.Close()
+	if _, err := os.Stat(notes); err != nil {
+		t.Errorf("a non-rule file was removed by the commit: %v", err)
+	}
+}
+
+// A JSON response that arrives as application/octet-stream makes the frontend
+// treat it as text, which is a bug report that reads as "the server is broken"
+// rather than as "a header was set one line too late".
+func TestControlConfigResponsesCarryTheirContentType(t *testing.T) {
+	dir := seedDeployment(t, validStarterDocument, map[string]string{"youtube.yaml": youtubeRule()})
+	body, _ := json.Marshal(map[string]any{
+		"yaml":  validStarterDocument,
+		"rules": []any{map[string]string{"file": "youtube.yaml", "yaml": youtubeRule()}},
+	})
+	resp, err := unixClient(dir.sock).Post("http://unix/config", "application/json", bytes.NewReader(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if ct := resp.Header.Get("Content-Type"); !strings.HasPrefix(ct, "application/json") {
+		t.Errorf("POST /config Content-Type = %q, want application/json", ct)
+	}
+
+	get, err := unixClient(dir.sock).Get("http://unix/config")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer get.Body.Close()
+	if ct := get.Header.Get("Content-Type"); !strings.HasPrefix(ct, "application/json") {
+		t.Errorf("GET /config Content-Type = %q, want application/json", ct)
+	}
+
+	d2 := seedDeployment(t, twoRuleDocument, map[string]string{
+		"youtube.yaml": youtubeRule(),
+		"discord.yaml": discordRule(),
+	})
+	if code := postEnabled(t, d2.sock, "youtube", map[string]bool{"enabled": false}); code != http.StatusAccepted {
+		t.Fatalf("toggle = %d, want 202", code)
+	}
+	resp2, err := unixClient(d2.sock).Post("http://unix/service/youtube/enabled", "application/json",
+		bytes.NewReader([]byte(`{"enabled":true}`)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp2.Body.Close()
+	if ct := resp2.Header.Get("Content-Type"); !strings.HasPrefix(ct, "application/json") {
+		t.Errorf("POST /service/{name}/enabled Content-Type = %q, want application/json", ct)
+	}
+}
+
+// -config accepts a deployment DIRECTORY, and the NixOS module now uses that shape
+// because it is what the v2 schema is built around. The editor read the path as a
+// file, so GET /config answered 500 "is a directory" — the config editor was broken
+// in precisely the deployment the installer writes.
+func TestControlConfigEditingWorksOnADirectoryDeployment(t *testing.T) {
+	d := seedDeploymentNoServer(t, validStarterDocument, map[string]string{"youtube.yaml": youtubeRule()})
+	dir := filepath.Dir(d.configPath)
+
+	sock, server := startControl(t, func() {})
+	// The directory, exactly as `-config /etc/lotsman` passes it.
+	server.WithConfig(dir, "", "", func() {})
+	defer server.Close()
+
+	resp, err := unixClient(sock).Get("http://unix/config")
+	if err != nil {
+		t.Fatalf("get config: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("GET /config on a directory deployment = %d, want 200", resp.StatusCode)
+	}
+	var got configDoc
+	if err := json.NewDecoder(resp.Body).Decode(&got); err != nil {
+		t.Fatal(err)
+	}
+	if got.YAML == "" {
+		t.Error("no document text came back")
+	}
+	if len(got.Rules) != 1 {
+		t.Errorf("got %d rules, want 1", len(got.Rules))
+	}
+	// And the rules directory must have been derived, since the caller passed none.
+	if got.RulesDir == "" || filepath.Base(got.RulesDir) != "rules" {
+		t.Errorf("rules dir %q was not derived from the deployment directory", got.RulesDir)
+	}
+}
+
+// The document path itself must keep working — the other accepted spelling.
+func TestControlConfigEditingStillWorksOnADocumentPath(t *testing.T) {
+	d := seedDeployment(t, validStarterDocument, map[string]string{"youtube.yaml": youtubeRule()})
+	resp, err := unixClient(d.sock).Get("http://unix/config")
+	if err != nil {
+		t.Fatalf("get config: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("GET /config on a document path = %d, want 200", resp.StatusCode)
 	}
 }

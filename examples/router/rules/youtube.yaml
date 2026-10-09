@@ -1,0 +1,32 @@
+id: youtube
+name: youtube
+enabled: true
+match:
+    domain_lists:
+        - youtube
+    domains:
+        - googlevideo.com
+        - gvt1.com
+        - gvt2.com
+        - ytimg.com
+        - youtubei.googleapis.com
+        - jnn-pa.googleapis.com
+probe:
+    type: http
+    target: https://www.youtube.com/generate_204
+behavior:
+    sticky: true
+    profile: streaming
+chain:
+    - tier: fallback
+      vpn:
+        pool: vpn_bulk
+    - tier: fallback
+      vpn:
+        pool: vpn_url_test_udp
+    - tier: fallback
+      vpn:
+        pool: vpn_url_test
+    - tier: emergency
+      vpn:
+        pool: emergency_pool

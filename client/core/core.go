@@ -73,11 +73,18 @@ const (
 
 // Options configures a client Core.
 type Options struct {
-	ClashListen string        // loopback Clash-API host:port (default 127.0.0.1:9090)
-	Interval    time.Duration // probe + reassert interval (default 10s)
-	KBFile      string        // KB persistence path ("" = in-memory)
-	KBDir       string        // per-network KB dir: the store becomes <dir>/<network-id>.json, keeping each network's learning separate (overrides KBFile when set)
-	ProbeProxy  string        // socks addr to probe through the tunnel ("" = probe direct)
+	ClashListen string // loopback Clash-API host:port (default 127.0.0.1:9090)
+	// ConfigPath is the deployment this service reads, and ConfigSource the
+	// user-writable deployment it was materialized FROM, when there is one. Both are
+	// carried so /status can say whether the running configuration is still current
+	// with what the operator edits — a pair that silently disagrees is the failure
+	// this project has already been bitten by twice, in other shapes.
+	ConfigPath   string
+	ConfigSource string
+	Interval     time.Duration // probe + reassert interval (default 10s)
+	KBFile       string        // KB persistence path ("" = in-memory)
+	KBDir        string        // per-network KB dir: the store becomes <dir>/<network-id>.json, keeping each network's learning separate (overrides KBFile when set)
+	ProbeProxy   string        // socks addr to probe through the tunnel ("" = probe direct)
 	// CanaryGoodputKBps is the floor a recipe must sustain to count as working.
 	// Reachability alone scores a frozen path as a win — TSPU's signature failure
 	// completes the handshake and then stalls — so the canary pulls real volume
@@ -1857,14 +1864,6 @@ func (c *Core) singboxOptions() singbox.Options {
 		// binary can actually load, instead of assuming the baseline.
 		opts.TargetVersion = c.conf.SingboxVersion
 	}
-	// A disabled block parses to nil, so non-nil already means "enabled".
-	if c.conf.FakeIP != nil {
-		opts.FakeIP = &singbox.FakeIPOptions{
-			Inet4Range: c.conf.FakeIP.Inet4Range,
-			Inet6Range: c.conf.FakeIP.Inet6Range,
-			Resolver:   c.conf.FakeIP.Resolver,
-		}
-	}
 	if c.conf.Multiplex != nil {
 		opts.Multiplex = &singbox.MultiplexOptions{
 			Protocol:       c.conf.Multiplex.Protocol,
@@ -1900,7 +1899,7 @@ func (c *Core) singboxOptions() singbox.Options {
 		// capture DNS, so it keeps the system resolver (no block). A user-declared
 		// dns config overrides the built-in split-DNS default.
 		if c.conf.DNS != nil {
-			opts.DNS = dnsFromConfig(c.conf.DNS, "vpn_url_test")
+			opts.DNS = config.DNSOptions(c.conf.DNS, "vpn_url_test")
 		} else {
 			opts.DNS = defaultDNS("vpn_url_test")
 		}
@@ -2029,31 +2028,6 @@ func defaultDNS(pool string) *singbox.DNSOptions {
 		Direct: "dns_direct",
 		Final:  "dns_remote",
 	}
-}
-
-// dnsFromConfig maps a user-declared config.DNS to generator options, resolving the
-// "vpn" detour alias to the primary VPN pool tag and pointing a hostname-addressed
-// server's bootstrap at the direct resolver.
-func dnsFromConfig(d *config.DNS, pool string) *singbox.DNSOptions {
-	out := &singbox.DNSOptions{Direct: d.Direct, Zapret: d.Zapret, Final: d.Final, Strategy: d.Strategy}
-	if d.FakeIP {
-		out.FakeIP = &singbox.FakeIPOptions{} // standard reserved ranges
-	}
-	for _, s := range d.Servers {
-		detour := s.Detour
-		if detour == "vpn" {
-			detour = pool
-		}
-		srv := singbox.DNSServer{
-			Tag: s.Name, Type: s.Type, Server: s.Address, Port: s.Port,
-			Path: s.Path, ServerName: s.ServerName, Detour: detour,
-		}
-		if s.Bootstrap && d.Direct != "" {
-			srv.Bootstrap = d.Direct
-		}
-		out.Servers = append(out.Servers, srv)
-	}
-	return out
 }
 
 // generate fetches subscription nodes and renders the client sing-box config
@@ -2316,7 +2290,7 @@ func (c *Core) newZapretExec(ctx context.Context) *zapretExec {
 		pick:      zaptune.KBPicker(c.recipeScore),
 		files:     c.opts.ZapretFiles,
 		hostlists: c.opts.HostlistDir,
-		presets:   c.conf.ZapretPresets,
+		presets:   c.conf.DesyncOverride,
 		// The lifetime an async verdict rides. It has a field because it must NOT be
 		// the applier's per-call context — and it was never assigned, so every canary
 		// and every sandbox test has been riding whatever context happened to reach

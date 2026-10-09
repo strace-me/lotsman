@@ -1,0 +1,168 @@
+# Lotsman — a router deployment. ANNOTATED EXAMPLE, placeholders only.
+#
+# A deployment is configuration.yaml PLUS rules/. The rules live one file each on
+# purpose: editing one rule must not reformat the others, and a rule you keep by hand is
+# a file somebody keeps by hand.
+#
+# Copy this directory, then:
+#   - put YOUR subscription URLs in `subscriptions` (never real creds in a repo)
+#   - point `-store-dir` at a directory of nfqws recipe files
+#   - check it before deploying:  lotsmand -preflight <dir>
+#     and generate the sing-box config to look at it:  lotsmanctl generate -config <dir>
+#
+# The body below is the real `examples/r5s.yaml` run through `lotsmanctl v2-migrate`,
+# with the values a template cannot carry dropped rather than left as blanks. So it is a
+# working file, not a sketch: what is here is what the loader reads.
+version: 2
+proxy:
+    engine: sing-box
+    # Capture mode. The vocabulary is `tun` (captures this machine) or `proxy`
+    # (listens on a socks address, captures nothing) — see ProxyModes in
+    # pkg/configv2/metadata_enums.go.
+    #
+    # A router wants tproxy rather than tun, and it is NOT expressible here yet:
+    # `proxy.mode` names the sing-box INBOUND the generator builds, while a router's
+    # ingress is nft capture into a tproxy port, which is `runtime.mode: router` plus
+    # `-tproxy-port` on the daemon. Adding `tproxy` to this field would make the
+    # document validate and then generate a config that captures nothing.
+    #
+    # This used to read `tun` under a comment saying tproxy, which is the wrong way
+    # round for a file people copy verbatim.
+    mode: proxy
+desync:
+    instances:
+        nfqws1-main:
+            engine: nfqws1
+            enabled: true
+            capture:
+                tcp:
+                    - "80"
+                    - "443"
+                udp:
+                    - "443"
+runtime:
+    # `tproxy` is NOT in this vocabulary and cannot be added here: the loader checks
+    # runtime.mode against the SAME list as proxy.mode, so a router's ingress cannot
+    # be expressed in it. What a router actually runs is tproxy capture driven by
+    # `-tproxy-port` on the daemon, with proxy.mode left at `proxy` above.
+    #
+    # So this field repeats the capture mode rather than naming a role, and the role
+    # stays a fact about where the file lives rather than a thing it claims.
+    mode: proxy
+    # Which interface is the uplink. Empty = detect, which is right on a laptop and
+    # wrong on a router behind a VLAN, so it is written out here.
+    wan: eth0.2
+    probe_interval: 30s
+    refresh_interval: 5m
+    state_dir: /var/lib/lotsman
+    runtime_dir: /run/lotsman
+data_sources:
+    runetfreedom:
+        type: v2ray-srs
+        repo: runetfreedom/russia-v2ray-rules-dat
+        refresh: 6h0m0s
+lists:
+    domains:
+        category-ru:
+            source: runetfreedom
+            dataset: geosite
+            category: category-ru
+        cloudflare:
+            source: runetfreedom
+            dataset: geosite
+            category: cloudflare
+        discord:
+            source: runetfreedom
+            dataset: geosite
+            category: discord
+        ru-blocked:
+            source: runetfreedom
+            dataset: geosite
+            category: ru-blocked
+        youtube:
+            source: runetfreedom
+            dataset: geosite
+            category: youtube
+    ips:
+        cloudflare:
+            source: runetfreedom
+            dataset: geoip
+            category: cloudflare
+        fastly:
+            source: runetfreedom
+            dataset: geoip
+            category: fastly
+        ru-blocked:
+            source: runetfreedom
+            dataset: geoip
+            category: ru-blocked
+        telegram:
+            source: runetfreedom
+            dataset: geoip
+            category: telegram
+hostlists:
+    - name: gaming-zapret
+      out: /opt/zapret-lotsman/lists/gaming.txt
+      sources:
+        - https://example.invalid/gaming-launchers.txt
+      min_keep_ratio: 0.5
+pools:
+    emergency_pool:
+        type: url_test
+        tags_include:
+            - emergency
+    vpn_bulk:
+        type: url_test
+        caps:
+            - tcp
+        tags_exclude:
+            - emergency
+        warmup: true
+    vpn_url_test:
+        type: url_test
+        caps:
+            - tcp
+        tags_exclude:
+            - emergency
+    vpn_url_test_udp:
+        type: url_test
+        caps:
+            - udp_native
+        tags_exclude:
+            - emergency
+        warmup: true
+subscriptions:
+    - name: vpn-a
+      url: https://YOUR-PANEL.example/s/SUBSCRIPTION-TOKEN
+      format: auto
+      tags:
+        - normal
+      enabled: true
+    - name: vpn-c
+      url: hysteria2://PASSWORD@HOST:443?sni=SNI&obfs=salamander&obfs-password=OBFS-PASSWORD
+      format: single_url
+      tags:
+        - normal
+      enabled: true
+    - name: de-host-de
+      url: hysteria2://PASSWORD@HOST:2096/?obfs=salamander&obfs-password=OBFS-PASSWORD&sni=SNI&insecure=1
+      format: single_url
+      tags:
+        - normal
+      enabled: true
+    - name: vpn-b
+      url: https://YOUR-PANEL.example/s/vpn-b-TOKEN
+      format: auto
+      tags:
+        - normal
+    - name: vpn-e
+      url: https://YOUR-PANEL.example/s/vpn-e-TOKEN
+      format: auto
+      tags:
+        - normal
+    - name: vpn-f
+      url: https://YOUR-PANEL.example/s/vpn-f-TOKEN
+      format: auto
+      tags:
+        - normal
+subscription_via_pool: vpn_url_test

@@ -2,12 +2,15 @@ package core
 
 import (
 	"context"
-	"github.com/strace-me/lotsman/pkg/version"
+	"os"
+	"path/filepath"
 	"sort"
 	"time"
 
+	"github.com/strace-me/lotsman/pkg/config"
 	"github.com/strace-me/lotsman/pkg/observe"
 	"github.com/strace-me/lotsman/pkg/subscription"
+	"github.com/strace-me/lotsman/pkg/version"
 )
 
 // Report is the rich /status payload a UI renders. It is a backward-compatible
@@ -42,6 +45,23 @@ type Report struct {
 	// on a timer — re-routing under a live tunnel unasked would drop connections the
 	// operator did not ask to lose — so the UI offers to apply it instead.
 	DomainListsDrifted bool `json:"domain_lists_drifted,omitempty"`
+	// Deployment says which configuration THIS service is running, and where it was
+	// materialized from when it has a source.
+	//
+	// It exists because a window cannot answer "is this machine configured?" from a
+	// path it chose itself. On the desktop the service reads a root-owned copy under
+	// /etc while the window writes ~/.config, so a window that looked only at its own
+	// default showed FIRST RUN on a machine running a perfectly good deployment — and
+	// offered to overwrite it. The service is the authority on what it is running; the
+	// window's own directory is the fallback for when there is no service to ask.
+	Deployment *Deployment `json:"deployment,omitempty"`
+}
+
+// Deployment is the configuration a service is running, and its provenance.
+type Deployment struct {
+	Path             string `json:"path"`
+	Source           string `json:"source"`
+	SourceConfigured bool   `json:"source_configured"`
 }
 
 // Verdict is the top-line rollup — is coverage working, partial, or down. It is
@@ -155,7 +175,34 @@ func (c *Core) Report(ctx context.Context) Report {
 		Disabled:      disabled,
 
 		DomainListsDrifted: c.listsDrifted.Load(),
+		Deployment:         c.deploymentInfo(),
 	}
+}
+
+// deploymentInfo reports the configuration this service is running.
+//
+// The source's existence is asked of the filesystem rather than inferred, because
+// "materialized at start" and "the source is still there" are different facts: an
+// operator who deletes the source leaves a service running a copy it can no longer
+// refresh, which is a condition to surface rather than a reason to report the
+// machine as unconfigured.
+func (c *Core) deploymentInfo() *Deployment {
+	path := c.opts.ConfigPath
+	if path == "" {
+		return nil
+	}
+	d := &Deployment{Path: path, Source: c.opts.ConfigSource}
+	if d.Source != "" {
+		if _, err := os.Stat(filepath.Join(d.Source, config.DocName)); err == nil {
+			d.SourceConfigured = true
+		}
+	} else {
+		// No source: the service reads -config itself, so ITS existence is the answer.
+		if _, err := os.Stat(filepath.Join(path, config.DocName)); err == nil {
+			d.SourceConfigured = true
+		}
+	}
+	return d
 }
 
 // verdict rolls the per-service states into one honest headline. A service is
@@ -310,7 +357,9 @@ func (c *Core) observeSnapshot() observe.Snapshot {
 
 // Notice codes. Stable strings, because a UI keys styling and dismissal off them.
 const (
-	NoticeIPv6Escape = "ipv6_escape"
+	NoticeIPv6Escape  = "ipv6_escape"
+	NoticeConfigDrift = "config_source_drift"
+	NoticeConfigNoSrc = "config_source_missing"
 )
 
 // Notice is something worth telling the operator that is not a service failure:
@@ -328,6 +377,9 @@ type Notice struct {
 func (c *Core) notices() []Notice {
 	var out []Notice
 	if n := c.ipv6EscapeNotice(); n != nil {
+		out = append(out, *n)
+	}
+	if n := c.configSourceDriftNotice(); n != nil {
 		out = append(out, *n)
 	}
 	return out

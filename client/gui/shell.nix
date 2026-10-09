@@ -20,13 +20,18 @@ pkgs.mkShell {
     wails
     pkg-config
     gtk3
-    webkitgtk_4_1 # Wails v2 links webkit2gtk-4.1
+    webkitgtk_4_1 # Wails v2.12 needs webkit2gtk-4.0, which nixpkgs has DROPPED.
+                  # The `-tags webkit2_41` below builds it against 4.1 instead — without
+                  # the tag, `wails build` fails at pkg-config with "No package
+                  # 'webkit2gtk-4.0' found", which is what this file used to produce.
     libayatana-appindicator # fyne.io/systray tray icon
   ];
 
   # Make sure pkg-config finds webkit2gtk-4.1 + gtk3 (wails doctor checks these).
   shellHook = ''
     export PKG_CONFIG_PATH="${pkgs.webkitgtk_4_1.dev}/lib/pkgconfig:${pkgs.gtk3.dev}/lib/pkgconfig:''${PKG_CONFIG_PATH:-}"
-    echo "lotsman gui build shell — run: (cd frontend && npm install) then: wails build"
+    echo "lotsman gui build shell — run: (cd frontend && npm install) then:"
+    echo "  wails build -tags webkit2_41"
+    echo "The tag is REQUIRED: nixpkgs removed webkit2gtk-4.0, and Wails v2 looks for it by default."
   '';
 }

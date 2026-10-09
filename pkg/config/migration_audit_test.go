@@ -26,7 +26,7 @@ func TestMigrationAuditOnTheRealProductionConfig(t *testing.T) {
 	if err != nil {
 		t.Skipf("production example not available: %v", err)
 	}
-	doc, err := ParseDocument(data)
+	doc, err := ParseLegacyDocument(data)
 	if err != nil {
 		t.Fatalf("the production config does not parse: %v", err)
 	}
@@ -78,7 +78,7 @@ func TestMigrationAuditOnTheRealProductionConfig(t *testing.T) {
 }
 
 // v1Actions flattens a service's chain into comparable action names, in order.
-func v1Actions(service serviceYAML) []string {
+func v1Actions(service LegacyService) []string {
 	var out []string
 	for _, step := range service.Chain {
 		switch step.Class {
@@ -120,7 +120,7 @@ func TestMigrationPreservesPriority(t *testing.T) {
 	if err != nil {
 		t.Skip("production example not available")
 	}
-	doc, err := ParseDocument(data)
+	doc, err := ParseLegacyDocument(data)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -152,7 +152,7 @@ func TestMigrationReportsEverythingItCannotExpress(t *testing.T) {
 	if err != nil {
 		t.Skip("production example not available")
 	}
-	doc, err := ParseDocument(data)
+	doc, err := ParseLegacyDocument(data)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -163,9 +163,19 @@ func TestMigrationReportsEverythingItCannotExpress(t *testing.T) {
 	if len(migration.Warnings) == 0 {
 		t.Fatal("the real config surely has fields v2 cannot express; none were reported")
 	}
-	// A warning must name its rule, or the operator cannot find the thing to fix.
+	// A warning must be LOCATABLE — it has to name the thing to go and fix, whether that
+	// is a rule or a document-level section. A warning that says what changed without
+	// saying where is a note, and notes are what the operator learns to skip.
+	locatable := []string{`rule "`, "declared the", "desync instance", "dns", "fakeip", "override", "categories:", "subscription", "multiplex", "utls"}
 	for _, w := range migration.Warnings {
-		if !strings.Contains(w, `rule "`) && !strings.Contains(w, "declared the") {
+		found := false
+		for _, needle := range locatable {
+			if strings.Contains(w, needle) {
+				found = true
+				break
+			}
+		}
+		if !found {
 			t.Errorf("warning does not say what it is about: %q", w)
 		}
 	}

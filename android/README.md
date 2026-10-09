@@ -3,7 +3,7 @@
 An Android app that runs the **unchanged** `client/core` control plane in-process
 by embedding sing-box as a library (`libbox`) instead of executing a binary.
 
-**Status: written, never built.** There is no Android SDK, no NDK and no
+**Status: written, never built, and stale against the config layer.** There is no Android SDK, no NDK and no
 `liblotsman.aar` on the machine this was authored on. Treat every symbol that
 crosses the Go boundary as a claim to be checked by the first real compile. The
 [Unverified](#unverified) section lists each one.
@@ -39,7 +39,7 @@ with no tun, and drags the IPC design back in.
 | `app/src/main/java/me/strace/lotsman/LotsmanVpnService.kt` | the VpnService + libbox `PlatformInterface` + Go lifecycle |
 | `app/src/main/java/me/strace/lotsman/PlatformInterop.kt` | gomobile iterator adapters; `net.Interfaces()` replacement |
 | `app/src/main/java/me/strace/lotsman/MainActivity.kt` | one button, consent flow, `StatusJSON()` polling |
-| `app/src/main/assets/config.yaml` | placeholder client config copied to `filesDir` on first run |
+| `app/src/main/assets/config/` | placeholder **deployment** — `configuration.yaml` + `rules/*.yaml` — copied to `filesDir/config` on first run |
 | `app/libs/` | where `liblotsman.aar` is dropped (gitignored) |
 
 ## Build
@@ -192,6 +192,11 @@ device (`java -version` fails; `which gomobile` is empty). Executed:
 
 - `pkg/config.Parse` on `app/src/main/assets/config.yaml` — parses clean,
   2 services, 1 subscription, 1 chain step each.
+  ⚠️ **This line describes a call that no longer exists.** `config.Parse` went with the v1
+  parser (2026-10-06); there is one schema now and `client/mobile/facade.go`'s
+  `Start(configDir, filesDir)` takes a **deployment directory**, not a YAML string.
+  The asset is still a single v1 `config.yaml` on disk, so the facade and the
+  asset disagree — see the open item below.
 - XML well-formedness of the manifest and both resource files.
 - Bracket balance of every `.kt` / `.kts` file (a smoke test, not a compile).
 - **Seam reconciliation against source**, in a later pass: every Java symbol this
@@ -243,10 +248,14 @@ In rough order of how likely it is to bite:
 5. **Calling `statusJSON()` before `Start()`.** Guarded by only polling while the
    service reports STARTING/RUNNING, but a facade that panics when uninitialised
    would still take the process down from the UI thread pool.
-6. ~~The placeholder `assets/config.yaml`~~ — **verified**, see above. What is
-   still unverified is whether the Go facade accepts it end to end: it declares
-   VPN-only chains against a subscription URL that resolves nowhere, so `Start()`
-   will come up with an empty node pool.
+6. **The placeholder asset does not match the facade's signature.** The facade
+   takes a deployment DIRECTORY (`Start(configDir, filesDir)`) and the loader
+   requires `version: 2`, but the asset is a single v1 `config.yaml` with a
+   `services:` list. This is a **known break**, not an unknown: the asset needs to
+   become `assets/config/configuration.yaml` + `assets/config/rules/*.yaml` with
+   `version: 2`, and Kotlin must pass `filesDir/config`. Worth doing against
+   `examples/minimal/` — it is tested against the loader, so it cannot rot the way a
+   hand-written placeholder did.
 7. **Version catalog.** AGP 8.7.3 / Kotlin 2.0.21 / Compose BOM 2024.10.01 were
     never resolved against a repository from here.
 8. **flatDir resolution.** `implementation(group = "", name = "liblotsman", ext =

@@ -40,6 +40,23 @@ type Report struct {
 	// Disabled names services the operator switched off. They carry no runtime
 	// state — nothing probes or routes them — so they are names, not Services.
 	Disabled []string `json:"disabled"`
+	// Deployment says which configuration THIS service is running, and where it was
+	// materialized from when it has a source.
+	//
+	// It exists because a window cannot answer "is this machine configured?" from a
+	// path it chose itself: the service reads a root-owned copy under /etc while the
+	// window writes ~/.config, so a window that looked only at its own default showed
+	// FIRST RUN on a machine running a good deployment, and offered to overwrite it.
+	Deployment *Deployment `json:"deployment,omitempty"`
+}
+
+// Deployment is the configuration a service is running, and its provenance. Kept
+// byte-for-byte compatible with client/core's twin: one wire shape, two Go types,
+// which is why the round trip is asserted in a test rather than trusted.
+type Deployment struct {
+	Path             string `json:"path"`
+	Source           string `json:"source"`
+	SourceConfigured bool   `json:"source_configured"`
 }
 
 // Notice is a condition the daemon wants the operator to see. Text is the whole
@@ -149,14 +166,24 @@ type Event struct {
 	Reason        string    `json:"reason"`
 }
 
-// ConfigDoc is the service's config file: its path, the raw YAML (for the escape
-// hatch), and Doc — the structured config the UI edits with forms. Doc is opaque
-// here (json.RawMessage) so this package stays free of pkg/config; the frontend
-// parses it.
+// ConfigDoc is a whole DEPLOYMENT: the document, plus one entry per rule file.
+//
+// It is not one file and this type does not pretend otherwise. A deployment is
+// configuration.yaml + rules/, a rule edit must not reformat the others, and an
+// editor that could only see one file would have to invent a path for every rule it
+// touched.
+//
+// The structured parts are json.RawMessage so this package stays free of pkg/config
+// and the frontend owns the shape. `Rules` is RAW for one reason beyond symmetry:
+// absent must stay ABSENT through a round trip, because absent means "I am not
+// touching the rules" while an explicit [] means "delete them all", and a typed
+// slice cannot tell those apart once decoded.
 type ConfigDoc struct {
-	Path string          `json:"path"`
-	YAML string          `json:"yaml"`
-	Doc  json.RawMessage `json:"doc,omitempty"`
+	Path     string          `json:"path"`
+	RulesDir string          `json:"rules_dir,omitempty"`
+	YAML     string          `json:"yaml,omitempty"`
+	Config   json.RawMessage `json:"config,omitempty"`
+	Rules    json.RawMessage `json:"rules,omitempty"`
 }
 
 // Client talks to one control socket. It is safe for concurrent use.
@@ -296,7 +323,8 @@ func (c *Client) Stop(ctx context.Context) error {
 	return c.post(ctx, "/stop")
 }
 
-// Config fetches the service's current config file (raw YAML + its path).
+// Config fetches the service's current deployment: the document and every rule, each
+// in raw and structured form.
 func (c *Client) Config(ctx context.Context) (ConfigDoc, error) {
 	var d ConfigDoc
 	err := c.getJSON(ctx, "/config", &d)
@@ -315,16 +343,19 @@ func (c *Client) SetConfig(ctx context.Context, yaml string) error {
 	return c.postJSON(ctx, "/config", ConfigDoc{YAML: yaml})
 }
 
-// ValidateConfigDoc checks a structured config document without writing it.
-func (c *Client) ValidateConfigDoc(ctx context.Context, doc json.RawMessage) error {
-	return c.postJSON(ctx, "/config/validate", ConfigDoc{Doc: doc})
+// ValidateConfigDoc checks a candidate deployment without writing it. Both structured
+// parts are passed through untouched, so a validate and a save carry the same thing —
+// a check that validates a different shape from the one that gets written is a check
+// that proves nothing.
+func (c *Client) ValidateConfigDoc(ctx context.Context, doc, rules json.RawMessage) error {
+	return c.postJSON(ctx, "/config/validate", ConfigDoc{Config: doc, Rules: rules})
 }
 
-// SetConfigDoc validates + writes a structured config document and applies it — the
-// primary path. The service re-serialises the structure to YAML, so the UI never
-// handles YAML itself.
-func (c *Client) SetConfigDoc(ctx context.Context, doc json.RawMessage) error {
-	return c.postJSON(ctx, "/config", ConfigDoc{Doc: doc})
+// SetConfigDoc validates + writes a structured deployment and applies it — the primary
+// path. The service re-serialises the structure to YAML, so the UI never handles YAML
+// itself.
+func (c *Client) SetConfigDoc(ctx context.Context, doc, rules json.RawMessage) error {
+	return c.postJSON(ctx, "/config", ConfigDoc{Config: doc, Rules: rules})
 }
 
 func (c *Client) getJSON(ctx context.Context, path string, out any) error {

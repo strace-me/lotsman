@@ -59,3 +59,23 @@ export function fmtAgo(ms, now) {
   const m = Math.round(s / 60)
   return m < 60 ? m + ' мин назад' : Math.round(m / 60) + ' ч назад'
 }
+
+// Russian plural: 1 домен, 2 домена, 5 доменов. The naive `n === 1 ? ... : ...`
+// that this file used instead produced "3 доменов" and "3 подсетей" on every rule row,
+// which is the sort of small wrongness that makes an interface read as machine-made.
+//
+// The rule for 2-4 (but not 12-14) is the one that makes this worth a function: it
+// depends on the LAST TWO digits, and only on whether the number itself is a teen.
+export function plural(n, one, few, many) {
+  const abs = Math.abs(n) % 100
+  const last = abs % 10
+  if (abs > 10 && abs < 20) return many
+  if (last > 1 && last < 5) return few
+  if (last === 1) return one
+  return many
+}
+
+export const pluralList = (n) => `${n} ${plural(n, 'список', 'списка', 'списков')}`
+export const pluralDomain = (n) => `${n} ${plural(n, 'домен', 'домена', 'доменов')}`
+export const pluralCidr = (n) => `${n} ${plural(n, 'подсеть', 'подсети', 'подсетей')}`
+export const pluralRule = (n) => `${n} ${plural(n, 'правило', 'правила', 'правил')}`

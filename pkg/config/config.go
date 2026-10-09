@@ -1,634 +1,81 @@
-// Package config loads the declarative YAML into domain types: the service
-// registry, subscription declarations, and the pool set. It is the
-// composition root for static configuration — it imports the domain packages
-// rather than the other way around, and assigns derived fields (chain
-// positions) and validates before handing clean structs to the daemon.
+// Package config projects the one configuration schema (pkg/configv2) onto the
+// runtime shape the daemon and the client consume.
+//
+// The division is deliberate: configv2 owns the DOCUMENT — what a file says — and
+// this package owns the RUNTIME — what the brain, the applier, the nft renderer and
+// the sing-box generator read. One schema, one reader, one projection. Two schemas
+// with two readers is the shape this project keeps meeting: a config that validates
+// in one place and is rejected in another, each green in its own tests.
 package config
 
 import (
-	"bytes"
-	"errors"
 	"fmt"
-	"io"
 	"os"
-	"path/filepath"
-	"sort"
 	"strconv"
 	"strings"
-	"time"
-
-	"gopkg.in/yaml.v3"
 
 	"github.com/strace-me/lotsman/pkg/aggregate"
-	"github.com/strace-me/lotsman/pkg/dataplane"
+	"github.com/strace-me/lotsman/pkg/configv2"
 	"github.com/strace-me/lotsman/pkg/pools"
 	"github.com/strace-me/lotsman/pkg/registry"
 	"github.com/strace-me/lotsman/pkg/strategy"
-	"github.com/strace-me/lotsman/pkg/strategystore"
 	"github.com/strace-me/lotsman/pkg/subscription"
 	"github.com/strace-me/lotsman/pkg/zapret"
 )
 
 // Config is the parsed, validated configuration.
+//
+// It is the RUNTIME shape, not a document: one schema exists (configv2) and this is
+// what a document projects onto. Keeping them separate is what lets a single reader
+// answer "what is a valid config" — the failure this project keeps meeting is two
+// readers that disagree, each green in its own tests.
 type Config struct {
 	Registry        *registry.Registry
 	Subscriptions   []subscription.Declaration
 	Pools           *pools.Set
 	Zapret          []zapret.Instance
 	Devices         []registry.Device
-	Hostlists       []Hostlist
+	Hostlists       []configv2.ResolvedHostlist
 	Strategies      []strategy.Definition // declared strategies, added on top of the builtin catalog
 	UTLSFingerprint string                // default tls.utls fingerprint injected into TCP TLS outbounds lacking one ("" = off)
 	SingboxVersion  string                // target sing-box version (e.g. "1.12.17"); gates version-specific knobs ("" = generator baseline)
-	FakeIP          *FakeIP               // legacy fakeip-only DNS section (nil = off); superseded by DNS
-	DNS             *DNS                  // split-DNS: multi-server, DoT/DoH/DoQ, VPN-detoured (nil = client default)
-	Multiplex       *Multiplex            // default outbound multiplex for TCP proxies (nil = off)
+	DNS             *configv2.DNS         // split-DNS: multi-server, DoT/DoH/DoQ, VPN-detoured (nil = client default)
+	Multiplex       *configv2.Multiplex   // default outbound multiplex for TCP proxies (nil = off)
 	SubViaPool      string                // route subscription endpoint hosts through this VPN pool (LOT-28); needs -probe-proxy ("" = off, direct fetch)
-	// ZapretPresets are upstream bundles run verbatim (empty = compose per rule).
-	// More than one means the lane TRIES them, whole, and only a preset that
-	// carried moves live traffic.
-	ZapretPresets []ZapretPreset
-	// DisabledServices names the services the operator switched OFF. They are absent
-	// from Registry entirely — nothing probes, routes or desyncs them — and are
-	// carried here only so a UI can list them and offer to switch them back on.
+	// DesyncOverride runs an upstream bundle verbatim instead of composing a recipe per
+	// rule. More than one means the lane TRIES them, whole, and only one that carried
+	// moves live traffic. See configv2.Override for what the mode costs.
+	DesyncOverride []configv2.ResolvedOverride
+	// DisabledServices names the rules the operator switched OFF. They are absent from
+	// Registry entirely — nothing probes, routes or desyncs them — and are carried here
+	// only so a UI can list them and offer to switch them back on.
 	DisabledServices []string
-	// Detours composes egress: pool -> the pool its nodes dial out THROUGH. Empty for
-	// a v1 document. Composition, not fallback: `Chain` is "try until one works",
-	// a detour is "use this pool, but reach it through that one", and it nests. An
-	// empty map generates byte-identically, so it costs a v1 deployment nothing.
+	// Detours composes egress: pool -> the pool its nodes dial out THROUGH. Composition,
+	// not fallback: a chain step is "try until one works", a detour is "use this pool,
+	// but reach it through that one", and it nests.
 	Detours map[string]string
-	// RemoteRuleSets is tag -> URL for lists declared with `srs_url`: sing-box
-	// fetches them itself, so we neither download nor compile them. v1 has no
-	// equivalent, and an empty map generates byte-identically, so this costs a v1
-	// deployment nothing.
+	// RemoteRuleSets is tag -> URL for lists declared with `srs_url`: sing-box fetches
+	// them itself, so we neither download nor compile them.
 	RemoteRuleSets map[string]string
-	// BypassedServices names the rules that declared `bypass: true`. They are absent
-	// from Registry for a different reason than DisabledServices — one is a switch
-	// the operator turned off, the other is a standing statement that these domains
-	// are not Lotsman's business — and a UI offering to switch one back on must not
-	// offer it for the other. v1 has no equivalent: it had nowhere to say it.
+	// BypassedServices names the rules that declared `bypass: true`. They are absent from
+	// Registry for a different reason than DisabledServices — one is a switch the operator
+	// turned off, the other is a standing statement that these domains are not Lotsman's
+	// business — and a UI offering to switch one back on must not offer it for the other.
 	BypassedServices []string
 }
 
-// ZapretPreset is an upstream desync bundle run EXACTLY as its author wrote it:
-// its own profiles, in its own order, against its own hostlists.
-//
-// It exists because taking one apart is lossy in a way nothing downstream can
-// repair. Flowseal's ALT12 is one nfqws launch with nine profiles, and each
-// profile carries a DIFFERENT hostlist — the narrow tcp/443 Google treatment
-// against list-google, the broad one against list-general. Lotsman composes per
-// RULE, one hostlist per rule, so both profiles receive the same list, the second
-// can never match, and the recipe is refused as self-shadowing. The refusal is
-// correct about what we would have rendered and says nothing about ALT12, which
-// is a whole-machine bundle and simply is not a per-rule strategy.
-//
-// What the mode costs, stated plainly: per-rule recipe learning stops, because
-// one bundle serves every rule and there is nothing left to choose between. The
-// rungs still work — a rule on its desync rung routes DIRECT and meets the
-// preset, a rule on VPN is tunnelled and never reaches it — and the canary still
-// judges each rule on its own volume, so a preset that stops carrying still
-// escalates the rules it was carrying.
-type ZapretPreset struct {
-	Name string   // the upstream's own name, for the log and the UI ("ALT12")
-	Args []string // nfqws argv, verbatim
-}
-
-// FakeIP enables the generated fakeip DNS section (domain-accurate routing via
-// synthetic IPs). Ranges default to the standard reserved blocks when empty.
-type FakeIP struct {
-	Inet4Range string
-	Inet6Range string
-	Resolver   string // real upstream for non-fake queries (https URL or host[:port] udp)
-}
-
-// Multiplex enables a default `multiplex` block on TCP proxy outbounds
-// (vless/vmess/trojan/shadowsocks). Server-cooperative, so off by default.
-type Multiplex struct {
-	Protocol       string // smux (default) | yamux | h2mux
-	MaxConnections int
-	MinStreams     int
-	Padding        bool
-	BrutalUp       int // brutal up_mbps (0 = no brutal)
-	BrutalDown     int // brutal down_mbps
-}
-
-// Hostlist declares a merged domain list to (re)build periodically: fetch every
-// source, drop everything on an exclude source, dedup, and write to Out (the
-// hostlist file nfqws reads).
-type Hostlist struct {
-	Name         string
-	Out          string
-	Sources      []aggregate.Source
-	Exclude      []aggregate.Source
-	Domains      []string // the operator's own entries, merged with the fetched ones
-	MinKeepRatio float64  // global shrink guard: reject a rebuild below this fraction of the last good count (0 = disabled)
-}
-
-// --- on-disk shape ---
-
-// Document is the editable, round-trippable form of the config file — the exact
-// on-disk YAML shape, exported so a UI can read it as JSON, edit it structurally,
-// and hand it back for the service to re-serialise and validate. The service owns
-// the file; the UI works with this structure and never handles YAML itself. (The
-// sub-types stay unexported: a UI round-trips the whole Document as JSON, so it
-// never needs to name them.)
-type Document struct {
-	// Version is the SCHEMA of this document: 1 here, 2 in a v2 document. It is what
-	// `-config` dispatches on, so one path reaches both schemas.
-	//
-	// It exists because two schemas with two entry points is the shape that produced
-	// every "which file is authoritative" question: -config for one, -run-v2 for the
-	// other, both valid, neither obviously right. Absent means 1, which is the safe
-	// direction — a file that says nothing is the old one.
-	//
-	// Not to be confused with `singbox_version`, which is the sing-box RELEASE the
-	// config is generated for.
-	Version         int                        `yaml:"version,omitempty"`
-	Services        []serviceYAML              `yaml:"services"`
-	Categories      map[string]categoryYAML    `yaml:"categories"`
-	Subscriptions   []subscription.Declaration `yaml:"subscriptions"`
-	Pools           map[string]poolYAML        `yaml:"pools"`
-	Zapret          zapretYAML                 `yaml:"zapret"`
-	Devices         []deviceYAML               `yaml:"devices"`
-	Hostlists       []hostlistYAML             `yaml:"hostlists"`
-	Strategies      []strategyYAML             `yaml:"strategies"`
-	UTLSFingerprint string                     `yaml:"utls_fingerprint"`
-	SingboxVersion  string                     `yaml:"singbox_version"`
-	FakeIP          *fakeipYAML                `yaml:"fakeip"`
-	DNS             *dnsYAML                   `yaml:"dns"`
-	Multiplex       *multiplexYAML             `yaml:"multiplex"`
-	SubViaPool      string                     `yaml:"subscription_via_pool"`
-}
-
-type fakeipYAML struct {
-	Enabled    bool   `yaml:"enabled"`
-	Inet4Range string `yaml:"inet4_range"`
-	Inet6Range string `yaml:"inet6_range"`
-	Resolver   string `yaml:"resolver"`
-}
-
-type multiplexYAML struct {
-	Enabled        bool   `yaml:"enabled"`
-	Protocol       string `yaml:"protocol"`
-	MaxConnections int    `yaml:"max_connections"`
-	MinStreams     int    `yaml:"min_streams"`
-	Padding        bool   `yaml:"padding"`
-	BrutalUp       int    `yaml:"brutal_up_mbps"`
-	BrutalDown     int    `yaml:"brutal_down_mbps"`
-}
-
-type categoryYAML struct {
-	RequiredCaps []string        `yaml:"required_caps"`
-	DefaultChain []chainStepYAML `yaml:"default_chain"`
-	Profile      string          `yaml:"profile"` // group default profile (services inherit if unset) — LOT-23
-	Sticky       bool            `yaml:"sticky"`  // group default sticky (services inherit if unset) — LOT-23
-}
-
-type strategyYAML struct {
-	ID         string   `yaml:"id"`
-	Class      string   `yaml:"class"`
-	NFQWSArgs  []string `yaml:"nfqws_args"`
-	BlockTypes []string `yaml:"block_types"`
-	Notes      string   `yaml:"notes"`
-}
-
-type hostlistYAML struct {
-	Name    string   `yaml:"name"`
-	Out     string   `yaml:"out"`
-	Sources []string `yaml:"sources"`
-	Exclude []string `yaml:"exclude"`
-	// Domains are the operator's own entries, merged with whatever the sources
-	// yield. A pack may be nothing BUT these — until they existed the only way to
-	// declare your own reusable list was to publish it at a URL and fetch it back.
-	Domains      []string `yaml:"domains"`
-	MinKeepRatio float64  `yaml:"min_keep_ratio"`
-}
-
-type deviceYAML struct {
-	Name    string   `yaml:"name"`
-	Sources []string `yaml:"sources"`
-	Policy  string   `yaml:"policy"`
-}
-
-type zapretYAML struct {
-	Instances []instanceYAML `yaml:"instances"`
-	// Preset runs an upstream bundle VERBATIM instead of composing a recipe per
-	// rule. See registry.Preset for why that is a mode and not a shortcut.
-	Preset presetYAML `yaml:"preset"`
-}
-
-type presetYAML struct {
-	Name     string `yaml:"name"`
-	ArgsFile string `yaml:"args_file"`
-	// Dir loads EVERY *.args in a directory, so the twenty-one Flowseal strategies
-	// become twenty-one candidates without twenty-one config entries. The preset's
-	// name comes from the header line the converter writes, or from the filename.
-	Dir string `yaml:"dir"`
-}
-
-type instanceYAML struct {
-	Name      string      `yaml:"name"`
-	QNum      int         `yaml:"qnum"`
-	Capture   captureYAML `yaml:"capture"`
-	Connbytes int         `yaml:"connbytes"`
-}
-
-type captureYAML struct {
-	TCP []any `yaml:"tcp"` // ints or "range" strings
-	UDP []any `yaml:"udp"`
-}
-
-type serviceYAML struct {
-	Name string `yaml:"name"`
-	// Disabled switches the service OFF: it is dropped at registry build, so no
-	// probe, route rule or desync entry is ever produced for it. The declaration
-	// stays in the file so the operator can switch it back on without retyping it.
-	// A bit rather than a deletion, because deleting is not what "I don't use
-	// Discord" means.
-	Disabled    bool   `yaml:"disabled,omitempty"`
-	Category    string `yaml:"category"`
-	ProbeType   string `yaml:"probe_type"`
-	ProbeTarget string `yaml:"probe_target"`
-	// VolumeTarget is a URL with real BULK to download, used only by the throughput
-	// canary. The probe target is the wrong URL for it: probes are deliberately
-	// tiny (youtube's is a 204 with no body at all), so measuring goodput against
-	// one reports the size of the endpoint and blames the strategy for it.
-	// Empty = fall back to probe_target, and the canary refuses to judge when that
-	// turns out to have nothing to give.
-	VolumeTarget    string   `yaml:"volume_target"`
-	VolumeTargets   []string `yaml:"volume_targets"`    // measured alongside volume_target; the worst endpoint decides
-	VolumeBytes     int      `yaml:"volume_bytes"`      // how much to pull from them; 0 = the global -canary-goodput-bytes
-	VolumeFloorKBps float64  `yaml:"volume_floor_kbps"` // throughput a candidate must sustain; 0 = derived from volume_bytes
-	RuleSets        []string `yaml:"rule_sets"`
-	Domains         []string `yaml:"domains"`
-	DomainLists     []string `yaml:"domain_lists"` // names of hostlists: whose domains are merged into Domains (declare a pack once, attach it to any service)
-	// ExcludeLists names hostlists whose domains are merged into ExcludeDomains —
-	// the same declare-once-attach-anywhere move, for the OTHER direction. Upstream
-	// strategy bundles ship a global exclude list (Flowseal's is 112 domains: CDNs
-	// and endpoints that work direct and BREAK under desync), and pasting that into
-	// every rule inline is how it stops being maintained.
-	ExcludeLists   []string        `yaml:"exclude_lists"`
-	ExcludeDomains []string        `yaml:"exclude_domains"` // raw-pass through nfqws desync (composer --hostlist-exclude; LOT-36 CDNs)
-	SpreadClients  []string        `yaml:"spread_clients"`  // LAN client CIDRs spread across this service's VPN nodes (LOT-23)
-	IPs            []string        `yaml:"ips"`
-	IPsFile        string          `yaml:"ips_file"` // optional file of extra CIDRs (one per line, # comments); merged into IPs. Home for runtime-learned sets (e.g. Discord voice).
-	Sticky         *bool           `yaml:"sticky"`   // pointer so "unset" (inherit category) differs from explicit false — LOT-23
-	Profile        string          `yaml:"profile"`
-	Static         bool            `yaml:"static"`
-	EscalateAfter  int             `yaml:"escalate_after"`
-	RecoverAfter   int             `yaml:"recover_after"`
-	Priority       int             `yaml:"priority"`
-	TLSFragment    bool            `yaml:"tls_fragment"`
-	Chain          []chainStepYAML `yaml:"chain"`
-}
-
-type chainStepYAML struct {
-	State       string `yaml:"state"`
-	Class       string `yaml:"class"`
-	StrategyID  string `yaml:"strategy_id"`
-	ProbeType   string `yaml:"probe_type"`   // per-rung probe override (LOT-3): http|tcp|stun|quic (empty = inherit service)
-	ProbeTarget string `yaml:"probe_target"` // per-rung probe target override
-}
-
-type poolYAML struct {
-	Type string `yaml:"type"`
-	// Limit is speedtest_top's member cap: how many of the fastest nodes to keep.
-	// It is ignored by url_test, which is a selector and not a ranking.
-	Limit       int        `yaml:"limit"`
-	Filter      filterYAML `yaml:"filter"`
-	Warmup      bool       `yaml:"warmup"`       // keep this pool always-hot (idle_timeout 0s) for instant failover
-	Interval    string     `yaml:"interval"`     // url-test probe period, e.g. "1m" (empty = default)
-	IdleTimeout string     `yaml:"idle_timeout"` // stop probing after idle, e.g. "30m" or "0s" (empty = sing-box default)
-}
-
-type filterYAML struct {
-	Caps             []string `yaml:"caps"`
-	TagsInclude      []string `yaml:"tags_include"`
-	TagsExclude      []string `yaml:"tags_exclude"`
-	CountriesInclude []string `yaml:"countries_include"`
-	CountriesExclude []string `yaml:"countries_exclude"`
-}
-
-// Load reads and parses a config file.
-func Load(path string) (*Config, error) {
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return nil, err
-	}
-	return Parse(data)
-}
-
-// Parse parses and validates config bytes.
-// strictUnmarshal decodes YAML and REJECTS keys the schema does not know.
-//
-// Without this a misspelled key ("subscription:" for "subscriptions:", "domain_list:"
-// for "domain_lists:") is indistinguishable from leaving it out: the config validates,
-// the feature is silently off, and the operator is left debugging why a setting they
-// can see in the file does nothing. Worse, the in-app editor round-trips through
-// Document.YAML(), which serialises only known fields — so saving from the GUI would
-// then DELETE the misspelled line from their file.
-func strictUnmarshal(data []byte, into any) error {
-	dec := yaml.NewDecoder(bytes.NewReader(data))
-	dec.KnownFields(true)
-	if err := dec.Decode(into); err != nil {
-		if errors.Is(err, io.EOF) {
-			return nil // an empty document is a valid, empty config
-		}
-		return err
-	}
-	return nil
-}
-
-func Parse(data []byte) (*Config, error) {
-	var f Document
-	if err := strictUnmarshal(data, &f); err != nil {
-		return nil, fmt.Errorf("config: yaml: %w", err)
-	}
-
-	cats, err := buildCategories(f.Categories)
-	if err != nil {
-		return nil, err
-	}
-	// Hostlists are resolved BEFORE services, because a service may pull a whole pack
-	// of domains from one by name (domain_lists).
-	hostlists, err := buildHostlists(f.Hostlists)
-	if err != nil {
-		return nil, err
-	}
-	reg, err := buildRegistry(f.Services, cats, hostlists)
-	if err != nil {
-		return nil, err
-	}
-	pl, err := buildPools(f.Pools)
-	if err != nil {
-		return nil, err
-	}
-	presets, err := buildPresets(f.Zapret.Preset)
-	if err != nil {
-		return nil, err
-	}
-	instances, err := buildZapret(f.Zapret)
-	if err != nil {
-		return nil, err
-	}
-	devices := make([]registry.Device, 0, len(f.Devices))
-	for _, d := range f.Devices {
-		if d.Name == "" {
-			return nil, fmt.Errorf("config: device with empty name")
-		}
-		devices = append(devices, registry.Device{Name: d.Name, Sources: d.Sources, Policy: d.Policy})
-	}
-	// Fill in the standard pools a chain references but the config did not declare,
-	// so a config that leans on the builtin categories does not have to hand-copy
-	// the same three pool blocks into every file.
-	injectBuiltinPools(pl, reg, f.SubViaPool, devices)
-	strategies, err := buildStrategies(f.Strategies)
-	if err != nil {
-		return nil, err
-	}
-	var fakeip *FakeIP
-	if f.FakeIP != nil && f.FakeIP.Enabled {
-		fakeip = &FakeIP{Inet4Range: f.FakeIP.Inet4Range, Inet6Range: f.FakeIP.Inet6Range, Resolver: f.FakeIP.Resolver}
-	}
-	var mux *Multiplex
-	if f.Multiplex != nil && f.Multiplex.Enabled {
-		mux = &Multiplex{Protocol: f.Multiplex.Protocol, MaxConnections: f.Multiplex.MaxConnections, MinStreams: f.Multiplex.MinStreams, Padding: f.Multiplex.Padding, BrutalUp: f.Multiplex.BrutalUp, BrutalDown: f.Multiplex.BrutalDown}
-	}
-	dns, err := buildDNS(f.DNS)
-	if err != nil {
-		return nil, err
-	}
-	var disabled []string
-	for _, s := range f.Services {
-		if s.Disabled {
-			disabled = append(disabled, s.Name)
-		}
-	}
-	sort.Strings(disabled)
-	return &Config{Registry: reg, Subscriptions: f.Subscriptions, Pools: pl, Zapret: instances, Devices: devices, Hostlists: hostlists, Strategies: strategies, UTLSFingerprint: f.UTLSFingerprint, SingboxVersion: f.SingboxVersion, FakeIP: fakeip, DNS: dns, Multiplex: mux, SubViaPool: f.SubViaPool, DisabledServices: disabled, ZapretPresets: presets}, nil
-}
-
-// LoadDocument reads the config file into its editable Document form (no
-// validation — call Validate for that). Use it to show a UI the current config.
-func LoadDocument(path string) (*Document, error) {
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return nil, err
-	}
-	return ParseDocument(data)
-}
-
-// ParseDocument unmarshals config bytes into the editable Document WITHOUT the full
-// validation Parse does — the raw structural round-trip, not the domain build.
-func ParseDocument(data []byte) (*Document, error) {
-	var d Document
-	if err := strictUnmarshal(data, &d); err != nil {
-		return nil, fmt.Errorf("config: yaml: %w", err)
-	}
-	return &d, nil
-}
-
-// YAML re-serialises the document to on-disk YAML — the writer that turns a UI's
-// structured edits back into the file the service reads. Comments in the original
-// file are not preserved (that is what the raw-YAML escape hatch is for).
-func (d *Document) YAML() ([]byte, error) {
-	return yaml.Marshal(d)
-}
-
-// Validate reports whether the document builds into a valid config, reusing the
-// exact checks Parse runs, so a UI can reject a bad edit before it is written.
-func (d *Document) Validate() error {
-	data, err := d.YAML()
-	if err != nil {
-		return err
-	}
-	_, err = Parse(data)
-	return err
-}
-
-// buildCategories starts from the builtin seven and applies config overrides
-// (a config category with the same name replaces the builtin; a new name adds).
-func buildCategories(in map[string]categoryYAML) (map[string]registry.Category, error) {
-	cats := registry.BuiltinCategories()
-	for name, c := range in {
-		if name == "" {
-			return nil, fmt.Errorf("config: category with empty name")
-		}
-		chain := make([]registry.ChainStep, 0, len(c.DefaultChain))
-		for i, step := range c.DefaultChain {
-			if !validState(step.State) {
-				return nil, fmt.Errorf("config: category %q step %d: unknown state %q", name, i, step.State)
-			}
-			if !validClass(step.Class) {
-				return nil, fmt.Errorf("config: category %q step %d: unknown class %q", name, i, step.Class)
-			}
-			chain = append(chain, registry.ChainStep{State: step.State, StrategyClass: step.Class, StrategyID: step.StrategyID, ProbeType: step.ProbeType, ProbeTarget: step.ProbeTarget})
-		}
-		cats[name] = registry.Category{Name: name, RequiredCaps: c.RequiredCaps, DefaultChain: chain,
-			DefaultProfile: c.Profile, DefaultSticky: c.Sticky}
-	}
-	return cats, nil
-}
-
-func buildStrategies(in []strategyYAML) ([]strategy.Definition, error) {
-	out := make([]strategy.Definition, 0, len(in))
-	for _, s := range in {
-		if s.ID == "" {
-			return nil, fmt.Errorf("config: strategy with empty id")
-		}
-		if !validClass(s.Class) {
-			return nil, fmt.Errorf("config: strategy %q has unknown class %q", s.ID, s.Class)
-		}
-		out = append(out, strategy.Definition{
-			ID:         s.ID,
-			Class:      s.Class,
-			NFQWSArgs:  s.NFQWSArgs,
-			BlockTypes: s.BlockTypes,
-			Notes:      s.Notes,
-		})
-	}
-	return out, nil
-}
-
-func buildHostlists(in []hostlistYAML) ([]Hostlist, error) {
-	out := make([]Hostlist, 0, len(in))
-	seen := make(map[string]bool, len(in))
-	for _, h := range in {
-		if h.Name == "" {
-			return nil, fmt.Errorf("config: hostlist with empty name")
-		}
-		// Services attach a list BY NAME, so a duplicate silently resolves last-wins and
-		// the shadowed list is fetched forever with nothing reading it.
-		if seen[h.Name] {
-			return nil, fmt.Errorf("config: duplicate hostlist %q", h.Name)
-		}
-		seen[h.Name] = true
-		if h.Out == "" {
-			return nil, fmt.Errorf("config: hostlist %q has no out path", h.Name)
-		}
-		// A list needs SOMETHING to be made of, but that something may be entirely
-		// hand-written: a pack of four domains does not deserve a URL to be published
-		// at and fetched back.
-		if len(h.Sources) == 0 && len(h.Domains) == 0 {
-			return nil, fmt.Errorf("config: hostlist %q has neither sources nor domains", h.Name)
-		}
-		for _, d := range h.Domains {
-			if !aggregate.ValidDomain(d) {
-				return nil, fmt.Errorf("config: hostlist %q: invalid domain %q", h.Name, d)
-			}
-		}
-		if h.MinKeepRatio < 0 || h.MinKeepRatio > 1 {
-			return nil, fmt.Errorf("config: hostlist %q: min_keep_ratio %v out of [0,1]", h.Name, h.MinKeepRatio)
-		}
-		out = append(out, Hostlist{
-			Name:         h.Name,
-			Out:          h.Out,
-			Sources:      toSources(h.Sources),
-			Exclude:      toSources(h.Exclude),
-			Domains:      h.Domains,
-			MinKeepRatio: h.MinKeepRatio,
-		})
-	}
-	return out, nil
-}
-
-// toSources names each source by its URL for traceability in merge errors.
-func toSources(urls []string) []aggregate.Source {
-	s := make([]aggregate.Source, 0, len(urls))
-	for _, u := range urls {
-		s = append(s, aggregate.Source{Name: u, URL: u})
-	}
-	return s
-}
-
-// buildPresets loads verbatim argv from disk — one named file, or every *.args
-// in a directory.
-//
-// One argument per line, blank lines and # comments ignored, so a file can be
-// generated by pkg/presetimport and annotated by hand.
-//
-// It REFUSES an empty or missing file rather than falling back to composing.
-// Silently composing when the operator asked for a preset is the precondition
-// that disables a feature while its flag says it is on — principle 4 — and here
-// it would also be invisible, because a composed strategy and a preset both look
-// like "nfqws is running".
-func buildPresets(p presetYAML) ([]ZapretPreset, error) {
-	var files []string
-	switch {
-	case p.Dir != "":
-		matches, err := filepath.Glob(filepath.Join(p.Dir, "*.args"))
-		if err != nil {
-			return nil, fmt.Errorf("zapret presets: %w", err)
-		}
-		if len(matches) == 0 {
-			return nil, fmt.Errorf("zapret presets: %s holds no .args files", p.Dir)
-		}
-		sort.Strings(matches)
-		files = matches
-	case p.ArgsFile != "":
-		files = []string{p.ArgsFile}
-	default:
-		return nil, nil
-	}
-	out := make([]ZapretPreset, 0, len(files))
-	for _, f := range files {
-		one, err := loadPreset(f, p.Name, len(files) == 1)
-		if err != nil {
-			return nil, err
-		}
-		out = append(out, *one)
-	}
-	return out, nil
-}
-
-func loadPreset(file, declaredName string, single bool) (*ZapretPreset, error) {
-	parsed, err := strategystore.ReadArgs(file, declaredName, single)
-	if err != nil {
-		return nil, fmt.Errorf("zapret preset: %w", err)
-	}
-	return &ZapretPreset{Name: parsed.Name, Args: parsed.Values}, nil
-}
-
-// buildZapret turns the declared instances into engine instances.
-//
-// A queue number is DERIVED, not chosen. An operator naming several instances
-// almost cannot pick disjoint numbers, and the collision it produces is the worst
-// kind: two engines on one nfqueue steal each other's packets, so everything
-// downstream still reads healthy while a measured result belongs to neither. An
-// explicit qnum is still honoured (a deployment may have a reason this code
-// cannot see), but omitting it is the normal way to say it, and the first
-// instance keeps the base so an existing single-instance config is unaffected.
 // baseQNum is the router's historical production queue. An instance that names no
 // queue takes the next number from here, so the first one keeps the base and an
 // existing single-instance config is unaffected.
 const baseQNum = 200
 
 // DeriveQNum is the ONE derivation of a production queue number from a position.
-// It is shared with the v2 projection because a second copy would be a second
-// answer to "which queue is this instance", and the two disagreeing is how two
-// instances end up sharing an NFQUEUE — which the allocator is the only thing that
-// catches, and only at start.
+//
+// A queue number is DERIVED, not chosen. An operator naming several instances almost
+// cannot pick disjoint numbers, and the collision it produces is the worst kind: two
+// engines on one nfqueue steal each other's packets, so everything downstream still
+// reads healthy while a measured result belongs to neither.
 func DeriveQNum(index int) int { return baseQNum + index }
-
-func buildZapret(z zapretYAML) ([]zapret.Instance, error) {
-	out := make([]zapret.Instance, 0, len(z.Instances))
-	for i, in := range z.Instances {
-		qnum := in.QNum
-		if qnum == 0 {
-			qnum = DeriveQNum(i)
-		}
-		out = append(out, zapret.Instance{
-			Name:      in.Name,
-			QNum:      qnum,
-			Capture:   zapret.Capture{TCP: portList(in.Capture.TCP), UDP: portList(in.Capture.UDP)},
-			Connbytes: in.Connbytes,
-		})
-	}
-	if err := zapret.Validate(out); err != nil {
-		return nil, fmt.Errorf("config: %w", err)
-	}
-	return out, nil
-}
 
 // portList stringifies a YAML port list whose items may be ints (443) or range
 // strings ("50000-50100").
@@ -645,250 +92,18 @@ func portList(items []any) []string {
 	return out
 }
 
-func buildRegistry(svcs []serviceYAML, cats map[string]registry.Category, hostlists []Hostlist) (*registry.Registry, error) {
-	lists := make(map[string]Hostlist, len(hostlists))
-	for _, hl := range hostlists {
-		lists[hl.Name] = hl
-	}
-	if len(svcs) == 0 {
-		return nil, fmt.Errorf("config: no services defined")
-	}
-	reg := &registry.Registry{Services: make(map[string]registry.Service, len(svcs))}
-	seen := make(map[string]bool, len(svcs))
-	for _, s := range svcs {
-		if s.Name == "" {
-			return nil, fmt.Errorf("config: service with empty name")
-		}
-		// Duplicates are caught across the WHOLE list, disabled included: two
-		// declarations of one name are a config error now, not a surprise the moment
-		// someone switches the second one on.
-		if seen[s.Name] {
-			return nil, fmt.Errorf("config: duplicate service %q", s.Name)
-		}
-		seen[s.Name] = true
-		if !validProbeType(s.ProbeType) {
-			return nil, fmt.Errorf("config: service %q: unknown probe_type %q (want http/tcp/stun)", s.Name, s.ProbeType)
-		}
-		if s.ProbeType == dataplane.ProbeQUIC {
-			return nil, fmt.Errorf("config: service %q: probe_type quic is per-rung only — set it on a direct/zapret chain step, not service-level (it false-fails VPN rungs)", s.Name)
-		}
-		chain, err := resolveChain(s, cats)
-		if err != nil {
-			return nil, err
-		}
-		ips, err := normalizeIPs(s.Name, s.IPs)
-		if err != nil {
-			return nil, err
-		}
-		if s.IPsFile != "" {
-			fileIPs, err := loadIPsFile(s.Name, s.IPsFile)
-			if err != nil {
-				return nil, err
-			}
-			ips = mergeCIDRs(ips, fileIPs)
-		}
-		for _, d := range s.Domains {
-			if !aggregate.ValidDomain(d) {
-				return nil, fmt.Errorf("config: service %q: invalid domain %q", s.Name, d)
-			}
-		}
-		domains, err := mergeDomainLists(s, lists)
-		if err != nil {
-			return nil, err
-		}
-		excludes, err := mergeExcludeLists(s, lists)
-		if err != nil {
-			return nil, err
-		}
-		// Group-level lever (LOT-23): inherit profile/sticky from the category when the
-		// service does not set its own (profile unset = "", sticky unset = nil pointer).
-		cat := cats[s.Category]
-		profile := s.Profile
-		if profile == "" {
-			profile = cat.DefaultProfile
-		}
-		sticky := cat.DefaultSticky
-		if s.Sticky != nil {
-			sticky = *s.Sticky
-		}
-		if !validProfile(profile) {
-			return nil, fmt.Errorf("config: service %q: unknown profile %q (want general/voice/streaming/gaming)", s.Name, profile)
-		}
-		// A switched-off service is validated like any other — a typo should surface
-		// now, not when it is switched back on — but never enters the registry. Every
-		// consumer (prober, brain, route generator, desync composer) reads the
-		// registry, so one omission here is the whole feature, with no per-consumer
-		// guard to forget.
-		if s.Disabled {
-			continue
-		}
-		reg.Services[s.Name] = registry.Service{
-			Name:            s.Name,
-			Category:        s.Category,
-			ProbeType:       s.ProbeType,
-			ProbeTarget:     s.ProbeTarget,
-			VolumeTarget:    s.VolumeTarget,
-			VolumeTargets:   s.VolumeTargets,
-			VolumeBytes:     s.VolumeBytes,
-			VolumeFloorKBps: s.VolumeFloorKBps,
-			RuleSets:        s.RuleSets,
-			Domains:         domains,
-			ExcludeDomains:  excludes,
-			SpreadClients:   s.SpreadClients,
-			IPs:             ips,
-			Sticky:          sticky,
-			Profile:         profile,
-			Static:          s.Static,
-			EscalateAfter:   s.EscalateAfter,
-			RecoverAfter:    s.RecoverAfter,
-			Priority:        s.Priority,
-			TLSFragment:     s.TLSFragment,
-			Chain:           chain,
-		}
-	}
-	if len(reg.Services) == 0 {
-		return nil, fmt.Errorf("config: every one of the %d declared services is disabled — nothing left to steer; switch one on, or stop the service instead", len(svcs))
-	}
-	return reg, nil
-}
-
-// normalizeIPs validates each inline IP/CIDR and returns canonical CIDR form
-// (bare IP → /32 or /128), rejecting junk at config time.
-func normalizeIPs(service string, ips []string) ([]string, error) {
-	out := make([]string, 0, len(ips))
-	for _, ip := range ips {
-		c, ok := aggregate.NormalizeCIDR(ip)
-		if !ok {
-			return nil, fmt.Errorf("config: service %q: invalid ip/cidr %q", service, ip)
-		}
-		out = append(out, c)
-	}
-	return out, nil
-}
-
-// maxServiceDomains bounds how many domains one service may carry once its packs are
-// merged. Generous for real use (a curated RU blocklist is a few thousand), low enough
-// to catch someone attaching a million-entry dump that would break the engines.
-const maxServiceDomains = 50000
-
-// mergeExcludeLists returns the service's own exclude_domains plus those of every
-// hostlist it names in exclude_lists.
-//
-// These become nfqws --hostlist-exclude: domains that pass through the desync RAW.
-// It is the mirror of domain_lists and exists for the same reason — an upstream
-// bundle's exclude list is 112 domains of CDNs that work direct and break under
-// desync, and a list that has to be pasted inline into every rule is a list that
-// stops being maintained the week after it is written.
-//
-// A missing pack file is not fatal, exactly as for domain_lists: it is a cache the
-// rebuild job owns. But an unknown NAME is, because a typo would silently desync
-// the very endpoints the operator was trying to spare.
-func mergeExcludeLists(s serviceYAML, lists map[string]Hostlist) ([]string, error) {
-	if len(s.ExcludeLists) == 0 {
-		return s.ExcludeDomains, nil
-	}
-	out := append([]string(nil), s.ExcludeDomains...)
-	seen := make(map[string]bool, len(out))
-	for _, d := range out {
-		seen[strings.ToLower(d)] = true
-	}
-	for _, name := range s.ExcludeLists {
-		hl, ok := lists[name]
-		if !ok {
-			return nil, fmt.Errorf("config: service %q: exclude_lists names %q, which is not a declared hostlist", s.Name, name)
-		}
-		domains, _ := aggregate.ParseList([]byte(strings.Join(hl.Domains, "\n")))
-		if data, err := os.ReadFile(hl.Out); err == nil {
-			fetched, _ := aggregate.ParseList(data)
-			domains = append(domains, fetched...)
-		}
-		for _, d := range domains {
-			d = strings.TrimPrefix(d, "*.")
-			if d == "" || seen[d] {
-				continue
-			}
-			seen[d] = true
-			out = append(out, d)
-		}
-	}
-	return out, nil
-}
-
-// mergeDomainLists returns the service's own domains plus those of every hostlist it
-// names in domain_lists — so a pack of domains is declared once (with its sources and
-// shrink guard) and attached to any number of services, instead of being pasted inline.
-//
-// Naming a list that does not exist is a config error (a typo would otherwise silently
-// route nothing). The list FILE not being readable is NOT fatal on its own — it is a
-// cache produced by the rebuild job, absent on a fresh install and possibly unreadable
-// if written by a privileged run — so an attached service degrades to whatever else it
-// declares. But a service left with NOTHING to match on is rejected loudly: it would
-// otherwise get no route rule at all (singbox.Generate skips it) AND, worse, count as
-// uncovered in zaptune, which makes the client refuse to apply the desync for EVERY
-// service. A silent whole-desync outage is exactly what a config error should prevent.
-//
-// Pack entries are normalised the way the routing layer needs: a leading "*." is
-// stripped, because the generator emits these as domain_suffix and "*.foo.com" as a
-// suffix matches nothing, while real blocklists are full of that form. Dedup is
-// case-insensitive since pack domains arrive lowercased and inline ones do not.
-func mergeDomainLists(s serviceYAML, lists map[string]Hostlist) ([]string, error) {
-	if len(s.DomainLists) == 0 {
-		return s.Domains, nil
-	}
-	out := append([]string(nil), s.Domains...)
-	seen := make(map[string]bool, len(out))
-	for _, d := range out {
-		seen[strings.ToLower(d)] = true
-	}
-	for _, name := range s.DomainLists {
-		hl, ok := lists[name]
-		if !ok {
-			return nil, fmt.Errorf("config: service %q: domain_lists names %q, which is not a declared hostlist", s.Name, name)
-		}
-		// The operator's own entries come from the DECLARATION, not the file, so they
-		// work on a fresh install where the rebuild job has not run yet — and for a
-		// pack that has no sources at all, where a file may never exist.
-		// Both go through ParseList, so a hand-typed "YouTube.com" is lowercased the
-		// same way a fetched one is — otherwise it would slip past the dedup below
-		// and reach the generator in a case nothing else uses.
-		domains, _ := aggregate.ParseList([]byte(strings.Join(hl.Domains, "\n")))
-		if data, err := os.ReadFile(hl.Out); err == nil {
-			fetched, _ := aggregate.ParseList(data)
-			domains = append(domains, fetched...)
-		} // else: not built yet, or not readable by this run; the rebuild job owns it
-		for _, d := range domains {
-			d = strings.TrimPrefix(d, "*.")
-			if d == "" || seen[d] {
-				continue
-			}
-			seen[d] = true
-			out = append(out, d)
-		}
-	}
-	// These domains are emitted INLINE (a domain_suffix array in the sing-box config and
-	// a per-service nfqws hostlist), so an enormous pack does not degrade gracefully: it
-	// bloats every generated config and every reconcile diff, and where the desync has to
-	// inline domains into argv it eventually fails to exec at all. Refuse with the reason
-	// and the alternative rather than let it break far from here.
-	if len(out) > maxServiceDomains {
-		return nil, fmt.Errorf("config: service %q: %d domains after merging domain_lists (%s) exceeds the %d limit — "+
-			"these are emitted inline into the generated config; use a binary rule_set for a list this large",
-			s.Name, len(out), strings.Join(s.DomainLists, ", "), maxServiceDomains)
-	}
-	return out, nil
-}
-
-// loadIPsFile reads extra CIDRs from a file (one per line; blank lines and
-// "#" comments ignored), normalizing each. A missing file is not an error — it
-// is the expected initial state before runtime learning populates it — but a
-// malformed CIDR is, so typos are caught. Used for the Discord voice set.
+// loadIPsFile reads extra CIDRs from a file (one per line; blank lines and "#"
+// comments ignored), normalizing each. A missing file is not an error — it is the
+// expected initial state before runtime learning populates it — but a malformed CIDR
+// is, so typos are caught. Used for the Discord voice set, and by the v1->v2
+// migration to inline what a v1 document kept on disk.
 func loadIPsFile(service, path string) ([]string, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		if os.IsNotExist(err) {
 			return nil, nil
 		}
-		return nil, fmt.Errorf("config: service %q: ips_file %q: %w", service, path, err)
+		return nil, fmt.Errorf("config: %q: ips_file %q: %w", service, path, err)
 	}
 	var out []string
 	for _, line := range strings.Split(string(data), "\n") {
@@ -898,78 +113,22 @@ func loadIPsFile(service, path string) ([]string, error) {
 		}
 		c, ok := aggregate.NormalizeCIDR(line)
 		if !ok {
-			return nil, fmt.Errorf("config: service %q: ips_file %q: invalid ip/cidr %q", service, path, line)
+			return nil, fmt.Errorf("config: %q: ips_file %q: invalid ip/cidr %q", service, path, line)
 		}
 		out = append(out, c)
 	}
 	return out, nil
 }
 
-// mergeCIDRs appends b to a, skipping CIDRs already present in a. Order-stable.
-func mergeCIDRs(a, b []string) []string {
-	seen := make(map[string]bool, len(a))
-	for _, c := range a {
-		seen[c] = true
-	}
-	for _, c := range b {
-		if !seen[c] {
-			a = append(a, c)
-			seen[c] = true
-		}
-	}
-	return a
-}
-
-// resolveChain returns a service's chain: its explicit steps if any, otherwise
-// the DefaultChain inherited from its category. Positions are assigned here so
-// both paths produce a consistent denormalized chain.
-func resolveChain(s serviceYAML, cats map[string]registry.Category) ([]registry.ChainStep, error) {
-	var steps []registry.ChainStep
-	if len(s.Chain) > 0 {
-		for _, step := range s.Chain {
-			steps = append(steps, registry.ChainStep{State: step.State, StrategyClass: step.Class, StrategyID: step.StrategyID, ProbeType: step.ProbeType, ProbeTarget: step.ProbeTarget})
-		}
-	} else {
-		cat, ok := cats[s.Category]
-		if !ok {
-			return nil, fmt.Errorf("config: service %q has no chain and unknown category %q", s.Name, s.Category)
-		}
-		if len(cat.DefaultChain) == 0 {
-			return nil, fmt.Errorf("config: service %q has no chain and category %q has no default_chain", s.Name, s.Category)
-		}
-		steps = append(steps, cat.DefaultChain...)
-	}
-	out := make([]registry.ChainStep, 0, len(steps))
-	for i, step := range steps {
-		if !validState(step.State) {
-			return nil, fmt.Errorf("config: service %q step %d: unknown state %q", s.Name, i, step.State)
-		}
-		if !validClass(step.StrategyClass) {
-			return nil, fmt.Errorf("config: service %q step %d: unknown class %q", s.Name, i, step.StrategyClass)
-		}
-		if !validProbeType(step.ProbeType) {
-			return nil, fmt.Errorf("config: service %q step %d: unknown probe_type %q (want http/tcp/stun/quic)", s.Name, i, step.ProbeType)
-		}
-		// A box-direct QUIC probe only represents the direct/zapret tiers; on a
-		// VPN/emergency rung it would false-fail (the tunnel carries no direct
-		// HTTP/3 path). Enforce the LOT-3 footgun structurally.
-		if step.ProbeType == dataplane.ProbeQUIC && step.StrategyClass != strategy.ClassDirect && step.StrategyClass != strategy.ClassZapret {
-			return nil, fmt.Errorf("config: service %q step %d: probe_type quic is only valid on direct/zapret rungs, not %q", s.Name, i, step.StrategyClass)
-		}
-		out = append(out, registry.ChainStep{Position: i, State: step.State, StrategyClass: step.StrategyClass, StrategyID: step.StrategyID, ProbeType: step.ProbeType, ProbeTarget: step.ProbeTarget})
-	}
-	return out, nil
-}
-
 // injectBuiltinPools adds the standard pools (vpn_url_test, vpn_url_test_udp,
-// emergency_pool) that a VPN/emergency chain step, subscription-via-pool, or
-// device policy REFERENCES but the config never declared. The builtin categories
-// name exactly these three, so without this a config that relies on category
-// defaults (`category: streaming`) would generate empty url-test groups unless it
-// also hand-copied the three pool blocks that pools.Builtin already provides. A
-// pool the config declares itself is authoritative and never overwritten; a
-// referenced name that is not one of the builtins is left alone (it may be a
-// user pool declared elsewhere, or a genuine typo the generator surfaces).
+// emergency_pool) that a VPN/emergency chain step, subscription-via-pool, or device
+// policy REFERENCES but the document never declared. The builtin categories name
+// exactly these three, so without this a config that relies on category defaults
+// would generate empty url-test groups unless it also hand-copied the three pool
+// blocks that pools.Builtin already provides. A pool the document declares itself is
+// authoritative and never overwritten; a referenced name that is not one of the
+// builtins is left alone (it may be a user pool declared elsewhere, or a genuine typo
+// the generator surfaces).
 func injectBuiltinPools(set *pools.Set, reg *registry.Registry, subViaPool string, devices []registry.Device) {
 	referenced := map[string]bool{}
 	for _, svc := range reg.Services {
@@ -1001,49 +160,6 @@ func injectBuiltinPools(set *pools.Set, reg *registry.Registry, subViaPool strin
 	}
 }
 
-func buildPools(in map[string]poolYAML) (*pools.Set, error) {
-	set := &pools.Set{Pools: make(map[string]pools.Pool, len(in))}
-	for name, p := range in {
-		for _, c := range p.Filter.Caps {
-			if c != pools.CapTCP && c != pools.CapUDPNative {
-				return nil, fmt.Errorf("config: pool %q: unknown cap %q", name, c)
-			}
-		}
-		for field, v := range map[string]string{"interval": p.Interval, "idle_timeout": p.IdleTimeout} {
-			if v != "" {
-				if _, err := time.ParseDuration(v); err != nil {
-					return nil, fmt.Errorf("config: pool %q: %s %q: %w", name, field, v, err)
-				}
-			}
-		}
-		set.Pools[name] = pools.Pool{
-			Name:        name,
-			Type:        p.Type,
-			Limit:       p.Limit,
-			Warmup:      p.Warmup,
-			Interval:    p.Interval,
-			IdleTimeout: p.IdleTimeout,
-			Filter: pools.Filter{
-				Caps:             p.Filter.Caps,
-				TagsInclude:      p.Filter.TagsInclude,
-				TagsExclude:      p.Filter.TagsExclude,
-				CountriesInclude: lowerAll(p.Filter.CountriesInclude),
-				CountriesExclude: lowerAll(p.Filter.CountriesExclude),
-			},
-		}
-	}
-	return set, nil
-}
-
-func validState(s string) bool {
-	switch s {
-	case registry.StatePreferred, registry.StateAltZapret, registry.StateVPN,
-		registry.StateEmergency, registry.StateBroken, registry.StateLocked:
-		return true
-	}
-	return false
-}
-
 func lowerAll(in []string) []string {
 	if len(in) == 0 {
 		return nil
@@ -1053,28 +169,4 @@ func lowerAll(in []string) []string {
 		out[i] = strings.ToLower(strings.TrimSpace(s))
 	}
 	return out
-}
-
-func validProfile(p string) bool {
-	switch p {
-	case "", "general", "voice", "streaming", "gaming":
-		return true
-	}
-	return false
-}
-
-func validProbeType(t string) bool {
-	switch t {
-	case "", dataplane.ProbeHTTP, dataplane.ProbeTCP, dataplane.ProbeSTUN, dataplane.ProbeQUIC:
-		return true
-	}
-	return false
-}
-
-func validClass(c string) bool {
-	switch c {
-	case strategy.ClassZapret, strategy.ClassVPN, strategy.ClassEmergency, strategy.ClassDirect:
-		return true
-	}
-	return false
 }

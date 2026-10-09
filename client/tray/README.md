@@ -31,4 +31,7 @@ go build -o lotsman-tray .
 
 - Proper per-panel theming: a macOS template icon and SNI theme-following on Linux;
   the embedded state colours are a first pass.
-- A richer menu (per-service recheck, quick toggles) once those endpoints land.
+- A richer menu: the per-rule recheck and enable/disable endpoints both EXIST now
+  (`POST /service/{name}/recheck`, `POST /service/{name}/enabled`) — only the tray
+  does not call them yet. The enable/disable one edits that rule's own file and
+  preserves its comments.

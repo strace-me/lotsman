@@ -5,7 +5,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/strace-me/lotsman/pkg/config"
+	"github.com/strace-me/lotsman/pkg/configv2"
 )
 
 // The owner's question, made mechanical: run ALT12 whole and let sing-box feed it.
@@ -16,7 +16,7 @@ func TestPresetModeAppliesTheBundleVerbatim(t *testing.T) {
 	var applied []string
 	c := rotCore(t, &applied)
 	want := []string{"--filter-tcp=443", "--hostlist=/opt/zapret/list-google.txt", "--dpi-desync=hostfakesplit"}
-	c.zapExec.presets = []config.ZapretPreset{{Name: "ALT12", Args: want}}
+	c.zapExec.presets = []configv2.ResolvedOverride{{Name: "ALT12", Args: want}}
 
 	got := c.rankedCandidates("youtube", "", 3)
 	if len(got) != 1 || got[0] != "ALT12" {
@@ -34,10 +34,19 @@ func TestAnEmptyPresetIsRefusedRatherThanIgnored(t *testing.T) {
 	if err := os.WriteFile(empty, []byte("# nothing but a comment\n\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	doc := "services:\n  - name: web\n    probe_target: https://example.com/\n    domains: [example.com]\n" +
-		"    chain:\n      - { state: PREFERRED, class: zapret }\n" +
-		"zapret:\n  preset:\n    name: ALT12\n    args_file: " + empty + "\n"
-	_, err := config.Parse([]byte(doc))
+	// The override belongs under `desync:`, not appended after the document — it is a
+	// sibling of `instances:`, and a fixture that puts it under `pools:` fails to parse
+	// for a reason that has nothing to do with what it is testing.
+	doc := `version: 2
+desync:
+  instances:
+    nfqws1-main: { engine: nfqws1, enabled: true, capture: { tcp: [443] } }
+  override:
+    name: ALT12
+    args_file: ` + empty + `
+pools: {}
+`
+	_, _, err := testConfigErr(t, doc, map[string]string{"youtube.yaml": oneRule})
 	if err == nil {
 		t.Fatal("an empty preset was accepted, so the operator's instruction silently became a no-op")
 	}
@@ -55,7 +64,7 @@ func TestEveryDeclaredPresetIsACandidate(t *testing.T) {
 	c := rotCore(t, &applied)
 	for _, n := range []string{"ALT", "ALT2", "ALT12", "EXP", "SIMPLE FAKE"} {
 		c.zapExec.presets = append(c.zapExec.presets,
-			config.ZapretPreset{Name: n, Args: []string{"--filter-tcp=443", "--dpi-desync=fake"}})
+			configv2.ResolvedOverride{Name: n, Args: []string{"--filter-tcp=443", "--dpi-desync=fake"}})
 	}
 	got := c.rankedCandidates("youtube", "", 3)
 	if len(got) != 3 {
