@@ -161,6 +161,30 @@ All three were found by reading code or by a mock, and all three would have ship
   text, which presents as "the server is broken" rather than as "a header went out one
   line too late".
 
+### The `auto` sentinel, which is a name that resolves to no file
+
+- **A v1 config with any unpinned zapret rung could not start, and one that got past
+  the check took nfqws down.** v1 spelled "let whatever works here run" as an EMPTY
+  `strategy_id` on an `ALT_ZAPRET` rung, and the v1→v2 migration turns exactly that
+  into `"auto"` — correctly, and `configv2.AutoStrategy` documents it. But the sentinel
+  was then handled as if it were a launcher name in two places, and it is not one:
+  `zapretStrategyIDs` counted it toward the startup guard, which refused to boot over a
+  missing `auto.sh`; and `ScriptSwitcher.Enable` reached `switchTo` with it, which ran
+  `ln -sfn .../auto.sh active.sh` and restarted nfqws onto a file that does not exist.
+  That second one is an OUTAGE, not a failed start: the engine comes back dead, nft's
+  `flags bypass` keeps traffic flowing undesynced so nothing looks broken, and the
+  last-known-good rollback cannot rescue it because no live engine was ever observed to
+  seed the floor. Both now skip the sentinel — the guard because a sentinel is never
+  symlinked, `Enable` because the reconciler or a configured `desync.override` owns the
+  active strategy. This is why the v1 router config could not be migrated onto rc1 at
+  all: every one of its four zapret rungs carried the value.
+- **`auxOffsets` are anchored to the end of production, so `-prospect-qnum` is almost
+  always stale.** A config carried forward from before that fix pins the prospector to
+  the number the sandbox now derives, and the allocator refuses to start rather than
+  let a packet reach two queues. Not a code defect — but nothing told the operator the
+  flag had become a lie, so the flag has to be re-read as a function of `qnum` and
+  `instances` rather than copied between boxes.
+
 ### First run in the window, and one reader for a deployment
 
 - **The window can now create the first configuration.** This closed a real deadlock

@@ -11,6 +11,7 @@ import (
 	"log/slog"
 	"sync"
 
+	"github.com/strace-me/lotsman/pkg/configv2"
 	"github.com/strace-me/lotsman/pkg/dataplane"
 	"github.com/strace-me/lotsman/pkg/registry"
 	"github.com/strace-me/lotsman/pkg/strategy"
@@ -139,6 +140,19 @@ func (s *ScriptSwitcher) Enable(ctx context.Context, service, strategyID string)
 	// we have done the routing-to-direct above; the nfqws strategy itself is the
 	// reconciler's job, so do not symlink/restart here.
 	if s.external {
+		return nil
+	}
+
+	// "auto" is a sentinel, not a launcher name. The rung defers to whatever the
+	// reconciler or the configured override has proved works here, so there is no
+	// auto.sh to symlink: `switchTo` would point active.sh at a missing file and
+	// the restart would take nfqws down with no live engine left to roll back to.
+	// That is the outage the startup launcher guard refuses to risk, arriving at
+	// runtime instead — and it fired on every config migrated from v1, where an
+	// empty strategy_id became exactly this value.
+	if strategyID == configv2.AutoStrategy {
+		s.log.Debug("zapret rung defers to the reconciler; leaving the active strategy alone",
+			"engine", s.class, "service", service)
 		return nil
 	}
 

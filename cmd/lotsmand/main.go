@@ -1362,10 +1362,17 @@ func zapretStrategyIDs(reg *registry.Registry, catalog *strategy.Catalog) []stri
 	seen := map[string]bool{}
 	var out []string
 	add := func(id string) {
-		if id != "" && !seen[id] {
-			seen[id] = true
-			out = append(out, id)
+		// "auto" is a sentinel, not a launcher name: a rung that defers to the KB
+		// is resolved to a concrete recipe at escalation (core.chosenRecipe), so it
+		// never reaches the executor as a name and must never be symlinked active.
+		// Counting it as a strategy is what made every config migrated from v1 —
+		// where an empty strategy_id became "auto" — refuse to start over a
+		// launcher that was never supposed to exist.
+		if id == "" || id == configv2.AutoStrategy || seen[id] {
+			return
 		}
+		seen[id] = true
+		out = append(out, id)
 	}
 	for _, svc := range reg.Services {
 		for _, step := range svc.Chain {

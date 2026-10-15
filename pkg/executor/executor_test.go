@@ -302,6 +302,14 @@ func (r *recordRunner) linkedScripts() []string {
 	return out
 }
 
+func (r *recordRunner) cmdsNames() []string {
+	var out []string
+	for _, c := range r.cmds {
+		out = append(out, c[0])
+	}
+	return out
+}
+
 func switcherFor(t *testing.T, alive func(context.Context) bool) (*ScriptSwitcher, *recordRunner) {
 	t.Helper()
 	r := &recordRunner{}
