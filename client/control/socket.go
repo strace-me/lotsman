@@ -1,8 +1,12 @@
 package control
 
 import (
+	"errors"
+	"net"
 	"os"
 	"path/filepath"
+	"syscall"
+	"time"
 )
 
 // SystemSocketPath is where the root systemd service (the daily-driver) puts its
@@ -30,7 +34,7 @@ func DefaultSocketPath() string {
 // chooseSocketPath is the decision itself, with both candidates passed in so a
 // test can stage them; DefaultSocketPath supplies the real ones.
 func chooseSocketPath(perUser, system string) string {
-	if _, err := os.Stat(perUser); err == nil {
+	if _, err := os.Stat(perUser); err == nil && answered(perUser) {
 		return perUser
 	}
 	// An error that is NOT "does not exist" is evidence the system socket IS there
@@ -48,4 +52,24 @@ func chooseSocketPath(perUser, system string) string {
 		return system
 	}
 	return perUser
+}
+
+// answered reports whether something is actually accepting on a unix socket.
+//
+// Existence is not liveness: a socket file outlives the process that bound it, so
+// a per-user socket left behind by a same-user run that has since exited will sit
+// there forever. Checking for it by stat is what made a healthy root service look
+// stopped — the window picked the stale file, dialled it, and got ECONNREFUSED,
+// which reads as "the service is down" rather than as "that path is not the service".
+//
+// Only ECONNREFUSED is treated as "nobody is home". Every other failure means the
+// socket IS the live one and we are simply not allowed to talk to it, which the
+// caller reports as a permission error — the truth, and it names the real fix.
+func answered(path string) bool {
+	c, err := net.DialTimeout("unix", path, 250*time.Millisecond)
+	if err != nil {
+		return !errors.Is(err, syscall.ECONNREFUSED)
+	}
+	_ = c.Close()
+	return true
 }

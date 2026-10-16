@@ -1,6 +1,7 @@
 package control
 
 import (
+	"net"
 	"os"
 	"path/filepath"
 	"testing"
@@ -65,5 +66,56 @@ func TestDefaultSocketPathIgnoresAnAbsentSystemSocket(t *testing.T) {
 	perUser := filepath.Join(t.TempDir(), "per-user.sock")
 	if got := chooseSocketPath(perUser, filepath.Join(t.TempDir(), "nope.sock")); got != perUser {
 		t.Errorf("chose %q, want the per-user path when neither exists", got)
+	}
+}
+
+// A unix socket file survives the process that bound it. A same-user run that
+// exited leaves one behind, and while it sits there the stat-based check kept
+// choosing it over a perfectly healthy root service — the window then dialled the
+// corpse and got ECONNREFUSED, which is indistinguishable from "service stopped".
+// Seen on the ThinkPad after the per-user run gave way to the systemd unit.
+func TestDefaultSocketPathSkipsAStalePerUserSocket(t *testing.T) {
+	dir := t.TempDir()
+	stale := filepath.Join(dir, "stale.sock")
+	live := filepath.Join(dir, "live.sock")
+
+	// Bind, then close: the file remains, nobody is accepting.
+	l, err := net.Listen("unix", stale)
+	if err != nil {
+		t.Fatalf("stage stale socket: %v", err)
+	}
+	_ = l.Close()
+
+	srv, err := net.Listen("unix", live)
+	if err != nil {
+		t.Fatalf("stage live socket: %v", err)
+	}
+	defer srv.Close()
+
+	if got := chooseSocketPath(stale, live); got != live {
+		t.Errorf("chose %q; a socket nobody is listening on must not shadow a live service", got)
+	}
+}
+
+// The guard above must not throw away a real same-user socket: that is the case it
+// was written for, and the daily-driver fallback must never win over it.
+func TestDefaultSocketPathKeepsALivePerUserSocket(t *testing.T) {
+	dir := t.TempDir()
+	perUser := filepath.Join(dir, "per-user.sock")
+	system := filepath.Join(dir, "system.sock")
+
+	srv, err := net.Listen("unix", perUser)
+	if err != nil {
+		t.Fatalf("stage live per-user socket: %v", err)
+	}
+	defer srv.Close()
+	other, err := net.Listen("unix", system)
+	if err != nil {
+		t.Fatalf("stage live system socket: %v", err)
+	}
+	defer other.Close()
+
+	if got := chooseSocketPath(perUser, system); got != perUser {
+		t.Errorf("chose %q, want the live per-user socket %q", got, perUser)
 	}
 }
