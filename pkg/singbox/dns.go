@@ -168,3 +168,24 @@ func dnsSection(o *DNSOptions, directRuleSets, zapretRuleSets, zapretDomains []s
 	}
 	return dns, true
 }
+
+// defaultDomainResolver names the resolver sing-box uses for an outbound that
+// dials a HOSTNAME — a node server given as a domain. It has to answer
+// off-tunnel, because the tunnel is the thing those hostnames are for; asking
+// the detoured resolver is a circular wait with no error message.
+//
+// The zapret role wins: it is a public resolver off-VPN, so it is reachable
+// before any node exists and it answers unpoisoned, which is what a provider's
+// own hostname wants. The office/local split comes next and the detoured final
+// last, so a document declaring neither still gets a working pointer.
+func defaultDomainResolver(d *DNSOptions) string {
+	if d == nil {
+		return ""
+	}
+	for _, tag := range []string{d.Zapret, d.Direct, d.Final} {
+		if tag != "" {
+			return tag
+		}
+	}
+	return ""
+}

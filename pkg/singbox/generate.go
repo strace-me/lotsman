@@ -1164,11 +1164,21 @@ func Generate(services []registry.Service, devices []registry.Device, nodes []su
 				// dials a HOSTNAME (a node server given as a domain). Point route at the
 				// direct/local resolver so those hostnames resolve OFF-tunnel — the
 				// tunnel isn't up yet when connecting to its own exit node.
-				ddr := opts.DNS.Direct
-				if ddr == "" {
-					ddr = opts.DNS.Final
-				}
-				if ddr != "" {
+				//
+				// "Direct" is the WRONG answer to that question, though, and the failure
+				// is silent and total: a node's hostname is the provider's domain, not
+				// an office one, so the office/local resolver may not even know it —
+				// and "local" partly means the resolver the tunnel itself provided, so
+				// it is least reliable exactly when it is needed. On the ThinkPad every
+				// node read `lookup <node>: context deadline exceeded`, no tunnel came
+				// up, and the symptom downstream was a dead YouTube with no mention of
+				// DNS anywhere.
+				//
+				// The zapret role is a public resolver off-VPN — unpoisoned, direct, and
+				// reachable before any node exists — which is what a provider hostname
+				// wants. Prefer it; the old order stays as the fallback for a document
+				// that declares no zapret resolver.
+				if ddr := defaultDomainResolver(opts.DNS); ddr != "" {
 					route["default_domain_resolver"] = map[string]any{"server": ddr}
 				}
 			}

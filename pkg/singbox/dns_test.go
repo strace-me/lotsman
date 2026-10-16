@@ -212,3 +212,31 @@ func TestGenerateEmitsSplitDNSWithSurvivingDetour(t *testing.T) {
 		t.Errorf("route.default_domain_resolver must point at the direct resolver: %v", route["default_domain_resolver"])
 	}
 }
+
+// A node whose server is given as a domain cannot be reached until that domain
+// resolves, and it has to resolve OFF-tunnel — the tunnel is what is being built.
+// default_domain_resolver is sing-box's hook for exactly that, so pointing it at
+// the office/local resolver is a deadlock wearing a working config's clothes: the
+// resolver that would answer for the node is the one that needs a node.
+func TestDefaultDomainResolverPrefersThePublicResolverOverLocal(t *testing.T) {
+	got := defaultDomainResolver(&DNSOptions{
+		Servers: []DNSServer{{Tag: "lan", Type: "local"}, {Tag: "zapret-dns", Type: "tls"}},
+		Direct:  "lan",        // the office/local split
+		Zapret:  "zapret-dns", // public, off-VPN
+		Final:   "cloudflare", // detoured through the very nodes being resolved
+	})
+	if got != "zapret-dns" {
+		t.Errorf("default_domain_resolver = %q; a provider hostname wants a public resolver, and Final here detours through the nodes being resolved", got)
+	}
+}
+
+// A document that declares no zapret resolver must still work — the old order is
+// the fallback, not a removed behaviour.
+func TestDefaultDomainResolverFallsBackWhenNoZapretResolver(t *testing.T) {
+	if got := defaultDomainResolver(&DNSOptions{Direct: "lan", Final: "cloudflare"}); got != "lan" {
+		t.Errorf("default_domain_resolver = %q, want the direct resolver when no zapret resolver is declared", got)
+	}
+	if got := defaultDomainResolver(&DNSOptions{Final: "cloudflare"}); got != "cloudflare" {
+		t.Errorf("default_domain_resolver = %q, want final as the last resort", got)
+	}
+}
