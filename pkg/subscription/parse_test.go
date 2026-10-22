@@ -135,23 +135,44 @@ func TestParsePortOutOfRange(t *testing.T) {
 }
 
 func TestParseSingbox(t *testing.T) {
-	js := `{"outbounds":[
-		{"type":"direct","tag":"direct"},
-		{"type":"hysteria2","tag":"hy-1","server":"5.6.7.8","server_port":443},
-		{"type":"selector","tag":"vpn","outbounds":["hy-1"]}
-	]}`
-	nodes, err := Parse([]byte(js), FormatSingbox, "sb")
-	if err != nil {
-		t.Fatalf("singbox: %v", err)
+	cases := []struct {
+		name  string
+		in    string
+		wantN int
+	}{
+		{"single-object", `{"outbounds":[
+			{"type":"direct","tag":"direct"},
+			{"type":"hysteria2","tag":"hy-1","server":"5.6.7.8","server_port":443},
+			{"type":"selector","tag":"vpn","outbounds":["hy-1"]}
+		]}`, 1},
+		{"array", `[{"outbounds":[
+			{"type":"hysteria2","tag":"hy-1","server":"5.6.7.8","server_port":443},
+			{"type":"direct","tag":"direct"}
+		]},{"outbounds":[
+			{"type":"vless","tag":"vl-1","server":"9.9.9.9","server_port":8443},
+			{"type":"direct","tag":"direct"}
+		]}]`, 2},
 	}
-	if len(nodes) != 1 {
-		t.Fatalf("got %d nodes, want 1 (direct/selector skipped)", len(nodes))
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			nodes, err := Parse([]byte(c.in), FormatSingbox, "sb")
+			if err != nil {
+				t.Fatalf("singbox: %v", err)
+			}
+			if len(nodes) != c.wantN {
+				t.Fatalf("got %d nodes, want %d", len(nodes), c.wantN)
+			}
+			if !nodes[0].Native {
+				t.Error("sing-box node must be Native (Raw is a native outbound)")
+			}
+		})
 	}
-	if nodes[0].Server != "5.6.7.8" || nodes[0].Port != 443 {
-		t.Errorf("got %s:%d, want 5.6.7.8:443", nodes[0].Server, nodes[0].Port)
-	}
-	if !nodes[0].Native {
-		t.Error("sing-box node must be Native (Raw is a native outbound)")
+}
+
+func TestDetectSingboxArray(t *testing.T) {
+	js := `[{"outbounds":[{"type":"vless","tag":"a","server":"1.2.3.4","server_port":443}]}]`
+	if got := Detect([]byte(js)); got != FormatSingbox {
+		t.Errorf("Detect = %s, want %s", got, FormatSingbox)
 	}
 }
 

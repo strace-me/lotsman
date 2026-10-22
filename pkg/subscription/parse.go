@@ -78,6 +78,11 @@ func Detect(data []byte) Format {
 		if strings.Contains(s, "\"outbounds\"") {
 			return FormatSingbox
 		}
+	case '[':
+		// Liberty returns a JSON array of sing-box configs.
+		if strings.Contains(s, "\"outbounds\"") {
+			return FormatSingbox
+		}
 	}
 	if strings.Contains(s, "proxies:") {
 		return FormatClash
@@ -141,32 +146,50 @@ func parseClash(data []byte, source string) ([]Node, error) {
 }
 
 func parseSingbox(data []byte, source string) ([]Node, error) {
-	var doc struct {
-		Outbounds []map[string]any `json:"outbounds"`
-	}
-	if err := json.Unmarshal(data, &doc); err != nil {
-		return nil, fmt.Errorf("subscription: singbox json: %w", err)
-	}
-	out := make([]Node, 0, len(doc.Outbounds))
-	for _, o := range doc.Outbounds {
-		proto := singboxType(asString(o["type"]))
-		if proto == "" {
-			continue // skip non-node outbounds (direct, block, selector, ...)
+	// Liberty returns a JSON array of sing-box configs; a plain object is also valid.
+	var docs []map[string]any
+	if err := json.Unmarshal(data, &docs); err != nil {
+		// Maybe it's a single config object, not an array.
+		var single map[string]any
+		if err2 := json.Unmarshal(data, &single); err2 != nil {
+			return nil, fmt.Errorf("subscription: singbox json: %w", err)
 		}
-		n := Node{
-			Protocol:    proto,
-			Server:      asString(o["server"]),
-			Port:        asInt(o["server_port"]),
-			DisplayName: asString(o["tag"]),
-		}
-		if n.Server == "" || !validPort(n.Port) {
+		docs = []map[string]any{single}
+	}
+	out := make([]Node, 0, len(docs))
+	for _, doc := range docs {
+		rawOutbounds, ok := doc["outbounds"]
+		if !ok {
 			continue
 		}
-		raw, _ := json.Marshal(o)
-		n.Raw = string(raw)
-		n.Native = true // Raw is a native sing-box outbound: emit it verbatim
-		n.finalize(source)
-		out = append(out, n)
+		outbounds, ok := rawOutbounds.([]any)
+		if !ok {
+			continue
+		}
+		for _, raw := range outbounds {
+			o, ok := raw.(map[string]any)
+			if !ok {
+				continue
+			}
+			proto := singboxType(asString(o["type"]))
+			if proto == "" {
+				continue // skip non-node outbounds (direct, block, selector, ...)
+			}
+			n := Node{
+				Protocol:    proto,
+				Server:      asString(o["server"]),
+				Port:        asInt(o["server_port"]),
+				DisplayName: asString(o["tag"]),
+			}
+			if n.Server == "" || !validPort(n.Port) {
+				continue
+			}
+			raw, _ := json.Marshal(o)
+			n.Raw = string(raw)
+			n.Native = true // Raw is a native sing-box outbound: emit it verbatim
+			n.finalize(source)
+			out = append(out, n)
+		}
 	}
 	return out, nil
 }
@@ -241,7 +264,7 @@ func clashType(t string) string {
 
 func singboxType(t string) string {
 	switch strings.ToLower(t) {
-	case "hysteria2":
+	case "hysteria", "hysteria2":
 		return ProtoHysteria2
 	case "vless":
 		return ProtoVLESS
