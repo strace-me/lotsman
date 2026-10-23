@@ -171,18 +171,25 @@ func parseSingbox(data []byte, source string) ([]Node, error) {
 			if !ok {
 				continue
 			}
+			// Support both native sing-box ("type"/"server"/"server_port")
+			// and v2ray-style ("protocol"/"settings.vnext"/"settings.servers")
+			// outbounds, as used by liberty and similar providers.
 			proto := singboxType(asString(o["type"]))
+			if proto == "" {
+				proto = singboxType(asString(o["protocol"]))
+			}
 			if proto == "" {
 				continue // skip non-node outbounds (direct, block, selector, ...)
 			}
+			server, port := extractServerPort(o)
+			if server == "" || !validPort(port) {
+				continue
+			}
 			n := Node{
 				Protocol:    proto,
-				Server:      asString(o["server"]),
-				Port:        asInt(o["server_port"]),
+				Server:      server,
+				Port:        port,
 				DisplayName: asString(o["tag"]),
-			}
-			if n.Server == "" || !validPort(n.Port) {
-				continue
 			}
 			raw, _ := json.Marshal(o)
 			n.Raw = string(raw)
@@ -192,6 +199,35 @@ func parseSingbox(data []byte, source string) ([]Node, error) {
 		}
 	}
 	return out, nil
+}
+
+// extractServerPort pulls the server address and port from an outbound,
+// supporting both native sing-box (top-level server/server_port) and v2ray-style
+// nested fields (settings.vnext[0] or settings.servers[0]).
+func extractServerPort(o map[string]any) (string, int) {
+	// Native sing-box format.
+	if s := asString(o["server"]); s != "" {
+		return s, asInt(o["server_port"])
+	}
+	// v2ray-style: settings.vnext[0] (vless/trojan/vmess)
+	if settings, ok := o["settings"].(map[string]any); ok {
+		if vnext, ok := settings["vnext"].([]any); ok && len(vnext) > 0 {
+			if v, ok := vnext[0].(map[string]any); ok {
+				return asString(v["address"]), asInt(v["port"])
+			}
+		}
+		// shadowsocks style: settings.servers[0]
+		if servers, ok := settings["servers"].([]any); ok && len(servers) > 0 {
+			if srv, ok := servers[0].(map[string]any); ok {
+				return asString(srv["address"]), asInt(srv["port"])
+			}
+		}
+		// hysteria v2 native: settings.address / settings.port
+		if addr := asString(settings["address"]); addr != "" {
+			return addr, asInt(settings["port"])
+		}
+	}
+	return "", 0
 }
 
 func parseV2rayBase64(data []byte, source string) ([]Node, error) {

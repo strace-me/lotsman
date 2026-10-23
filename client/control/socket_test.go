@@ -14,9 +14,14 @@ func TestDefaultSocketPathPrefersTheExistingPerUserSocket(t *testing.T) {
 	if err := os.MkdirAll(filepath.Dir(perUser), 0o700); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(perUser, nil, 0o600); err != nil {
-		t.Fatal(err)
+	// A real listening socket, not a stale file: existence alone is no longer
+	// enough (a unix socket outlives the process that bound it), so the test
+	// has to stage an actual listener for the "wins" case.
+	l, err := net.Listen("unix", perUser)
+	if err != nil {
+		t.Fatalf("stage live socket: %v", err)
 	}
+	defer l.Close()
 	if got := DefaultSocketPath(); got != perUser {
 		t.Errorf("DefaultSocketPath() = %q, want the existing per-user socket %q", got, perUser)
 	}

@@ -227,3 +227,42 @@ func TestParseStripsBOM(t *testing.T) {
 		t.Fatalf("got %d nodes, want 1 (BOM stripped)", len(nodes))
 	}
 }
+
+func TestParseLibertyStyleSingboxArray(t *testing.T) {
+	// Liberty returns a JSON array of sing-box configs, but outbounds use
+	// v2ray-style fields: "protocol" instead of "type", and server/port nested
+	// in settings.vnext[0] or settings.servers[0].
+	js := `[{"outbounds":[
+		{"tag":"proxy-vless","protocol":"vless","settings":{"vnext":[{"address":"vless.example.com","port":8443,"users":[{"id":"uuid","encryption":"none","flow":"xtls-rprx-vision"}]}]}},
+		{"tag":"proxy-hysteria","protocol":"hysteria","settings":{"address":"hy.example.com","port":8449,"version":2}},
+		{"tag":"proxy-ss","protocol":"shadowsocks","settings":{"servers":[{"address":"ss.example.com","port":2030,"password":"pass","method":"2022-blake3-aes-256-gcm"}]}},
+		{"tag":"direct","protocol":"freedom","settings":{"domainStrategy":"UseIP"}},
+		{"tag":"block","protocol":"blackhole","settings":{"response":{"type":"http"}}}
+	]}]`
+	nodes, err := Parse([]byte(js), FormatSingbox, "liberty")
+	if err != nil {
+		t.Fatalf("liberty parse: %v", err)
+	}
+	if len(nodes) != 3 {
+		t.Fatalf("got %d nodes, want 3", len(nodes))
+	}
+	// vless
+	if nodes[0].Protocol != ProtoVLESS || nodes[0].Server != "vless.example.com" || nodes[0].Port != 8443 {
+		t.Errorf("node0 = %s %s:%d, want vless vless.example.com:8443", nodes[0].Protocol, nodes[0].Server, nodes[0].Port)
+	}
+	// hysteria
+	if nodes[1].Protocol != ProtoHysteria2 || nodes[1].Server != "hy.example.com" || nodes[1].Port != 8449 {
+		t.Errorf("node1 = %s %s:%d, want hysteria2 hy.example.com:8449", nodes[1].Protocol, nodes[1].Server, nodes[1].Port)
+	}
+	// shadowsocks
+	if nodes[2].Protocol != ProtoShadowsocks || nodes[2].Server != "ss.example.com" || nodes[2].Port != 2030 {
+		t.Errorf("node2 = %s %s:%d, want shadowsocks ss.example.com:2030", nodes[2].Protocol, nodes[2].Server, nodes[2].Port)
+	}
+}
+
+func TestDetectLibertyArray(t *testing.T) {
+	js := `[{"dns":{"servers":["https://8.8.8.8/dns-query"]},"outbounds":[{"type":"vless","tag":"a","server":"1.2.3.4","server_port":443}]}]`
+	if got := Detect([]byte(js)); got != FormatSingbox {
+		t.Errorf("Detect = %s, want %s", got, FormatSingbox)
+	}
+}
